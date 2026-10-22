@@ -25,6 +25,18 @@ namespace agensio {
 // (Django's ManifestStaticFilesStorage: base.85e6f9d19e42.css), a name that changes with its content.
 bool content_hashed(std::string_view path) noexcept;
 
+// Whether a file read on a cache miss is settled enough to be cached (2026-10-22): not modified
+// within the last second, and unchanged while it was read (`after`: the descriptor's fstat once the
+// bytes are in; `before` again when nothing was read). An in-place update (`npm run build` into
+// public/build) is served while it writes, and a prefix cached then went to every client for a
+// second with the location's lifetime (Laravel's /build/: immutable for a year). An mtime more than
+// a second ahead (an archive's, a skewed NFS clock's) is no writer at work and counts as settled.
+// A file that is not settled is served once, uncached, with no-store.
+inline bool file_settled(const FileInfo& before, const FileInfo& after, std::int64_t now) noexcept {
+    if (after.size != before.size || after.mtime != before.mtime) return false;
+    return before.mtime < now - 1 || before.mtime > now + 1;
+}
+
 // The refused-endings rule: a path ends with one of `deny` when its last characters match
 // case-insensitively, trailing dots ignored (`x.PHP`, `x.PhP`, `x.php.` are all `x.php`;
 // Drupal's .htaccess spells the same rule). `x.php.jpg` is a .jpg and passes. Pure, so

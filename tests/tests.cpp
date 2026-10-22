@@ -537,6 +537,10 @@ static void test_precompressed() {
     write("a.css.gz", gz);
     write("b.css", css);
     write("b.css.br", br);
+    // Built a minute ago: a file modified within the last second is one still being written, and is
+    // not cached (file_settled, checked at the end).
+    for (const char* name : {"a.css", "a.css.br", "a.css.gz", "b.css", "b.css.br"})
+        fs::last_write_time(dir / "www" / name, fs::file_time_type::clock::now() - std::chrono::seconds(60));
     fs::last_write_time(dir / "www" / "b.css.br", fs::last_write_time(dir / "www" / "b.css") - std::chrono::seconds(10));  // a build not redone
     std::ofstream(dir / "agensio.toml") << "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n";
     Config cfg = load_config(dir / "agensio.toml");
@@ -639,6 +643,32 @@ static void test_precompressed() {
     s.request.accept_encoding = "br";
     off.serve_location(s, Router::location(cfg.sites[0], fresh.path), fresh);
     CHECK(body() == css && !has("Vary") && plain.total_bytes() == 100u);
+    // A file still being written (2026-10-22): modified a moment ago it is served once as read, with
+    // Cache-Control: no-store, and not cached; a twin written a moment ago is passed over. A minute on,
+    // both settled, the file is cached and its twin served.
+    cfg.cache_precompressed = true;
+    write("c.css", css);
+    write("d.css", css);
+    fs::last_write_time(dir / "www" / "d.css", fs::file_time_type::clock::now() - std::chrono::seconds(60));
+    write("d.css.br", br);
+    ws.now = std::time(nullptr);
+    auto no_store = [&] {
+        for (const auto& f : s.response.headers)
+            if (f.name == "Cache-Control" && f.value == "no-store") return true;
+        return false;
+    };
+    const CacheKeyView ckey{Router::location(cfg.sites[0], "/c.css").id, "/c.css"};
+    const CacheKeyView dkey{Router::location(cfg.sites[0], "/d.css").id, "/d.css"};
+    serve("/c.css", "");
+    CHECK(s.response.status == 200 && body() == css && s.response.unsettled_file && no_store() && !cache.find(ckey));
+    serve("/d.css", "br");
+    CHECK(s.response.status == 200 && body() == css && !has("Content-Encoding") && !s.response.unsettled_file && !no_store() && cache.find(dkey));
+    ws.now += 60;
+    serve("/c.css", "");
+    CHECK(body() == css && !s.response.unsettled_file && !no_store() && cache.find(ckey));
+    cache.find(dkey)->last_validated.store(0);
+    serve("/d.css", "br");
+    CHECK(body() == br && has("Content-Encoding: br\r\n"));
     fs::remove_all(dir);
 }
 
@@ -2823,6 +2853,18 @@ static void test_tasks() {
               !content_hashed("/static/admin/css/base.css") && !content_hashed("/static/jquery.min.js") && !content_hashed("/static/a.0123ABCD.js") &&
               !content_hashed("/static/a.0123abc.js") && !content_hashed("/static/.0123abcd.js") && !content_hashed("/static/a.0123abcd.") &&
               !content_hashed("/static/0123abcd.js") && !content_hashed(""));
+        // A file still being written is not cached (2026-10-22): modified within a second of now, or
+        // changed while it was read; an mtime more than a second ahead is no writer at work.
+        {
+            const std::int64_t now = 1'800'000'000;
+            const FileInfo old{100, now - 60, true, false};
+            CHECK(file_settled(old, old, now) && !file_settled(FileInfo{100, now, true, false}, FileInfo{100, now, true, false}, now) &&
+                  !file_settled(FileInfo{100, now - 1, true, false}, FileInfo{100, now - 1, true, false}, now) &&
+                  !file_settled(FileInfo{100, now + 1, true, false}, FileInfo{100, now + 1, true, false}, now) &&
+                  file_settled(FileInfo{100, now - 2, true, false}, FileInfo{100, now - 2, true, false}, now) &&
+                  file_settled(FileInfo{100, now + 30, true, false}, FileInfo{100, now + 30, true, false}, now) &&
+                  !file_settled(old, FileInfo{140, now - 60, true, false}, now) && !file_settled(old, FileInfo{100, now - 59, true, false}, now));
+        }
         CHECK(me.kind == HandlerKind::static_ && me.add_headers.size() == 2 && me.add_headers[0].second == "nosniff" &&
               me.add_headers[1].second.find("script-src 'none'") != npos && me.add_headers[1].second.find("sandbox") == npos && me.symlinks_deny);
         CHECK(Router::location(ws, "/media/documents/report.pdf").handler == "deny" && Router::location(ws, "/manage.py").handler == "deny" &&

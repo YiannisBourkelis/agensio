@@ -2,6 +2,22 @@
 
 ## 0.1.0-alpha.110
 
+- **A static file still being written is never cached and never leaves with a lifetime.** An update
+  made in place (`npm run build` into `public/build`, an unzip over the root) is served while it
+  writes. On a cache miss agensio read the size `fstat` gave, so a file still growing was cached as a
+  prefix and served to every client for up to a second. It went with the location's
+  `Cache-Control`: on Laravel's `/build/` that is `immutable` for a year, so a browser kept the broken
+  asset, whose hashed name never changes.
+  - Now a file modified within the last second, or one whose size or modification time changed while
+    it was read (`file_settled`, one `fstat` of the open descriptor on a miss), is served once as
+    read. It is not cached and carries `Cache-Control: no-store`, which no location's `add_headers`
+    and no rule's cache field replaces.
+  - A twin still being written is passed over, and the revalidation picks it up once it settled.
+  - A cache hit costs nothing more. An mtime more than a second ahead (an archive's, a skewed NFS
+    clock's) counts as settled.
+  - nginx has the same hazard per request, and Laravel's own nginx configuration gives `/build/` no
+    lifetime, so agensio's preset had made it worse.
+
 - **A credential an update left readable no longer takes its site down.** An update made in place
   loosens files:
   - `cp .env.example .env` leaves `0644`;

@@ -261,6 +261,9 @@ void StaticHandler::load_variants(CacheEntry& parent, const FileInfo& fi, const 
         auto twin = std::make_shared<CacheEntry>();
         twin->data.resize(static_cast<std::size_t>(tfi.size));
         if (!f.read_all(twin->data.data(), twin->data.size())) continue;
+        // A twin still being written is passed over: the file goes out without it, and the
+        // revalidation finds the twin once it settled (twins_unchanged).
+        if (FileInfo after; !f.info(after) || !file_settled(tfi, after, now)) continue;
         if (cfg_.cache_sendfile_min_size > 0 && tfi.size >= cfg_.cache_sendfile_min_size) twin->fd = std::move(f);
         fill_entry(*twin, tfi, ws.fs_path, parent.content_type, t.coding, true, now);
         (t.coding == Encoding::br ? parent.br : parent.gzip) = std::move(twin);
@@ -598,19 +601,23 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
             error(s, 500, req.keep_alive);
             return Outcome::done;
         }
+        // Still being written (file_settled): served once as read, not cached, no twin, no-store.
+        FileInfo after;
+        const bool settled = f.info(after) && file_settled(fi, after, now);
         if (cfg_.cache_sendfile_min_size > 0 && fi.size >= cfg_.cache_sendfile_min_size) entry->fd = std::move(f);
         else f.close();
         // A file stored compressed (.svgz) gets its coding and no twin: a second coding would be gzip, br.
         const ServedType mi = type_of(loc, ws);
         entry->content_type = mi.type;
-        if (cfg_.cache_precompressed && mi.encoding.empty()) load_variants(*entry, fi, loc, ws, now);
+        if (settled && cfg_.cache_precompressed && mi.encoding.empty()) load_variants(*entry, fi, loc, ws, now);
         fill_entry(*entry, fi, ws.fs_path, mi.type, stored_coding(mi.encoding), entry->has_variants(), now);
 
-        EntryPtr canonical = cache_.insert(key, entry);
+        EntryPtr canonical = settled ? cache_.insert(key, entry) : nullptr;
         if (canonical) ws.local.insert(key, canonical);
-        else canonical = std::move(entry);  // cache full for this size class: serve once, uncached
+        else canonical = std::move(entry);  // cache full for this size class, or not settled: serve once, uncached
         response_fields::served_file(s, ws.fs_path);
         serve_entry(s, std::move(canonical));
+        s.response.unsettled_file = !settled;
         add_headers(s, loc, ws.path);
         return Outcome::done;
     }
@@ -619,7 +626,8 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
     //    the cache (descriptor entry), so repeat requests stream it without an
     //    open/fstat/realpath or header formatting. Every reader uses pread/sendfile with
     //    explicit offsets, so one descriptor serves concurrent responses.
-    if (cache_.max_open_files() > 0) {
+    const bool settled = file_settled(fi, fi, now);  // nothing was read: the open's fstat is all there is
+    if (settled && cache_.max_open_files() > 0) {
         auto entry = std::make_shared<CacheEntry>();
         entry->descriptor_only = true;
         entry->fd = std::move(f);
@@ -637,6 +645,7 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
     }
     response_fields::served_file(s, ws.fs_path);
     serve_file(s, std::move(f), fi, type_of(loc, ws));
+    s.response.unsettled_file = !settled;
     add_headers(s, loc, ws.path);
     return Outcome::done;
 }
@@ -662,9 +671,15 @@ void StaticHandler::add_headers(Stream& s, const LocationConfig& loc, std::strin
     // "public" (uploads, /build/, /static/) becomes "private" there, and a field only shared
     // caches act on (CDN-Cache-Control, Surrogate-Control: core/private_cache.hpp) is dropped.
     const bool guarded = s.auth.protected_path;
+    // A file still being written (file_settled) is stored by no cache at all: no-store, and none of the
+    // location's lifetimes (2026-10-22).
+    const bool unsettled = s.response.unsettled_file;
     for (const auto& h : fields)
-        if (!guarded || (!Headers::iequals(h.first, "cache-control") && !private_cache::shared_only_field(h.first))) s.response.headers.add(h.first, h.second);
-    if (guarded) s.response.headers.add("Cache-Control", "private");
+        if ((!guarded && !unsettled) ||
+            (!Headers::iequals(h.first, "cache-control") && !private_cache::shared_only_field(h.first) && !(unsettled && Headers::iequals(h.first, "expires"))))
+            s.response.headers.add(h.first, h.second);
+    if (unsettled) s.response.headers.add("Cache-Control", "no-store");
+    else if (guarded) s.response.headers.add("Cache-Control", "private");
 }
 
 }  // namespace agensio

@@ -776,6 +776,19 @@ if [ -n "$FPM_PID" ]; then
 check "laravel: any route reaches the front controller" "laravel /some/route?x=1 /index.php -" "$(curl -sS 'http://127.0.0.1:8090/some/route?x=1')"
 check "laravel: root goes to index.php" "laravel / /index.php -" "$(curl -sS http://127.0.0.1:8090/)"
 check "laravel: static asset served from public/ with immutable caching" "console.log(\"app\"); public, max-age=31536000, immutable" "$(curl -sS http://127.0.0.1:8090/build/app.js | tr -d '\n') $(curl -sSI http://127.0.0.1:8090/build/app.js | tr -d '\r' | awk '/^Cache-Control:/{sub(/^Cache-Control: /,""); print}')"
+# A file still being written (2026-10-22): an in-place `npm run build` writes into public/build while it
+# is served. Fresh from its writer (modified within the last second) a file is served once with
+# no-store and not cached, so neither agensio's cache nor a browser keeps a partial copy for the year
+# the location gives built assets; settled, it gets that lifetime. A twin still being written is
+# passed over until it settles.
+fieldof() { tr -d '\r' | awk -v f="$1" 'tolower($0) ~ "^"f":" {sub(/^[^:]*: */, ""); v=$0} END {print (v == "" ? "-" : v)}'; }
+printf 'console.log("fresh");' > tests/laravel/public/build/fresh.js
+printf 'console.log("twin");' > tests/laravel/public/build/tw.js; touch -d '-1 hour' tests/laravel/public/build/tw.js
+printf 'not-really-brotli' > tests/laravel/public/build/tw.js.br
+check "laravel: a built file still being written is served with no-store, its twin passed over; settled, the year and the twin" \
+  "no-store - | public, max-age=31536000, immutable br" \
+  "$(curl -sS -D - -o /dev/null http://127.0.0.1:8090/build/fresh.js | fieldof cache-control) $(curl -sS -D - -o /dev/null -H 'Accept-Encoding: br' http://127.0.0.1:8090/build/tw.js | fieldof content-encoding) | $(sleep 2.2; curl -sS -D - -o /dev/null http://127.0.0.1:8090/build/fresh.js | fieldof cache-control) $(curl -sS -D - -o /dev/null -H 'Accept-Encoding: br' http://127.0.0.1:8090/build/tw.js | fieldof content-encoding)"
+rm -f tests/laravel/public/build/fresh.js tests/laravel/public/build/tw.js tests/laravel/public/build/tw.js.br
 check "laravel: dotfiles in public/ hidden" "404" "$(code http://127.0.0.1:8090/.env)"
 check "laravel: project files outside public/ unreachable" "400" "$(code --path-as-is 'http://127.0.0.1:8090/../.env')"
 check "laravel: a .php that does not exist is refused, not routed" "404" "$(code http://127.0.0.1:8090/anything.php)"
@@ -1043,6 +1056,7 @@ mkdir -p bench/tmp/sites/kb.test/web/app/Core bench/tmp/sites/kb.test/web/data b
 printf '<?php echo "index ", $_SERVER["REQUEST_URI"];\n' > bench/tmp/sites/kb.test/web/index.php; printf '<?php echo "other";\n' > bench/tmp/sites/kb.test/web/other.php
 printf '<?php echo "base";\n' > bench/tmp/sites/kb.test/web/app/Core/Base.php; echo 'SQLite format 3' > bench/tmp/sites/kb.test/web/data/db.sqlite; echo 'db' > bench/tmp/sites/kb.test/web/data/other.db
 echo 'body{}' > bench/tmp/sites/kb.test/web/assets/css/app.css; printf '<?php echo "lib";\n' > bench/tmp/sites/kb.test/web/assets/css/x.php; echo '<x/>' > bench/tmp/sites/kb.test/web/web.config
+find bench/tmp/sites/kb.test -type f -exec touch -d '-1 minute' {} +  # deployed before it is served: a file written a second ago is not cached (alpha.110)
 if [ -n "$PHPFPM" ]; then
   check "rules: a php site with private paths, two entry points, a cached directory and a front controller is created; site_show reports the rules and labels the nine locations they made" "201 2 9 yes" "$(cpost /v1/sites "{\"domain\":\"kb.test\",\"https\":\"none\",\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/bench/tmp/sites/kb.test/web\",\"listen_plain\":\"127.0.0.1:8096\",\"rules\":{\"private\":[\"/app/\",\"/data/\",\"/libs/\",\"/cli\",\"/web.config\"],\"entry_points\":[\"/index.php\",\"/jsonrpc.php\"],\"cache\":[{\"path\":\"/assets/\",\"max_age\":604800}],\"front_controller\":\"/index.php\"},\"confirm\":true,\"reason\":\"rules\"}") $(curl -sS --unix-socket $CS http://control/v1/sites/kb.test | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["rules"]["entry_points"]), len([l for l in d["locations"] if l.get("from") == "rules"]))') $(grep -q 'handler = "deny"' bench/tmp/sites.d/kb.test.toml && echo yes)"
   check "rules on the wire: only the entry points run, every other .php is 404, private paths are 404 whatever they hold, the cached directory serves files with its header and runs nothing, a missing path reaches the front controller" "200 index /index.php 404 404 404 404 404 404 200 public, max-age=604800 404 200 index /board/1" "$(curl -sS -w ' %{http_code}' -H 'Host: kb.test' http://127.0.0.1:8096/index.php | awk '{print $NF, $1, $2}') $(for p in /other.php /app/Core/Base.php /data/db.sqlite /data/other.db /libs/ /web.config; do curl -sS -o /dev/null -w '%{http_code} ' -H 'Host: kb.test' http://127.0.0.1:8096$p; done)$(curl -sS -D bench/tmp/kb.h -o /dev/null -w '%{http_code}' -H 'Host: kb.test' http://127.0.0.1:8096/assets/css/app.css) $(grep -i '^cache-control:' bench/tmp/kb.h | sed 's/^[^:]*: //' | tr -d '\r') $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: kb.test' http://127.0.0.1:8096/assets/css/x.php) $(curl -sS -w ' %{http_code}' -H 'Host: kb.test' http://127.0.0.1:8096/board/1 | awk '{print $NF, $1, $2}')"
@@ -1465,7 +1479,7 @@ check "access: ctl --cache and --private given alone keep the site's address rul
 "$BIN" ctl site-update acc.test --no-rules --yes --reason acc --socket $CS > /dev/null
 # rules.cache's immutable (0.1.0-alpha.101, RFC 8246; the review's D8): written, served; refused without
 # a lifetime; a misspelt field refused naming it (it was dropped before, the file carrying nothing).
-mkdir -p bench/tmp/sites/acc.test/www/build; echo 'x' > bench/tmp/sites/acc.test/www/build/app.3f9a1c.js
+mkdir -p bench/tmp/sites/acc.test/www/build; echo 'x' > bench/tmp/sites/acc.test/www/build/app.3f9a1c.js; touch -d '-1 minute' bench/tmp/sites/acc.test/www/build/app.3f9a1c.js
 check "rules.cache immutable: ctl --cache PATH=SECONDS,immutable writes and serves it; max_age 0 and an unknown field are refused, naming it" \
   "1 public, max-age=31536000, immutable 400 fresh 400 yes" \
   "$("$BIN" ctl site-update acc.test --cache /build/=31536000,immutable --yes --reason acc --socket $CS > /dev/null; grep -c '"Cache-Control" = "public, max-age=31536000, immutable"' bench/tmp/sites.d/acc.test.toml) $(curl -sS -D - -o /dev/null -H 'Host: acc.test' http://127.0.0.1:8096/build/app.3f9a1c.js | tr -d '\r' | sed -n 's/^Cache-Control: //p') $(cpost /v1/sites/acc.test '{"rules":{"cache":[{"path":"/build/","max_age":0,"immutable":true}]},"confirm":true,"reason":"acc"}') $(grep -o 'fresh' bench/tmp/ctl-reply.json | head -1) $(cpost /v1/sites/acc.test '{"rules":{"cache":[{"path":"/build/","max_age":60,"imutable":true}]},"confirm":true,"reason":"acc"}') $(grep -q "did you mean 'immutable'" bench/tmp/ctl-reply.json && echo yes || echo no)"
@@ -2682,6 +2696,7 @@ fi
 
 # ---- Pre-compressed twins (alpha.21, HttpArena): name.br / name.gz beside a file are served to a client that takes them ----
 P=bench/www; printf 'x%.0s' $(seq 1 2000) > $P/comp.css; printf 'BR-TWIN-%.0s' $(seq 1 40) > $P/comp.css.br; printf 'GZ-TWIN-%.0s' $(seq 1 50) > $P/comp.css.gz
+touch -d '-1 minute' $P/comp.css $P/comp.css.br $P/comp.css.gz  # a build done before it is served (a file still being written is not cached, alpha.110)
 BRSUM=$(sum < $P/comp.css.br); GZSUM=$(sum < $P/comp.css.gz); IDSUM=$(sum < $P/comp.css)
 hdrs() { curl -sS -D - -o /dev/null "$@" | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-encoding:"{e=$2} tolower($1)=="vary:"{v=$2} tolower($1)=="content-length:"{l=$2} END{printf "%s %s %s %s", c, e?e:"-", v?v:"-", l}'; }
 for base in http://127.0.0.1:8080 https://127.0.0.1:8443; do
@@ -2701,8 +2716,8 @@ if [ "$H3" = 1 ] && curl -V 2>/dev/null | grep -q HTTP3; then
   check "h3 twins: the QPACK section carries content-encoding and vary; the body is the twin" "200 br accept-encoding 320 $BRSUM" "$(command curl -sSk --http3-only -D - -o /dev/null -H 'accept-encoding: br' https://127.0.0.1:8443/comp.css | tr -d '\r' | awk 'NR==1{c=$2} $1=="content-encoding:"{e=$2} $1=="vary:"{v=tolower($2)} $1=="content-length:"{l=$2} END{printf "%s %s %s %s", c, e, v, l}') $(command curl -sSk --http3-only -H 'accept-encoding: br' https://127.0.0.1:8443/comp.css | sum)"
 fi
 check "twins h2: the HPACK block carries content-encoding and vary; the body is the twin" "200 br Accept-Encoding 320 $BRSUM" "$(command curl -sSk --http2 -D - -o /dev/null -H 'accept-encoding: br' https://127.0.0.1:8443/comp.css | tr -d '\r' | awk 'NR==1{c=$2} $1=="content-encoding:"{e=$2} $1=="vary:"{v=$2} $1=="content-length:"{l=$2} END{printf "%s %s %s %s", c, e, v, l}') $(command curl -sSk --http2 -H 'accept-encoding: br' https://127.0.0.1:8443/comp.css | sum)"
-printf 'BR-NEW-%.0s' $(seq 1 30) > $P/comp.css.br; sleep 1.2
-check "twins: a replaced twin is served within the revalidation interval" "210 $(sum < $P/comp.css.br)" "$(curl -sS -H 'Accept-Encoding: br' -o /dev/null -w '%{size_download}' http://127.0.0.1:8080/comp.css) $(curl -sS -H 'Accept-Encoding: br' http://127.0.0.1:8080/comp.css | sum)"
+printf 'BR-NEW-%.0s' $(seq 1 30) > $P/comp.css.br; sleep 2.2
+check "twins: a replaced twin is served once it has settled (2 s), within the revalidation interval" "210 $(sum < $P/comp.css.br)" "$(curl -sS -H 'Accept-Encoding: br' -o /dev/null -w '%{size_download}' http://127.0.0.1:8080/comp.css) $(curl -sS -H 'Accept-Encoding: br' http://127.0.0.1:8080/comp.css | sum)"
 touch -d '2020-01-01' $P/comp.css.br; sleep 1.2
 check "twins: a twin older than the file is a build not redone and is ignored; the other twin still serves" "- gzip" "$(hdrs -H 'Accept-Encoding: br' http://127.0.0.1:8080/comp.css | cut -d' ' -f2) $(hdrs -H 'Accept-Encoding: br, gzip' http://127.0.0.1:8080/comp.css | cut -d' ' -f2)"
 rm -f $P/comp.css.br $P/comp.css.gz; sleep 1.2

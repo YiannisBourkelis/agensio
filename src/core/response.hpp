@@ -51,6 +51,9 @@ struct Response {
     // own that holds fields of its own (no-store, Retry-After), which the rules leave standing.
     bool fields_decided = false;
     bool own_fields = false;
+    // A file still being written (handlers/static.hpp file_settled, 2026-10-22): served once, uncached,
+    // with Cache-Control: no-store, which no location's add_headers and no rule's cache field replaces.
+    bool unsettled_file = false;
 
     // Resources the views above may point into.
     EntryPtr entry;
@@ -76,6 +79,7 @@ struct Response {
         tunnel_timeout_s = 0;
         fields_decided = false;
         own_fields = false;
+        unsettled_file = false;
         entry.reset();
         owned_file.close();
         scratch.clear();

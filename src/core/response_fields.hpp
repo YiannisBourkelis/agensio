@@ -60,7 +60,8 @@ inline bool plain(const Stream& s) noexcept {
 template <class Emit>
 void apply(const Stream& s, const HeaderSet& hs, Emit&& emit) {
     const Response& r = s.response;
-    const bool guarded = s.auth.protected_path;
+    // Behind a password the guard decides the cache fields; for a file still being written, its no-store.
+    const bool guarded = s.auth.protected_path || r.unsettled_file;
     std::uint64_t present = 0;
     if (r.own_fields) {
         std::string_view text = r.prebuilt_headers;
