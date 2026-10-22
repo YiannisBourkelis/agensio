@@ -1087,6 +1087,9 @@ share lifted into `src/http/` first. The RFCs are in `docs/rfc/`.
   Moving sockets to io_uring as well (`ASIO_HAS_IO_URING_AS_DEFAULT`, nginx's most upvoted
   request) is a separate measurement.
 - io_uring backend for Linux (Asio supports it; measure).
+- **Release folders** (after the first stable release, the owner 2026-10-22): a new version of a
+  site installed into `releases/<name>` beside `shared/`, switched by renaming `current` and a
+  reload, with rollback and cleanup; the design and its open questions are `docs/design-releases.md`.
 - kTLS on Linux: sendfile over TLS.
 - Brotli precompression at cache load time.
 - Static site presets (Hugo/Astro output), SPA fallback.
