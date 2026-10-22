@@ -1011,6 +1011,7 @@ json::Value Server::health_with(const std::vector<control::Finding>& more) {
     extra.insert(extra.end(), more.begin(), more.end());
     const auto noticed = control::notice_findings(cfg, site_notices().snapshot(), std::time(nullptr));  // what requests saw
     extra.insert(extra.end(), noticed.begin(), noticed.end());
+    if (auto f = control::http3_finding(control::build_facts(), cfg)) extra.push_back(std::move(*f));  // HTTP/3 the system could serve
     const control::TlsFacts tls = tls_facts();
     return control::health(cfg, cfg_, as_root, std::time(nullptr), extra, &tls);
 }
@@ -1121,6 +1122,9 @@ json::Value Server::status() {
         v.set("workers_detail", std::move(details));
     }
     v.set("user", cfg_.user);
+    // What this binary serves at all (h3 only with OpenSSL 3.5.1 or later on Linux), and the OpenSSL
+    // loaded; each listener's own protocols follow.
+    v.set("protocols", control::protocols_json(control::build_facts()));
     json::Value listeners = json::Value::array();
     for (const auto& l : gen_->listeners) {
         json::Value entry = json::Value::object().set("address", l.address).set("tls", l.tls).set("sites", static_cast<double>(l.site_names.size()));

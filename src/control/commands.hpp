@@ -6,6 +6,7 @@
 #include <ctime>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -173,6 +174,24 @@ struct Finding {
 // that still redirects plain HTTP and still trusts that proxy; hsts_narrows_application while the
 // application's value is still stronger than the site's hsts.
 std::vector<Finding> notice_findings(const Config& cfg, const std::vector<SiteNotice>& notices, std::time_t now);
+// What this binary can serve (2026-10-22, the owner's request): built with TLS and with QUIC, on
+// Linux, and the OpenSSL loaded at run time (OpenSSL_version_num(), OpenSSL_version()); build_facts()
+// is this process's, the unit tests describe others.
+struct BuildFacts {
+    bool tls = false;
+    bool quic = false;
+    bool linux_os = false;
+    unsigned long openssl_number = 0;  // 0 without TLS
+    std::string openssl;               // "OpenSSL 3.5.7 30 Sep 2026", "" without TLS
+};
+BuildFacts build_facts();
+// status's `protocols`: what this build serves at all (h1, h2c, h2, h3), the OpenSSL loaded, and,
+// without HTTP/3, why and what would give it (each listener's own protocols are under `listeners`).
+json::Value protocols_json(const BuildFacts& b);
+// health's http3_package_available (information): a build without HTTP/3 on a system whose OpenSSL
+// has the QUIC API (3.5.1 or later), a TLS site configured: the Debian 12 package on Debian 13, say.
+// Nothing on a system without the API (Debian 12, Ubuntu 22.04 and 24.04: no HTTP/3 there by decision).
+std::optional<Finding> http3_finding(const BuildFacts& b, const Config& cfg);
 // The refusals at the workers' connection ceiling since start (Server::refusal_report),
 // merged over the workers, for one health finding whose fix follows from their shape
 // (2026-10-02: an agent must tell an attack from a low ceiling from stuck clients).

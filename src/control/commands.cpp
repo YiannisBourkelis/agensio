@@ -27,6 +27,10 @@
 #include <set>
 #include <sstream>
 
+#ifdef AGENSIO_HAS_TLS
+#include <openssl/crypto.h>
+#endif
+
 #ifdef AGENSIO_HAS_ZLIB
 #include <zlib.h>
 #endif
@@ -508,6 +512,58 @@ json::Value upstream_json(const UpstreamConfig& u) {
 }
 
 }  // namespace
+
+BuildFacts build_facts() {
+    BuildFacts b;
+#ifdef AGENSIO_HAS_TLS
+    b.tls = true;
+    b.openssl_number = OpenSSL_version_num();
+    b.openssl = OpenSSL_version(OPENSSL_VERSION);
+#endif
+#ifdef AGENSIO_HAS_QUIC
+    b.quic = true;
+#endif
+#ifdef __linux__
+    b.linux_os = true;
+#endif
+    return b;
+}
+
+namespace {
+// The OpenSSL with the QUIC TLS API agensio builds HTTP/3 on (CMakeLists.txt: 3.5.0 dropped the
+// transport parameters when SNI switched the context).
+constexpr unsigned long kOpenSslQuic = 0x30500010UL;  // 3.5.1
+}  // namespace
+
+json::Value protocols_json(const BuildFacts& b) {
+    json::Value supported = json::Value::array().push("h1").push("h2c");
+    if (b.tls) supported.push("h2");
+    if (b.quic) supported.push("h3");
+    json::Value v = json::Value::object().set("supported", std::move(supported)).set("h3", b.quic);
+    v.set("openssl", b.tls ? json::Value(b.openssl) : json::Value(nullptr));
+    if (b.quic) return v;
+    std::string why;
+    if (!b.tls) why = "this build was made without TLS (no OpenSSL), so it serves neither HTTP/2 over TLS nor HTTP/3";
+    else if (!b.linux_os) why = "HTTP/3 is built on Linux only (its UDP endpoint uses recvmmsg, sendmmsg, GRO and GSO)";
+    else if (b.openssl_number >= kOpenSslQuic)
+        why = "this build was made without HTTP/3 (the package for Debian 12 and Ubuntu 22.04, whose OpenSSL 3.0 has no QUIC TLS API), but this "
+              "system's " + b.openssl + " has it: the release's deb13 package (Debian 13), or a build from source here, serves HTTP/3";
+    else
+        why = "the OpenSSL here (" + b.openssl + ") has no QUIC TLS API; HTTP/3 needs OpenSSL 3.5.1 or later (Debian 13, Ubuntu 26.04, RHEL 9.7 "
+              "or 10.1, Fedora 43, Arch)";
+    return v.set("h3_unavailable", why);
+}
+
+std::optional<Finding> http3_finding(const BuildFacts& b, const Config& cfg) {
+    if (b.quic || !b.tls || !b.linux_os || b.openssl_number < kOpenSslQuic) return std::nullopt;
+    const bool tls_site = std::any_of(cfg.sites.begin(), cfg.sites.end(), [](const SiteConfig& s) { return s.tls.has_value(); });
+    if (!tls_site) return std::nullopt;
+    return Finding{"info", "http3_package_available", "",
+                   "this agensio was built without HTTP/3 (the package for Debian 12 and Ubuntu 22.04), but this system's " + b.openssl +
+                       " has the QUIC TLS API, so HTTP/3 could be served here",
+                   "on Debian 13 install the release's .deb with deb13 in its name (docs/install.md); elsewhere build from source on this system. "
+                   "Then list \"h3\" in [server] protocols and open the TLS ports over UDP (docs/configuration.md 17)"};
+}
 
 std::vector<Finding> notice_findings(const Config& cfg, const std::vector<SiteNotice>& notices, std::time_t now) {
     std::vector<Finding> out;

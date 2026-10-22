@@ -2132,6 +2132,54 @@ static void test_pools() {
     fs::remove_all(dir);
 }
 
+// What the binary serves (2026-10-22, the owner's request): status's `protocols`, from the build and
+// the OpenSSL loaded, and health's http3_package_available where a system could serve HTTP/3 but this
+// build cannot (the Debian 12 package on Debian 13), never on a system without the QUIC API.
+static void test_build_protocols() {
+    const std::size_t npos = std::string::npos;
+    using control::BuildFacts;
+    auto supported = [](const json::Value& v) {
+        std::string out;
+        for (const auto& p : v["supported"].items()) out += (out.empty() ? "" : " ") + std::string(p.str());
+        return out;
+    };
+    Config tls_site;
+    tls_site.sites.emplace_back();
+    tls_site.sites.back().server_names = {"shop.test"};
+    tls_site.sites.back().tls.emplace();
+    Config plain_only;
+    plain_only.sites.emplace_back();
+    plain_only.sites.back().server_names = {"plain.test"};
+    // The deb13 package on Debian 13: everything, no finding.
+    const BuildFacts deb13{true, true, true, 0x30500070UL, "OpenSSL 3.5.7 30 Sep 2026"};
+    const json::Value a = control::protocols_json(deb13);
+    CHECK(supported(a) == "h1 h2c h2 h3" && a["h3"].boolean() && a.get("openssl") == "OpenSSL 3.5.7 30 Sep 2026" && a["h3_unavailable"].is_null() &&
+          !control::http3_finding(deb13, tls_site));
+    // The Debian 12 package on Debian 12: no HTTP/3, said why, no finding (no HTTP/3 there by decision).
+    const BuildFacts deb12{true, false, true, 0x300000d0UL, "OpenSSL 3.0.13 30 Jan 2024"};
+    const json::Value b = control::protocols_json(deb12);
+    CHECK(supported(b) == "h1 h2c h2" && !b["h3"].boolean() && b.get("h3_unavailable").find("OpenSSL 3.0.13") != npos &&
+          b.get("h3_unavailable").find("3.5.1") != npos && !control::http3_finding(deb12, tls_site));
+    // The Debian 12 package on Debian 13: the deb13 package named, and a finding when a TLS site exists.
+    const BuildFacts mismatch{true, false, true, 0x30500070UL, "OpenSSL 3.5.7 30 Sep 2026"};
+    const json::Value c = control::protocols_json(mismatch);
+    const auto f = control::http3_finding(mismatch, tls_site);
+    CHECK(!c["h3"].boolean() && c.get("h3_unavailable").find("deb13") != npos && f && f->code == "http3_package_available" && f->severity == "info" &&
+          f->message.find("OpenSSL 3.5.7") != npos && f->fix.find("deb13") != npos && !control::http3_finding(mismatch, plain_only));
+    // A build without TLS, and one off Linux.
+    const json::Value d = control::protocols_json(BuildFacts{false, false, true, 0, ""});
+    CHECK(supported(d) == "h1 h2c" && d["openssl"].is_null() && d.get("h3_unavailable").find("without TLS") != npos);
+    const BuildFacts mac{true, false, false, 0x30600010UL, "OpenSSL 3.6.1 27 Jan 2026"};
+    CHECK(control::protocols_json(mac).get("h3_unavailable").find("Linux") != npos && !control::http3_finding(mac, tls_site));
+    // This process's own facts agree with how it was built.
+    const BuildFacts self = control::build_facts();
+#ifdef AGENSIO_HAS_QUIC
+    CHECK(self.quic && self.tls && self.openssl_number >= 0x30500010UL);
+#else
+    CHECK(!self.quic);
+#endif
+}
+
 // served_dir (2026-10-22): a plain PHP site whose application keeps its public files in a
 // directory of the project (public/, web/). That directory is served, PHP stays confined to the
 // project, which the install fills, so the served directory may be missing until then.
@@ -12271,6 +12319,7 @@ int main() {
     test_fcgi_codec();
     test_pools();
     test_served_dir();
+    test_build_protocols();
     test_tasks();
     test_appenv();
     test_hosting_rules();

@@ -3299,6 +3299,9 @@ without it serves TLS, HTTP/1 and HTTP/2 and refuses `"h3"` naming why. Each rel
 HTTP/3 (it installs on Debian 13 and later); the other is built on Ubuntu 22.04 for Debian 12, Ubuntu
 22.04 and later, whose OpenSSL 3.0 has no QUIC API, and has none. The Arch package and a source build
 on Debian 13, Ubuntu 26.04, RHEL 9.7 or 10.1, Fedora 43 and later have it too (`docs/install.md`).
+`server_status` (`agensio ctl status`) says what the running build serves under `protocols`, with the
+OpenSSL it loaded and, without HTTP/3, why; health's `http3_package_available` (information) names a
+build without HTTP/3 on a system whose OpenSSL has the QUIC API (the Debian 12 package on Debian 13).
 
 What it needs from the host: UDP open on the listener's port in the firewall (the TCP
 port alone gives a client nothing to reach), a build with OpenSSL 3.5 or later on Linux

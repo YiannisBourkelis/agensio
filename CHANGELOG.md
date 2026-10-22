@@ -2,6 +2,18 @@
 
 ## 0.1.0-alpha.110
 
+- **`server_status` says which HTTP protocols this build serves** (the owner's request).
+  - A `protocols` object gives:
+    - `supported`: h1, h2c, h2 with TLS, and h3 with OpenSSL 3.5.1 or later on Linux;
+    - the OpenSSL loaded;
+    - without HTTP/3, `h3_unavailable` with why and what would give it.
+  - Each listener's own protocols stay under `listeners`.
+  - Health's new `http3_package_available` (information) fires when a TLS site runs on a build without
+    HTTP/3 on a system whose OpenSSL has the QUIC API: the Debian 12 package, or the APT repository's
+    build, on Debian 13. The fix is the release's `deb13` package. Health is silent on Debian 12 and
+    Ubuntu 22.04 and 24.04, which have no HTTP/3 by decision.
+  - The MCP texts of both tools say so.
+
 - **Each release carries a Debian 13 `.deb` with HTTP/3.** The release packages were built on Ubuntu
   22.04, whose OpenSSL 3.0 has no QUIC TLS API, so no released `.deb` or `.rpm` had HTTP/3, not even
   on Debian 13.

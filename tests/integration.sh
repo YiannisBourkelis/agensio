@@ -820,6 +820,12 @@ check "redirect: what a trusted proxy marks https is served, what it marks http 
 CS=bench/tmp/control.sock
 check "control: status answers JSON with our role" "yes" "$(curl -sS --unix-socket $CS http://control/v1/status | grep -q '"version":"' && curl -sS --unix-socket $CS http://control/v1/status | grep -q '"role":"admin"' && echo yes)"
 check "control: status lists the sites and listeners" "yes" "$(curl -sS --unix-socket $CS http://control/v1/status | grep -q '"listeners":\[{"address":"127.0.0.1:8080"' && echo yes)"
+# What the build serves (2026-10-22): status's protocols from the build and the OpenSSL loaded; this
+# build's HTTP/3 as the probe above found it, and no http3_package_available finding either way here
+# (a build with HTTP/3, or a system whose OpenSSL has no QUIC API).
+check "control: status says what this build serves and with which OpenSSL; health suggests no other package" \
+  "$([ "$H3" = 1 ] && echo 'h1 h2c h2 h3 True OpenSSL -' || echo 'h1 h2c h2 False OpenSSL why') none" \
+  "$(curl -sS --unix-socket $CS http://control/v1/status | python3 -c 'import json,sys; p=json.load(sys.stdin)["protocols"]; print(" ".join(p["supported"]), p["h3"], p["openssl"].split()[0], "why" if p.get("h3_unavailable") else "-")') $(curl -sS --unix-socket $CS http://control/v1/health | grep -q http3_package_available && echo shown || echo none)"
 check "control: unknown command is a JSON 404" '404 {"error":"unknown command","path":"/v1/nothing"}' "$(curl -sS -o /dev/null -w '%{http_code} ' --unix-socket $CS http://control/v1/nothing)$(curl -sS --unix-socket $CS http://control/v1/nothing | tr -d '\n')"
 check "control: POST to a read command is 405 with Allow" "405 GET, HEAD" "$(curl -sSi -X POST --unix-socket $CS http://control/v1/status | tr -d '\r' | awk 'NR==1{c=$2} /^Allow:/{a=$2" "$3} END{print c" "a}')"
 check "control: agensio ctl status uses the socket" "0 yes" "$("$BIN" ctl status --socket $CS > bench/tmp/ctl.out; echo -n "$? "; grep -q '"pid":' bench/tmp/ctl.out && echo yes)"
