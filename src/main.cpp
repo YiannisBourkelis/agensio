@@ -298,7 +298,10 @@ int main(int argc, char** argv) {
                 std::cout << "wrote " << out << "\n";
                 return 0;
             }
-            std::cout << agensio::control::protection_report(in, agensio::control::read_probe(agensio::json::Value(nullptr), in), {}).dump() << "\n";
+            // The kept ruleset, whose presence decides where a trial's timer goes back to (the alpha.111 report).
+            agensio::control::ProtectionFiles files;
+            if (std::ifstream kept(in.firewall_file, std::ios::binary); kept) files.firewall_file = std::string((std::istreambuf_iterator<char>(kept)), std::istreambuf_iterator<char>());
+            std::cout << agensio::control::protection_report(in, agensio::control::read_probe(agensio::json::Value(nullptr), in), files).dump() << "\n";
             return 0;
         }
         else if (a == "mcp" && i == 1) {

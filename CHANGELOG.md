@@ -8,6 +8,30 @@
   - status carries the reload's own `restart_needed`, both the restart-only keys changed on disk and
     `h3 on udp ADDRESS`;
   - that listener carries `h3_waiting` with the bind's reason.
+- **The firewall trial goes back to the kept ruleset, and keep loads it in every state** (the test host's
+  report on alpha.111). On a host whose `inet agensio` table had been kept for weeks, root rendered it
+  again for `h3` with `protection_show`'s trial and did not keep it in time. Two things went wrong:
+  - the timer deleted the whole table, the kept TCP limits included, and the host had no per-address
+    limit until root stepped in;
+  - `firewall.keep` (`systemctl enable --now`) could not bring it back: a oneshot active since boot
+    starts nothing.
+
+  Now:
+  - the trial loads a file of its own, `/run/agensio-firewall-trial.nft`. On a host that keeps a
+    ruleset (`agensio-firewall.service` enabled with its file) its timer runs `nft -f` of the kept file
+    and so goes back to it; elsewhere it removes the table as before. `--collect` keeps a failed undo
+    from taking the next trial's unit name.
+  - Keep renders the kept file, enables the unit and runs `systemctl reload-or-restart`, which works
+    before or after the timer fired and on an active unit.
+  - The fixes of `firewall_quic_unlimited`, a table that covers no limit on a new port, and a site
+    change's next step for a ruleset file that differs are this same trial. Before, they loaded the
+    new file at once, while `protection_show` said never to skip the trial.
+  - An enabled unit whose table is gone (an old trial's timer, `nft delete table`, a flush) is
+    `firewall_limits_missing` with its own message and the fix `systemctl reload-or-restart
+    agensio-firewall.service`.
+
+  The comment lines of the rendered ruleset changed, so a kept file shows `file_state` `comments` until
+  it is rendered again.
 
 ## 0.1.0-alpha.111 (2026-10-23)
 

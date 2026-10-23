@@ -5,8 +5,9 @@
 # /usr/share/agensio/firewall/agensio.nft is the rendering for ports 80 and 443.
 # Nothing outside `table inet agensio` is touched: no other table, chain or rule, no policy, so
 # the distribution's firewall, a panel's rules, ufw and firewalld keep theirs and this keeps its own.
-#   trial:  nft -f THIS_FILE          (in the kernel only; `nft delete table inet agensio` or a reboot removes it)
-#   keep:   systemctl enable --now agensio-firewall.service   (loads /etc/agensio/firewall.nft at boot)
+#   load:   nft -f THIS_FILE   (in the kernel only; a reboot or `nft delete table inet agensio` removes it)
+#   keep:   systemctl enable agensio-firewall.service && systemctl reload-or-restart agensio-firewall.service
+#           (loads /etc/agensio/firewall.nft now and at every boot; `agensio ctl protection` has the trial that goes first)
 table inet agensio
 delete table inet agensio
 table inet agensio {

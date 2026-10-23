@@ -3456,20 +3456,36 @@ harmless (it deletes and recreates its own table). Root applies it the way netwo
 does, commit-confirmed, so a mistake undoes itself:
 
 ```sh
-agensio ctl protection --nft --out /etc/agensio/firewall.nft          # the ruleset for this host's ports
-nft -f /etc/agensio/firewall.nft                                     # in the kernel only; a reboot drops it
-systemd-run --on-active=10min --unit agensio-firewall-trial /usr/sbin/nft delete table inet agensio
+agensio ctl protection --nft --out /run/agensio-firewall-trial.nft   # the ruleset for this host's ports, to try
+nft -f /run/agensio-firewall-trial.nft                               # in the kernel only; a reboot drops it
+systemd-run --on-active=10min --collect --unit agensio-firewall-trial /usr/sbin/nft delete table inet agensio
 #   ... the site answers, this SSH session is alive, `agensio ctl protection` says covered ...
 systemctl stop agensio-firewall-trial.timer                          # keep it: cancel the undo
-systemctl enable --now agensio-firewall.service                      # and load it at every boot
+agensio ctl protection --nft --out /etc/agensio/firewall.nft          # the kept ruleset
+systemctl enable agensio-firewall.service                            # loaded at every boot
+systemctl reload-or-restart agensio-firewall.service                 # and now
 ```
+
+The trial has a file of its own and never touches the kept one. On a host that keeps a ruleset
+already (`agensio-firewall.service` enabled with its file: a new port, or `h3` turned on, renders it
+again), the timer's command is `/usr/sbin/nft -f /etc/agensio/firewall.nft` instead: it goes back to
+the kept table, never to none, so a keep missed for ten minutes leaves the host as it was. Until
+0.1.0-alpha.112 the trial wrote the kept file and its timer deleted the whole table, the limits kept
+for weeks included (the alpha.111 report). `agensio ctl protection` and the health fixes give the
+right command for the host, and a site change's next steps and health's re-render fixes are this
+same trial. Keep works in every state: before or after the timer fired, on a unit active since boot
+or one not started yet. `systemctl enable --now` starts nothing on a oneshot that is already active,
+so on a host that kept a ruleset it loaded no new file. Stopping a timer that fired fails harmlessly,
+and the steps after it run anyway. `--collect` unloads the timer's unit even when its command failed;
+otherwise its name stays taken, and the next trial's `systemd-run` would refuse it with that trial's
+ruleset already loaded.
 
 `agensio-firewall.service` (packaged) is a oneshot that runs `nft -f /etc/agensio/firewall.nft`
 after the distribution's firewall and before agensio; `--unit` renders it for a
 configuration kept elsewhere. A manual `systemctl restart nftables` on Debian runs
-`/etc/nftables.conf`, which usually begins with `flush ruleset`: `systemctl restart
-agensio-firewall` puts the table back, or add `include "/etc/agensio/firewall.nft"` to that
-file instead of the unit.
+`/etc/nftables.conf`, which usually begins with `flush ruleset`: `systemctl reload-or-restart
+agensio-firewall` puts the table back (health names an enabled unit whose table is gone), or add
+`include "/etc/agensio/firewall.nft"` to that file instead of the unit.
 
 *fail2ban.* Jails over agensio's access logs (combined format; the filters do not read
 JSON logs) and its error log, rendered for this host's logs, ports and sites: `agensio-login`
@@ -3594,8 +3610,10 @@ login_paths = ["/?controller=AuthController&action=check"]   # where Kanboard's 
 -j list ruleset`, `systemctl show` of the two agensio units and the firewall services, and
 `fail2ban-client status` per jail. The findings and their fixes: `firewall_limits_missing`
 (no per-source limit on a public port in any table; a panel's or the administrator's own
-counts as protection, so a host that already limits is never nagged), `firewall_limits_trial`
-(loaded, the timer pending), `firewall_limits_unsaved` (loaded, not enabled at boot, or
+counts as protection, so a host that already limits is never nagged; or `agensio-firewall.service`
+enabled while its table is gone, after a trial's timer, `nft delete table` or a flush, fixed by the
+unit's `reload-or-restart`), `firewall_limits_trial` (loaded, the timer pending: back to the kept
+ruleset or, with none kept, no table), `firewall_limits_unsaved` (loaded, not enabled at boot, or
 unknowable without systemd), `firewall_quic_unlimited` (the table predates `h3`),
 `fail2ban_missing` (not installed, not running, or no jail reads agensio's logs),
 `fail2ban_jail_stale`, `fail2ban_filter_stale` (an upgrade changed a shipped filter and the

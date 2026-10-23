@@ -651,8 +651,9 @@ std::string render_nft(const ProtectionInput& in) {
     s += "# " + shipped("firewall/agensio.nft") + " is the rendering for ports 80 and 443.\n";
     s += "# Nothing outside `table inet agensio` is touched: no other table, chain or rule, no policy, so\n";
     s += "# the distribution's firewall, a panel's rules, ufw and firewalld keep theirs and this keeps its own.\n";
-    s += "#   trial:  nft -f THIS_FILE          (in the kernel only; `nft delete table inet agensio` or a reboot removes it)\n";
-    s += "#   keep:   systemctl enable --now agensio-firewall.service   (loads " + in.firewall_file + " at boot)\n";
+    s += "#   load:   nft -f THIS_FILE   (in the kernel only; a reboot or `nft delete table inet agensio` removes it)\n";
+    s += "#   keep:   systemctl enable agensio-firewall.service && systemctl reload-or-restart agensio-firewall.service\n";
+    s += "#           (loads " + in.firewall_file + " now and at every boot; `agensio ctl protection` has the trial that goes first)\n";
     s += "table inet agensio\n";
     s += "delete table inet agensio\n";
     s += "table inet agensio {\n";
@@ -875,18 +876,30 @@ std::string render_firewall_unit(const ProtectionInput& in) {
 
 const std::vector<ProtectionFilter>& protection_filters() { return shipped_filters(); }
 
-std::vector<std::string> firewall_trial_commands(const ProtectionInput& in) {
-    return {"agensio ctl protection --nft --out " + in.firewall_file, "nft -f " + in.firewall_file,
-            "systemd-run --on-active=10min --unit " + std::string(kFirewallTrialUnit) + " /usr/sbin/nft delete table inet agensio"};
+// The alpha.111 report: the trial wrote the kept file and its timer deleted the table, so on a host
+// that had kept a ruleset for weeks a keep missed for ten minutes left no limit at all. The trial now
+// loads a file of its own and its timer goes back to what a boot would load. --collect: a timer whose
+// command failed would otherwise leave its unit loaded, and the next trial's systemd-run would refuse
+// the name after its ruleset was already in the kernel.
+std::vector<std::string> firewall_trial_commands(const ProtectionInput& in, bool back_to_kept) {
+    const std::string file(kFirewallTrialFile);
+    return {"agensio ctl protection --nft --out " + file, "nft -f " + file,
+            "systemd-run --on-active=10min --collect --unit " + std::string(kFirewallTrialUnit) +
+                (back_to_kept ? " /usr/sbin/nft -f " + in.firewall_file : std::string(" /usr/sbin/nft delete table inet agensio"))};
 }
 
+// `enable --now` starts nothing on a unit already active (a oneshot that stays active after boot), so
+// keep loads the file through reload-or-restart: ExecReload on an active unit, ExecStart otherwise.
+// The kept file is rendered again rather than taken from the trial's, so keep works after a reboot
+// or a timer that fired as well.
 std::vector<std::string> firewall_keep_commands(const ProtectionInput& in) {
-    std::vector<std::string> out{"systemctl stop " + std::string(kFirewallTrialUnit) + ".timer"};
+    std::vector<std::string> out{"systemctl stop " + std::string(kFirewallTrialUnit) + ".timer", "agensio ctl protection --nft --out " + in.firewall_file};
     if (in.firewall_file != kDefaultFirewallFile) {
         out.push_back("agensio ctl protection --unit --out /etc/systemd/system/" + std::string(kFirewallUnit));
         out.push_back("systemctl daemon-reload");
     }
-    out.push_back("systemctl enable --now " + std::string(kFirewallUnit));
+    out.push_back("systemctl enable " + std::string(kFirewallUnit));
+    out.push_back("systemctl reload-or-restart " + std::string(kFirewallUnit));
     return out;
 }
 
@@ -961,6 +974,7 @@ ProtectionProbe read_probe(const json::Value& reply, const ProtectionInput& in) 
     p.units_why = reply.get("units_why");
     if (units.is_object()) {
         p.firewall_unit = unit_state_word(units[std::string(kFirewallUnit)]);
+        p.firewall_unit_active = units[std::string(kFirewallUnit)].get("ActiveState");
         p.trial_running = units[std::string(kFirewallTrialUnit) + ".timer"].get("ActiveState") == "active";
         for (const char* m : {"nftables.service", "firewalld.service", "ufw.service"})
             if (units[m].is_object() && units[m].get("LoadState") != "not-found") p.managers.emplace_back(m, std::string(units[m].get("ActiveState")));
@@ -1028,6 +1042,19 @@ const char* compare_installed(std::string_view installed, std::string_view curre
     return without_comment_lines(installed) == without_comment_lines(current) ? "comments" : "stale";
 }
 
+// Whether the host keeps a ruleset a trial must go back to: the file at in.firewall_file, which
+// agensio-firewall.service loads at boot, unless the unit is known not to be enabled (without the
+// helper or systemd the unit is unknown, and the file is taken as kept).
+bool kept_ruleset(const ProtectionProbe& probe, const ProtectionFiles& files) {
+    return files.firewall_file.has_value() && (probe.firewall_unit.empty() || probe.firewall_unit == "enabled");
+}
+
+// Root's trial and keep, one fix: the trial's steps joined with &&, the check, the keep steps.
+std::string trial_steps(const ProtectionInput& in, bool kept) {
+    return std::string(kept ? "a trial that goes back to the kept ruleset in ten minutes: " : "a trial that undoes itself in ten minutes: ") +
+           ports_to_shell(firewall_trial_commands(in, kept)) + "; check the site and this session still answer, then keep it: " + keep_to_shell(firewall_keep_commands(in));
+}
+
 // The states the findings and the report share.
 struct Verdict {
     bool nft_missing = false;      // nft not installed
@@ -1035,6 +1062,8 @@ struct Verdict {
     std::vector<unsigned> uncovered_tcp, uncovered_udp;
     bool ours = false;             // the agensio table is loaded
     bool saved = false;            // the unit is enabled
+    bool kept = false;             // a ruleset the host loads at boot, which a trial goes back to
+    bool dropped = false;          // the unit enabled with its file, the table not in the kernel
     bool trial = false;
     bool saved_unknown = false;    // no systemctl
     bool f2b_missing = false;      // fail2ban not installed
@@ -1062,6 +1091,8 @@ Verdict judge(const ProtectionInput& in, const ProtectionProbe& probe, const Pro
     v.trial = probe.trial_running;
     v.saved = probe.firewall_unit == "enabled";
     v.saved_unknown = probe.firewall_unit.empty();
+    v.kept = kept_ruleset(probe, files);
+    v.dropped = probe.checked && probe.nft_available && !probe.table && v.saved && files.firewall_file.has_value();
     v.f2b_missing = probe.checked && !probe.fail2ban_available;
     v.f2b_down = probe.fail2ban_available && probe.fail2ban_service != "active" && probe.jails.empty();
     for (const auto& j : probe.jails) {
@@ -1126,7 +1157,7 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
     json::Value fw = json::Value::object();
     fw.set("table", std::string(kFirewallTable)).set("file", in.firewall_file).set("shipped", shipped("firewall/agensio.nft")).set("unit", std::string(kFirewallUnit));
     fw.set("ruleset", render_nft(in)).set("unit_text", render_firewall_unit(in));
-    fw.set("trial", strings_json(firewall_trial_commands(in))).set("keep", strings_json(firewall_keep_commands(in))).set("remove", strings_json(firewall_remove_commands()));
+    fw.set("trial", strings_json(firewall_trial_commands(in, v.kept))).set("keep", strings_json(firewall_keep_commands(in))).set("remove", strings_json(firewall_remove_commands()));
     fw.set("file_present", files.firewall_file.has_value());
     if (files.firewall_file) fw.set("file_state", compare_installed(*files.firewall_file, render_nft(in)));
     json::Value det = json::Value::object().set("checked", probe.checked);
@@ -1139,7 +1170,9 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
         json::Value rules = json::Value::array();
         for (const auto& rl : probe.rules) rules.push(json::Value::object().set("rule", rl.comment).set("packets", static_cast<double>(rl.packets)));
         det.set("rules", std::move(rules));
-        det.set("unit_state", probe.firewall_unit.empty() ? json::Value(nullptr) : json::Value(probe.firewall_unit)).set("trial_running", probe.trial_running);
+        det.set("unit_state", probe.firewall_unit.empty() ? json::Value(nullptr) : json::Value(probe.firewall_unit))
+            .set("unit_active", probe.firewall_unit_active.empty() ? json::Value(nullptr) : json::Value(probe.firewall_unit_active))
+            .set("trial_running", probe.trial_running);
         if (!probe.units_why.empty()) det.set("units_why", probe.units_why);
         json::Value managers = json::Value::object();
         for (const auto& [name, state] : probe.managers) managers.set(name, state);
@@ -1187,12 +1220,15 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
     else if (in.host_protection == "off") summary = "[control] host_protection = \"off\": the firewall and fail2ban are not checked; the files above are rendered for this host anyway";
     else if (!probe.checked) summary = "could not check the host: " + probe.why + "; the files above are rendered for this host anyway";
     else {
-        summary = v.covered ? (v.ours ? (v.trial ? "the firewall limits are loaded on trial (the timer removes them unless kept)"
+        summary = v.covered ? (v.ours ? (v.trial ? (v.kept ? "the firewall limits are loaded on trial (the timer goes back to the kept ruleset unless this one is kept)"
+                                                            : "the firewall limits are loaded on trial (the timer removes them unless kept)")
                                                   : v.saved ? "the firewall limits are loaded and enabled at boot"
                                                             : v.saved_unknown ? "the firewall limits are loaded; whether they survive a reboot could not be told"
                                                                               : "the firewall limits are loaded but not enabled at boot")
                                        : "per-address limits on the web ports exist in another table (a panel's or the administrator's)")
-                           : (v.nft_missing ? "nft is not installed: no per-address limit exists" : "no per-address limit on port(s) " + join_ports(v.uncovered_tcp));
+                           : (v.nft_missing ? "nft is not installed: no per-address limit exists"
+                                            : "no per-address limit on port(s) " + join_ports(v.uncovered_tcp) +
+                                                  (v.dropped ? " (" + std::string(kFirewallUnit) + " is enabled, its table is not loaded)" : ""));
         summary += "; ";
         summary += v.f2b_ours ? "fail2ban reads the access logs (" + std::to_string(v.banned) + " address(es) banned now, " + std::to_string(v.total_banned) + " since start" +
                                     (v.jail_state == "stale" ? "; the installed jail file is older than this rendering" : "") + ")"
@@ -1220,9 +1256,10 @@ std::vector<std::string> protection_steps(const ProtectionInput& in, const Prote
                       " && fail2ban-client reload (rendering again replaces the file; settings and notes of your own in it go into "
                       "/etc/fail2ban/jail.d/agensio.local first)");
     }
+    // A trial back to the kept file, then keep, as protection_show's procedure (the alpha.111 report:
+    // the step loaded the new file at once while protection_show said never to skip the trial).
     if (files.firewall_file && std::string_view(compare_installed(*files.firewall_file, render_nft(in))) == "stale")
-        out.push_back("the firewall ruleset on disk differs from this host's rendering (the public ports): as root: agensio ctl protection --nft --out " +
-                      in.firewall_file + " && nft -f " + in.firewall_file);
+        out.push_back("the firewall ruleset on disk differs from this host's rendering (the public ports): as root, " + trial_steps(in, kept_ruleset(ProtectionProbe{}, files)));
     return out;
 }
 
@@ -1231,7 +1268,7 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
     if (!in.exposed || in.host_protection == "off") return out;
     const std::string missing = in.host_protection == "external" ? "info" : "warn";
     const Verdict v = judge(in, probe, files);
-    const std::string trial = ports_to_shell(firewall_trial_commands(in));
+    const std::string trial = trial_steps(in, v.kept);
     const std::string keep = keep_to_shell(firewall_keep_commands(in));
     const std::string f2b = ports_to_shell(fail2ban_install_commands());
     const std::string ports = join_ports(in.tcp_ports);
@@ -1243,18 +1280,29 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
     // The firewall
     if (v.nft_missing) {
         out.push_back(Finding{missing, "firewall_limits_missing", "", "nft is not installed (" + probe.nft_why + "): no per-address limit on the web ports (" + ports + ") can exist, so one client can hold every connection slot and the ceiling cannot tell it apart",
-                              "install nftables, then as root the trial that undoes itself in ten minutes: " + trial + "; check the site and this session still answer, then keep it: " + keep + " (protection_show has the ruleset and every step)"});
+                              "install nftables, then as root " + trial + " (protection_show has the ruleset and every step)"});
+    } else if (!v.covered && v.dropped) {
+        // The unit says it loaded the file, the kernel has no table (the alpha.111 report: an old
+        // trial's timer deleted a kept table, and `enable --now` on the active unit loaded nothing).
+        const bool failed = probe.firewall_unit_active == "failed";
+        out.push_back(Finding{missing, "firewall_limits_missing", "",
+                              std::string(kFirewallUnit) + " is enabled" + (probe.firewall_unit_active.empty() ? std::string() : " (" + probe.firewall_unit_active + ")") +
+                                  " but its table, inet agensio, is not in the kernel: a trial's timer removed it, or `nft delete table`, `nft flush ruleset` or a restart of "
+                                  "the distribution's firewall did; no per-address limit on the web ports (" + join_ports(v.uncovered_tcp) + ")" +
+                                  (in.host_protection == "external" ? " ([control] host_protection = \"external\": managed outside agensio)" : ""),
+                              "as root: systemctl reload-or-restart " + std::string(kFirewallUnit) + " (loads " + in.firewall_file + " again)" +
+                                  (failed ? "; it failed at its last start: journalctl -u " + std::string(kFirewallUnit) + " says why" : "") +
+                                  (std::string_view(compare_installed(*files.firewall_file, render_nft(in))) == "stale" ? "; the file is older than this host's rendering, then: " + trial : "")});
     } else if (!v.covered) {
         out.push_back(Finding{missing, "firewall_limits_missing", "",
                               (v.ours ? "the agensio firewall table is loaded but covers no limit on port(s) " + join_ports(v.uncovered_tcp) + ": the listeners changed since it was rendered"
                                       : "no per-address limit on the web ports (" + join_ports(v.uncovered_tcp) + ") in the kernel's firewall: one client can hold every connection slot, and the ceiling refuses the rest without telling it apart") +
                                   (in.host_protection == "external" ? " ([control] host_protection = \"external\": managed outside agensio)" : ""),
-                              (v.ours ? "render it again and reload it, as root: agensio ctl protection --nft --out " + in.firewall_file + " && nft -f " + in.firewall_file
-                                      : "as root, a trial that undoes itself in ten minutes: " + trial + "; check the site and this session still answer, then keep it: " + keep) +
-                                  " (protection_show has the ruleset and every step)"});
+                              "as root, " + trial + " (protection_show has the ruleset and every step)"});
     } else if (v.ours) {
         if (v.trial)
-            out.push_back(Finding{"info", "firewall_limits_trial", "", "the firewall limits (table inet agensio) are loaded on trial: the timer " + std::string(kFirewallTrialUnit) + " removes them when it fires unless they are kept",
+            out.push_back(Finding{"info", "firewall_limits_trial", "", "the firewall limits (table inet agensio) are loaded on trial: the timer " + std::string(kFirewallTrialUnit) +
+                                      (v.kept ? " goes back to the kept ruleset " + in.firewall_file + " when it fires unless this one is kept" : " removes them when it fires unless they are kept"),
                                   "if the site and this session still answer: " + keep});
         else if (!v.saved)
             out.push_back(Finding{v.saved_unknown ? "info" : "warn", "firewall_limits_unsaved", "",
@@ -1263,7 +1311,7 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
                                   "as root: " + keep});
         if (!v.uncovered_udp.empty())
             out.push_back(Finding{"info", "firewall_quic_unlimited", "", "QUIC on port(s) " + join_ports(v.uncovered_udp) + " has no per-address handshake limit in the loaded table: it was rendered before h3 was enabled",
-                                  "render it again and reload it, as root: agensio ctl protection --nft --out " + in.firewall_file + " && nft -f " + in.firewall_file});
+                                  "as root, " + trial});
     }
     // fail2ban
     if (!in.combined) {

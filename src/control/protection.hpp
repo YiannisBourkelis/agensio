@@ -142,10 +142,15 @@ constexpr std::string_view kFirewallTable = "inet agensio";
 constexpr std::string_view kFirewallUnit = "agensio-firewall.service";
 constexpr std::string_view kFirewallTrialUnit = "agensio-firewall-trial";
 constexpr std::string_view kDefaultFirewallFile = "/etc/agensio/firewall.nft";
+// The trial's own file, in the kernel's run-time directory like the trial itself: the kept file
+// (in.firewall_file) changes only at keep (the alpha.111 report).
+constexpr std::string_view kFirewallTrialFile = "/run/agensio-firewall-trial.nft";
 constexpr std::string_view kJailFile = "/etc/fail2ban/jail.d/agensio.conf";
 // The commands root runs, in order: a trial that undoes itself, keeping it, removing it, and
-// the fail2ban install.
-std::vector<std::string> firewall_trial_commands(const ProtectionInput& in);
+// the fail2ban install. The trial's timer goes back to the kept ruleset when the host has one
+// (`back_to_kept`: the file agensio-firewall.service loads at boot), else removes the table; keep
+// writes the kept file and loads it, whether the unit is active or not and the timer fired or not.
+std::vector<std::string> firewall_trial_commands(const ProtectionInput& in, bool back_to_kept);
 std::vector<std::string> firewall_keep_commands(const ProtectionInput& in);
 std::vector<std::string> firewall_remove_commands();
 std::vector<std::string> fail2ban_install_commands();
@@ -167,6 +172,7 @@ struct ProtectionProbe {
     };
     std::vector<Rule> rules;                  // our table's counted rules
     std::string firewall_unit;                // "enabled", "disabled", "not-found", "" (unknown)
+    std::string firewall_unit_active;         // its ActiveState ("active", "inactive", "failed"), "" unknown
     bool trial_running = false;               // agensio-firewall-trial.timer is active
     std::string units_why;                    // systemctl unavailable: units unknown
     std::vector<std::pair<std::string, std::string>> managers;  // nftables, firewalld, ufw: ActiveState of each present

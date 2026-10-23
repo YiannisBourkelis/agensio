@@ -6203,11 +6203,16 @@ static void test_protection() {
         ProtectionInput js = in;
         js.combined = false;
         CHECK(render_jail(js).find("NOTE: this host's access logs are JSON") != std::string::npos);
-        CHECK(firewall_trial_commands(in).size() == 3 && firewall_trial_commands(in)[2].starts_with("systemd-run --on-active=10min --unit agensio-firewall-trial") &&
-              (firewall_keep_commands(in) == std::vector<std::string>{"systemctl stop agensio-firewall-trial.timer", "systemctl enable --now agensio-firewall.service"}));
+        CHECK(firewall_trial_commands(in, false).size() == 3 && firewall_trial_commands(in, false)[0] == "agensio ctl protection --nft --out /run/agensio-firewall-trial.nft" &&
+              firewall_trial_commands(in, false)[2] == "systemd-run --on-active=10min --collect --unit agensio-firewall-trial /usr/sbin/nft delete table inet agensio" &&
+              firewall_trial_commands(in, true)[2] == "systemd-run --on-active=10min --collect --unit agensio-firewall-trial /usr/sbin/nft -f /etc/agensio/firewall.nft" &&
+              (firewall_keep_commands(in) == std::vector<std::string>{"systemctl stop agensio-firewall-trial.timer", "agensio ctl protection --nft --out /etc/agensio/firewall.nft",
+                                                                      "systemctl enable agensio-firewall.service", "systemctl reload-or-restart agensio-firewall.service"}));
         ProtectionInput odd = in;
         odd.firewall_file = "/srv/agensio/firewall.nft";
-        CHECK(firewall_keep_commands(odd).size() == 4 && firewall_keep_commands(odd)[1] == "agensio ctl protection --unit --out /etc/systemd/system/agensio-firewall.service");
+        CHECK(firewall_keep_commands(odd).size() == 6 && firewall_keep_commands(odd)[1] == "agensio ctl protection --nft --out /srv/agensio/firewall.nft" &&
+              firewall_keep_commands(odd)[2] == "agensio ctl protection --unit --out /etc/systemd/system/agensio-firewall.service" &&
+              firewall_trial_commands(odd, true)[2].ends_with(" /usr/sbin/nft -f /srv/agensio/firewall.nft"));
         CHECK(fail2ban_install_commands().size() == 3 && fail2ban_install_commands()[0].find("filter.d/agensio-post.conf /usr/share/agensio/fail2ban/filter.d/agensio-denied.conf /etc/fail2ban/filter.d/") != std::string::npos);
     }
     // The helper's answer, read: nft's JSON (our table with counters, a foreign rule through a
@@ -6446,7 +6451,9 @@ static void test_protection() {
     CHECK(codes(in, probe, nojail).empty());  // the jails that read our logs are someone else's file: fine
     ProtectionProbe p2 = probe;
     p2.firewall_unit = "disabled";
-    CHECK(codes(in, p2, files) == "warn:firewall_limits_unsaved" && protection_findings(in, p2, files)[0].fix == "as root: systemctl stop agensio-firewall-trial.timer; systemctl enable --now agensio-firewall.service");
+    CHECK(codes(in, p2, files) == "warn:firewall_limits_unsaved" &&
+          protection_findings(in, p2, files)[0].fix == "as root: systemctl stop agensio-firewall-trial.timer; agensio ctl protection --nft --out /etc/agensio/firewall.nft && "
+                                                       "systemctl enable agensio-firewall.service && systemctl reload-or-restart agensio-firewall.service");
     p2.trial_running = true;
     CHECK(codes(in, p2, files) == "info:firewall_limits_trial");
     p2.trial_running = false;
@@ -6462,12 +6469,13 @@ static void test_protection() {
     none.limited_udp.clear();
     none.rules.clear();
     none.jails.clear();
+    none.firewall_unit = "not-found";  // nothing in place, the unit neither (enabled with its table gone: the alpha.111 case, below)
     {
         const auto f = protection_findings(in, none, files);
         CHECK(codes(in, none, files) == "warn:firewall_limits_missing warn:fail2ban_missing");
         CHECK(f[0].message.starts_with("no per-address limit on the web ports (80, 443) in the kernel's firewall") &&
-              f[0].fix.find("agensio ctl protection --nft --out /etc/agensio/firewall.nft && nft -f /etc/agensio/firewall.nft && systemd-run --on-active=10min") != std::string::npos &&
-              f[0].fix.find("then keep it: systemctl stop agensio-firewall-trial.timer; systemctl enable --now agensio-firewall.service") != std::string::npos);
+              f[0].fix.find("agensio ctl protection --nft --out /run/agensio-firewall-trial.nft && nft -f /run/agensio-firewall-trial.nft && systemd-run --on-active=10min") != std::string::npos &&
+              f[0].fix.find("then keep it: systemctl stop agensio-firewall-trial.timer; agensio ctl protection --nft --out /etc/agensio/firewall.nft && systemctl enable") != std::string::npos);
         CHECK(f[1].message.starts_with("no fail2ban jail reads agensio's access logs (/var/log/agensio/access.log, /var/log/agensio/wp.log)") && f[1].message.find("/login, /wp-login.php") != std::string::npos &&
               f[1].fix.find("agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload") != std::string::npos);
         ProtectionInput ext = in;
@@ -6484,6 +6492,87 @@ static void test_protection() {
     ProtectionProbe moved = probe;
     moved.limited_tcp = {80};
     CHECK(codes(in, moved, files) == "warn:firewall_limits_missing" && protection_findings(in, moved, files)[0].message.starts_with("the agensio firewall table is loaded but covers no limit on port(s) 443"));
+    // The alpha.111 report: on a host that kept a ruleset (agensio-firewall.service enabled with its
+    // file) the trial loads a file of its own and its timer goes back to the kept file, not to no table,
+    // so a keep missed for ten minutes leaves the host as it was; keep writes the kept file and loads it
+    // whether the unit is active (`enable --now` starts nothing then) or not and whether the timer fired
+    // or not; health's and a site change's re-render steps are that trial too; a unit enabled while its
+    // table is gone is named, with its reload.
+    {
+        const auto npos = std::string::npos;
+        auto list = [](const json::Value& a) {
+            std::vector<std::string> out;
+            for (const auto& x : a.items()) out.push_back(x.str());
+            return out;
+        };
+        const std::string load = "agensio ctl protection --nft --out /run/agensio-firewall-trial.nft && nft -f /run/agensio-firewall-trial.nft && ";
+        const std::string back = "systemd-run --on-active=10min --collect --unit agensio-firewall-trial /usr/sbin/nft -f /etc/agensio/firewall.nft";
+        const std::string gone = "systemd-run --on-active=10min --collect --unit agensio-firewall-trial /usr/sbin/nft delete table inet agensio";
+        const std::vector<std::string> keep{"systemctl stop agensio-firewall-trial.timer", "agensio ctl protection --nft --out /etc/agensio/firewall.nft",
+                                            "systemctl enable agensio-firewall.service", "systemctl reload-or-restart agensio-firewall.service"};
+        const std::string keep_line = "systemctl stop agensio-firewall-trial.timer; agensio ctl protection --nft --out /etc/agensio/firewall.nft && "
+                                      "systemctl enable agensio-firewall.service && systemctl reload-or-restart agensio-firewall.service";
+        ProtectionProbe kept = probe;  // the report's host: enabled, active, its table rendered before h3
+        kept.limited_udp.clear();
+        {
+            const json::Value r = protection_report(in, kept, files);
+            const auto f = protection_findings(in, kept, files);
+            CHECK((list(r["firewall"]["trial"]) == std::vector<std::string>{"agensio ctl protection --nft --out /run/agensio-firewall-trial.nft", "nft -f /run/agensio-firewall-trial.nft", back}) &&
+                  list(r["firewall"]["keep"]) == keep);
+            CHECK(codes(in, kept, files) == "info:firewall_quic_unlimited" && f[0].fix.find(load + back + ";") != npos && f[0].fix.find("then keep it: " + keep_line) != npos);
+        }
+        ProtectionProbe on_trial = probe;
+        on_trial.trial_running = true;
+        CHECK(codes(in, on_trial, files) == "info:firewall_limits_trial" &&
+              protection_findings(in, on_trial, files)[0].message.find("goes back to the kept ruleset /etc/agensio/firewall.nft when it fires") != npos &&
+              protection_findings(in, on_trial, files)[0].fix == "if the site and this session still answer: " + keep_line &&
+              protection_report(in, on_trial, files).get("summary").starts_with("the firewall limits are loaded on trial (the timer goes back to the kept ruleset unless this one is kept)"));
+        // Nothing kept: no file, or a unit that is not enabled (what a boot loads is no table); the timer removes the table.
+        ProtectionProbe fresh = probe;
+        fresh.table = false;
+        fresh.limited_tcp.clear();
+        fresh.limited_udp.clear();
+        fresh.rules.clear();
+        fresh.firewall_unit = "not-found";
+        ProtectionFiles nofile = files;
+        nofile.firewall_file.reset();
+        CHECK(list(protection_report(in, fresh, nofile)["firewall"]["trial"]).back() == gone && protection_findings(in, fresh, nofile)[0].fix.find(load + gone + ";") != npos);
+        ProtectionProbe unsaved = kept;
+        unsaved.firewall_unit = "disabled";
+        CHECK(list(protection_report(in, unsaved, files)["firewall"]["trial"]).back() == gone && codes(in, unsaved, files) == "warn:firewall_limits_unsaved info:firewall_quic_unlimited" &&
+              protection_findings(in, unsaved, files)[0].fix == "as root: " + keep_line);
+        // Without the helper or systemd the unit is unknown: the file on disk is what the host kept.
+        CHECK(list(protection_report(in, read_probe(json::Value(nullptr), in), files)["firewall"]["trial"]).back() == back &&
+              list(protection_report(in, read_probe(json::Value(nullptr), in), nofile)["firewall"]["trial"]).back() == gone);
+        // A site change's step for a kept file that differs: the trial back to it, then keep.
+        ProtectionInput eighty = in;
+        eighty.tcp_ports = {80};
+        ProtectionFiles older = files;
+        older.firewall_file = render_nft(eighty);
+        const auto steps = protection_steps(in, older);
+        CHECK(steps.size() == 1 && steps[0].starts_with("the firewall ruleset on disk differs from this host's rendering") && steps[0].find(load + back + ";") != npos &&
+              steps[0].find("then keep it: " + keep_line) != npos);
+        // Enabled, its table gone (the timer of an old trial, `nft delete table`, a flush): the unit's reload.
+        json::Value dr = reply;
+        dr.set("nft", json::Value::object().set("available", true).set("ruleset", json::Value::object().set("nftables", json::Value::array())));
+        const ProtectionProbe dropped = read_probe(dr, in);
+        {
+            const auto f = protection_findings(in, dropped, files);
+            CHECK(codes(in, dropped, files) == "warn:firewall_limits_missing" &&
+                  f[0].message.starts_with("agensio-firewall.service is enabled (active) but its table, inet agensio, is not in the kernel: a trial's timer removed it, or `nft delete table`") &&
+                  f[0].message.find("no per-address limit on the web ports (80, 443)") != npos &&
+                  f[0].fix == "as root: systemctl reload-or-restart agensio-firewall.service (loads /etc/agensio/firewall.nft again)" &&
+                  protection_report(in, dropped, files).get("summary").starts_with("no per-address limit on port(s) 80, 443 (agensio-firewall.service is enabled, its table is not loaded)"));
+            const auto g = protection_findings(in, dropped, older);
+            CHECK(g[0].fix.starts_with("as root: systemctl reload-or-restart agensio-firewall.service (loads /etc/agensio/firewall.nft again); the file is older than this host's rendering, then: ") &&
+                  g[0].fix.find(load + back + ";") != npos);
+            json::Value units = json::Value::object().set("agensio-firewall.service", json::Value::object().set("LoadState", "loaded").set("ActiveState", "failed").set("UnitFileState", "enabled"));
+            dr.set("units", std::move(units));
+            const auto h = protection_findings(in, read_probe(dr, in), files);
+            CHECK(h[0].message.starts_with("agensio-firewall.service is enabled (failed) but its table") &&
+                  h[0].fix.ends_with("; it failed at its last start: journalctl -u agensio-firewall.service says why"));
+        }
+    }
     // Another table's limits count; fail2ban down; the tools absent; the helper away; JSON logs.
     ProtectionProbe theirs = probe;
     theirs.table = false;
