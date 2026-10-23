@@ -3460,7 +3460,7 @@ agensio ctl protection --nft --out /run/agensio-firewall-trial.nft   # the rules
 nft -f /run/agensio-firewall-trial.nft                               # in the kernel only; a reboot drops it
 systemd-run --on-active=10min --collect --unit agensio-firewall-trial /usr/sbin/nft delete table inet agensio
 #   ... the site answers, this SSH session is alive, `agensio ctl protection` says covered ...
-systemctl stop agensio-firewall-trial.timer                          # keep it: cancel the undo
+systemctl stop agensio-firewall-trial.timer || true                  # keep it: cancel the undo (gone once it fired)
 agensio ctl protection --nft --out /etc/agensio/firewall.nft          # the kept ruleset
 systemctl enable agensio-firewall.service                            # loaded at every boot
 systemctl reload-or-restart agensio-firewall.service                 # and now
@@ -3475,8 +3475,10 @@ for weeks included (the alpha.111 report). `agensio ctl protection` and the heal
 right command for the host, and a site change's next steps and health's re-render fixes are this
 same trial. Keep works in every state: before or after the timer fired, on a unit active since boot
 or one not started yet. `systemctl enable --now` starts nothing on a oneshot that is already active,
-so on a host that kept a ruleset it loaded no new file. Stopping a timer that fired fails harmlessly,
-and the steps after it run anyway. `--collect` unloads the timer's unit even when its command failed;
+so on a host that kept a ruleset it loaded no new file. A timer that fired is unloaded, and `systemctl
+stop` then exits 5 ("not loaded"), hence the `|| true` (bash, dash and fish 3 and later): keep's steps,
+run each once the one before it succeeded, go on past it (until 0.1.0-alpha.113 they stopped there,
+the alpha.112 report). `--collect` unloads the timer's unit even when its command failed;
 otherwise its name stays taken, and the next trial's `systemd-run` would refuse it with that trial's
 ruleset already loaded.
 

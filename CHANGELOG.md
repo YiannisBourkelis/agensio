@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.0-alpha.113
+
+- **Keep's first step goes on after the trial's timer has fired, and the firewall findings name TCP and
+  UDP** (the test host's report on alpha.112). Once the timer fires, `--collect` unloads it and
+  `systemctl stop agensio-firewall-trial.timer` exits 5, "not loaded". `protection_show`'s keep list,
+  run step by step and stopped at a failure as its procedure says, stopped there, in the very case
+  alpha.112 said keep now handled. The step is now `systemctl stop agensio-firewall-trial.timer ||
+  true`, and the findings' fixes join every step with `&&`. `firewall_limits_missing`, the unchecked
+  note and the summary name the ports by protocol, `TCP 80, 443 and UDP 443 (QUIC)`: the QUIC handshake
+  limit goes with the table too.
+
 ## 0.1.0-alpha.112 (2026-10-23)
 
 - **`server_status` says what waits for a restart** (the test host's note on alpha.111). While HTTP/3

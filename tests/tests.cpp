@@ -6206,7 +6206,7 @@ static void test_protection() {
         CHECK(firewall_trial_commands(in, false).size() == 3 && firewall_trial_commands(in, false)[0] == "agensio ctl protection --nft --out /run/agensio-firewall-trial.nft" &&
               firewall_trial_commands(in, false)[2] == "systemd-run --on-active=10min --collect --unit agensio-firewall-trial /usr/sbin/nft delete table inet agensio" &&
               firewall_trial_commands(in, true)[2] == "systemd-run --on-active=10min --collect --unit agensio-firewall-trial /usr/sbin/nft -f /etc/agensio/firewall.nft" &&
-              (firewall_keep_commands(in) == std::vector<std::string>{"systemctl stop agensio-firewall-trial.timer", "agensio ctl protection --nft --out /etc/agensio/firewall.nft",
+              (firewall_keep_commands(in) == std::vector<std::string>{"systemctl stop agensio-firewall-trial.timer || true", "agensio ctl protection --nft --out /etc/agensio/firewall.nft",
                                                                       "systemctl enable agensio-firewall.service", "systemctl reload-or-restart agensio-firewall.service"}));
         ProtectionInput odd = in;
         odd.firewall_file = "/srv/agensio/firewall.nft";
@@ -6452,7 +6452,7 @@ static void test_protection() {
     ProtectionProbe p2 = probe;
     p2.firewall_unit = "disabled";
     CHECK(codes(in, p2, files) == "warn:firewall_limits_unsaved" &&
-          protection_findings(in, p2, files)[0].fix == "as root: systemctl stop agensio-firewall-trial.timer; agensio ctl protection --nft --out /etc/agensio/firewall.nft && "
+          protection_findings(in, p2, files)[0].fix == "as root: systemctl stop agensio-firewall-trial.timer || true && agensio ctl protection --nft --out /etc/agensio/firewall.nft && "
                                                        "systemctl enable agensio-firewall.service && systemctl reload-or-restart agensio-firewall.service");
     p2.trial_running = true;
     CHECK(codes(in, p2, files) == "info:firewall_limits_trial");
@@ -6473,9 +6473,9 @@ static void test_protection() {
     {
         const auto f = protection_findings(in, none, files);
         CHECK(codes(in, none, files) == "warn:firewall_limits_missing warn:fail2ban_missing");
-        CHECK(f[0].message.starts_with("no per-address limit on the web ports (80, 443) in the kernel's firewall") &&
+        CHECK(f[0].message.starts_with("no per-address limit on TCP 80, 443 and UDP 443 (QUIC) in the kernel's firewall") &&
               f[0].fix.find("agensio ctl protection --nft --out /run/agensio-firewall-trial.nft && nft -f /run/agensio-firewall-trial.nft && systemd-run --on-active=10min") != std::string::npos &&
-              f[0].fix.find("then keep it: systemctl stop agensio-firewall-trial.timer; agensio ctl protection --nft --out /etc/agensio/firewall.nft && systemctl enable") != std::string::npos);
+              f[0].fix.find("then keep it: systemctl stop agensio-firewall-trial.timer || true && agensio ctl protection --nft --out /etc/agensio/firewall.nft && systemctl enable") != std::string::npos);
         CHECK(f[1].message.starts_with("no fail2ban jail reads agensio's access logs (/var/log/agensio/access.log, /var/log/agensio/wp.log)") && f[1].message.find("/login, /wp-login.php") != std::string::npos &&
               f[1].fix.find("agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload") != std::string::npos);
         ProtectionInput ext = in;
@@ -6486,12 +6486,12 @@ static void test_protection() {
         ProtectionInput lo = in;
         lo.exposed = false;
         CHECK(codes(lo, none, files).empty() && protection_report(lo, none, files).get("summary").starts_with("every listener is on loopback"));
-        CHECK(protection_report(in, none, files).get("summary") == "no per-address limit on port(s) 80, 443; no fail2ban jail reads the access logs");
+        CHECK(protection_report(in, none, files).get("summary") == "no per-address limit on TCP 80, 443 and UDP 443 (QUIC); no fail2ban jail reads the access logs");
     }
     // Our table loaded for other ports than the listeners have now: render again.
     ProtectionProbe moved = probe;
     moved.limited_tcp = {80};
-    CHECK(codes(in, moved, files) == "warn:firewall_limits_missing" && protection_findings(in, moved, files)[0].message.starts_with("the agensio firewall table is loaded but covers no limit on port(s) 443"));
+    CHECK(codes(in, moved, files) == "warn:firewall_limits_missing" && protection_findings(in, moved, files)[0].message.starts_with("the agensio firewall table is loaded but covers no limit on TCP 443:"));
     // The alpha.111 report: on a host that kept a ruleset (agensio-firewall.service enabled with its
     // file) the trial loads a file of its own and its timer goes back to the kept file, not to no table,
     // so a keep missed for ten minutes leaves the host as it was; keep writes the kept file and loads it
@@ -6508,9 +6508,9 @@ static void test_protection() {
         const std::string load = "agensio ctl protection --nft --out /run/agensio-firewall-trial.nft && nft -f /run/agensio-firewall-trial.nft && ";
         const std::string back = "systemd-run --on-active=10min --collect --unit agensio-firewall-trial /usr/sbin/nft -f /etc/agensio/firewall.nft";
         const std::string gone = "systemd-run --on-active=10min --collect --unit agensio-firewall-trial /usr/sbin/nft delete table inet agensio";
-        const std::vector<std::string> keep{"systemctl stop agensio-firewall-trial.timer", "agensio ctl protection --nft --out /etc/agensio/firewall.nft",
+        const std::vector<std::string> keep{"systemctl stop agensio-firewall-trial.timer || true", "agensio ctl protection --nft --out /etc/agensio/firewall.nft",
                                             "systemctl enable agensio-firewall.service", "systemctl reload-or-restart agensio-firewall.service"};
-        const std::string keep_line = "systemctl stop agensio-firewall-trial.timer; agensio ctl protection --nft --out /etc/agensio/firewall.nft && "
+        const std::string keep_line = "systemctl stop agensio-firewall-trial.timer || true && agensio ctl protection --nft --out /etc/agensio/firewall.nft && "
                                       "systemctl enable agensio-firewall.service && systemctl reload-or-restart agensio-firewall.service";
         ProtectionProbe kept = probe;  // the report's host: enabled, active, its table rendered before h3
         kept.limited_udp.clear();
@@ -6560,9 +6560,9 @@ static void test_protection() {
             const auto f = protection_findings(in, dropped, files);
             CHECK(codes(in, dropped, files) == "warn:firewall_limits_missing" &&
                   f[0].message.starts_with("agensio-firewall.service is enabled (active) but its table, inet agensio, is not in the kernel: a trial's timer removed it, or `nft delete table`") &&
-                  f[0].message.find("no per-address limit on the web ports (80, 443)") != npos &&
+                  f[0].message.ends_with("; no per-address limit on TCP 80, 443 and UDP 443 (QUIC)") &&
                   f[0].fix == "as root: systemctl reload-or-restart agensio-firewall.service (loads /etc/agensio/firewall.nft again)" &&
-                  protection_report(in, dropped, files).get("summary").starts_with("no per-address limit on port(s) 80, 443 (agensio-firewall.service is enabled, its table is not loaded)"));
+                  protection_report(in, dropped, files).get("summary").starts_with("no per-address limit on TCP 80, 443 and UDP 443 (QUIC): agensio-firewall.service is enabled, its table is not loaded;"));
             const auto g = protection_findings(in, dropped, older);
             CHECK(g[0].fix.starts_with("as root: systemctl reload-or-restart agensio-firewall.service (loads /etc/agensio/firewall.nft again); the file is older than this host's rendering, then: ") &&
                   g[0].fix.find(load + back + ";") != npos);
@@ -6588,9 +6588,11 @@ static void test_protection() {
                            .set("fail2ban", json::Value::object().set("available", false).set("why", "fail2ban is not installed (package fail2ban)"));
     const ProtectionProbe absent = read_probe(bare, in);
     CHECK(absent.checked && !absent.nft_available && !absent.fail2ban_available && codes(in, absent, files) == "warn:firewall_limits_missing warn:fail2ban_missing" &&
-          protection_findings(in, absent, files)[0].message.starts_with("nft is not installed") && protection_findings(in, absent, files)[1].fix.starts_with("install fail2ban, then as root:"));
+          protection_findings(in, absent, files)[0].message.starts_with("nft is not installed (nft is not installed (package nftables)): no per-address limit on TCP 80, 443 and UDP 443 (QUIC) can exist") &&
+          protection_findings(in, absent, files)[1].fix.starts_with("install fail2ban, then as root:"));
     const ProtectionProbe busy = read_probe(json::Value::object().set("ok", false).set("busy", true), in);
-    CHECK(!busy.checked && codes(in, busy, files) == "info:protection_unchecked" && protection_findings(in, busy, files)[0].message.find("the helper is busy") != std::string::npos);
+    CHECK(!busy.checked && codes(in, busy, files) == "info:protection_unchecked" && protection_findings(in, busy, files)[0].message.find("the helper is busy") != std::string::npos &&
+          protection_findings(in, busy, files)[0].message.starts_with("whether the firewall limits TCP 80, 443 and UDP 443 (QUIC) per address"));
     const ProtectionProbe nohelper = read_probe(json::Value(nullptr), in);
     CHECK(!nohelper.checked && nohelper.why.find("provisioning helper") != std::string::npos);
     ProtectionInput js = in;

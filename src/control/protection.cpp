@@ -461,13 +461,15 @@ json::Value ports_json(const std::vector<unsigned>& v) {
 }
 
 // Root's steps as one line, each run only when the one before it worked (the alpha.94 report: with `;`
-// a render that failed was still loaded). `&&` is the same in bash, dash and fish 3 and later.
+// a render that failed was still loaded). `&&` and `||` are the same in bash, dash and fish 3 and later.
 std::string ports_to_shell(const std::vector<std::string>& cmds) { return join(cmds, " && "); }
-// The keep steps: stopping the trial's timer fails harmlessly once it has fired, and must not stop the
-// rest, which loads and enables the ruleset again.
-std::string keep_to_shell(const std::vector<std::string>& cmds) {
-    if (cmds.empty()) return {};
-    return cmds.front() + (cmds.size() > 1 ? "; " + join(std::vector<std::string>(cmds.begin() + 1, cmds.end()), " && ") : std::string());
+
+// The ports a limit is missing on, by protocol: "TCP 80, 443 and UDP 443 (QUIC)" (the alpha.112 report:
+// "the web ports (80, 443)" left out the QUIC handshake limit that went with the table).
+std::string port_words(const std::vector<unsigned>& tcp, const std::vector<unsigned>& udp) {
+    std::string out = tcp.empty() ? std::string() : "TCP " + join_ports(tcp);
+    if (!udp.empty()) out += (out.empty() ? "UDP " : " and UDP ") + join_ports(udp) + " (QUIC)";
+    return out;
 }
 
 }  // namespace
@@ -891,9 +893,11 @@ std::vector<std::string> firewall_trial_commands(const ProtectionInput& in, bool
 // `enable --now` starts nothing on a unit already active (a oneshot that stays active after boot), so
 // keep loads the file through reload-or-restart: ExecReload on an active unit, ExecStart otherwise.
 // The kept file is rendered again rather than taken from the trial's, so keep works after a reboot
-// or a timer that fired as well.
+// or a timer that fired as well. A timer that fired is unloaded (--collect) and `systemctl stop`
+// exits 5, "not loaded": the step tolerates it, so a list run step by step, stopping at a failure,
+// goes on (the alpha.112 report).
 std::vector<std::string> firewall_keep_commands(const ProtectionInput& in) {
-    std::vector<std::string> out{"systemctl stop " + std::string(kFirewallTrialUnit) + ".timer", "agensio ctl protection --nft --out " + in.firewall_file};
+    std::vector<std::string> out{"systemctl stop " + std::string(kFirewallTrialUnit) + ".timer || true", "agensio ctl protection --nft --out " + in.firewall_file};
     if (in.firewall_file != kDefaultFirewallFile) {
         out.push_back("agensio ctl protection --unit --out /etc/systemd/system/" + std::string(kFirewallUnit));
         out.push_back("systemctl daemon-reload");
@@ -1052,7 +1056,7 @@ bool kept_ruleset(const ProtectionProbe& probe, const ProtectionFiles& files) {
 // Root's trial and keep, one fix: the trial's steps joined with &&, the check, the keep steps.
 std::string trial_steps(const ProtectionInput& in, bool kept) {
     return std::string(kept ? "a trial that goes back to the kept ruleset in ten minutes: " : "a trial that undoes itself in ten minutes: ") +
-           ports_to_shell(firewall_trial_commands(in, kept)) + "; check the site and this session still answer, then keep it: " + keep_to_shell(firewall_keep_commands(in));
+           ports_to_shell(firewall_trial_commands(in, kept)) + "; check the site and this session still answer, then keep it: " + ports_to_shell(firewall_keep_commands(in));
 }
 
 // The states the findings and the report share.
@@ -1227,8 +1231,8 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
                                                                               : "the firewall limits are loaded but not enabled at boot")
                                        : "per-address limits on the web ports exist in another table (a panel's or the administrator's)")
                            : (v.nft_missing ? "nft is not installed: no per-address limit exists"
-                                            : "no per-address limit on port(s) " + join_ports(v.uncovered_tcp) +
-                                                  (v.dropped ? " (" + std::string(kFirewallUnit) + " is enabled, its table is not loaded)" : ""));
+                                            : "no per-address limit on " + port_words(v.uncovered_tcp, v.uncovered_udp) +
+                                                  (v.dropped ? ": " + std::string(kFirewallUnit) + " is enabled, its table is not loaded" : ""));
         summary += "; ";
         summary += v.f2b_ours ? "fail2ban reads the access logs (" + std::to_string(v.banned) + " address(es) banned now, " + std::to_string(v.total_banned) + " since start" +
                                     (v.jail_state == "stale" ? "; the installed jail file is older than this rendering" : "") + ")"
@@ -1269,17 +1273,17 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
     const std::string missing = in.host_protection == "external" ? "info" : "warn";
     const Verdict v = judge(in, probe, files);
     const std::string trial = trial_steps(in, v.kept);
-    const std::string keep = keep_to_shell(firewall_keep_commands(in));
+    const std::string keep = ports_to_shell(firewall_keep_commands(in));
     const std::string f2b = ports_to_shell(fail2ban_install_commands());
-    const std::string ports = join_ports(in.tcp_ports);
+    const std::string ports = port_words(in.tcp_ports, in.udp_ports);
     if (!probe.checked) {
-        out.push_back(Finding{"info", "protection_unchecked", "", "whether the firewall limits the web ports (" + ports + ") per address and fail2ban reads the access logs could not be checked: " + probe.why,
+        out.push_back(Finding{"info", "protection_unchecked", "", "whether the firewall limits " + ports + " per address and fail2ban reads the access logs could not be checked: " + probe.why,
                               "protection_show renders the ruleset and the jails for this host meanwhile; the check needs the root helper"});
         return out;
     }
     // The firewall
     if (v.nft_missing) {
-        out.push_back(Finding{missing, "firewall_limits_missing", "", "nft is not installed (" + probe.nft_why + "): no per-address limit on the web ports (" + ports + ") can exist, so one client can hold every connection slot and the ceiling cannot tell it apart",
+        out.push_back(Finding{missing, "firewall_limits_missing", "", "nft is not installed (" + probe.nft_why + "): no per-address limit on " + ports + " can exist, so one client can hold every connection slot and the ceiling cannot tell it apart",
                               "install nftables, then as root " + trial + " (protection_show has the ruleset and every step)"});
     } else if (!v.covered && v.dropped) {
         // The unit says it loaded the file, the kernel has no table (the alpha.111 report: an old
@@ -1288,15 +1292,15 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
         out.push_back(Finding{missing, "firewall_limits_missing", "",
                               std::string(kFirewallUnit) + " is enabled" + (probe.firewall_unit_active.empty() ? std::string() : " (" + probe.firewall_unit_active + ")") +
                                   " but its table, inet agensio, is not in the kernel: a trial's timer removed it, or `nft delete table`, `nft flush ruleset` or a restart of "
-                                  "the distribution's firewall did; no per-address limit on the web ports (" + join_ports(v.uncovered_tcp) + ")" +
+                                  "the distribution's firewall did; no per-address limit on " + port_words(v.uncovered_tcp, v.uncovered_udp) +
                                   (in.host_protection == "external" ? " ([control] host_protection = \"external\": managed outside agensio)" : ""),
                               "as root: systemctl reload-or-restart " + std::string(kFirewallUnit) + " (loads " + in.firewall_file + " again)" +
                                   (failed ? "; it failed at its last start: journalctl -u " + std::string(kFirewallUnit) + " says why" : "") +
                                   (std::string_view(compare_installed(*files.firewall_file, render_nft(in))) == "stale" ? "; the file is older than this host's rendering, then: " + trial : "")});
     } else if (!v.covered) {
         out.push_back(Finding{missing, "firewall_limits_missing", "",
-                              (v.ours ? "the agensio firewall table is loaded but covers no limit on port(s) " + join_ports(v.uncovered_tcp) + ": the listeners changed since it was rendered"
-                                      : "no per-address limit on the web ports (" + join_ports(v.uncovered_tcp) + ") in the kernel's firewall: one client can hold every connection slot, and the ceiling refuses the rest without telling it apart") +
+                              (v.ours ? "the agensio firewall table is loaded but covers no limit on " + port_words(v.uncovered_tcp, v.uncovered_udp) + ": the listeners changed since it was rendered"
+                                      : "no per-address limit on " + port_words(v.uncovered_tcp, v.uncovered_udp) + " in the kernel's firewall: one client can hold every connection slot, and the ceiling refuses the rest without telling it apart") +
                                   (in.host_protection == "external" ? " ([control] host_protection = \"external\": managed outside agensio)" : ""),
                               "as root, " + trial + " (protection_show has the ruleset and every step)"});
     } else if (v.ours) {
