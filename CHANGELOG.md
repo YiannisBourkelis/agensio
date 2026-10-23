@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.113
+## 0.1.0-alpha.113 (2026-10-23)
 
 - **Keep's first step goes on after the trial's timer has fired, and the firewall findings name TCP and
   UDP** (the test host's report on alpha.112). Once the timer fires, `--collect` unloads it and
