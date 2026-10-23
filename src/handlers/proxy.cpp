@@ -312,6 +312,7 @@ void ProxyHandler::finish(Exchange& x, UpstreamResult& res) {
     if (res.upgraded) {
         s.response.upgrade = true;
         s.response.tunnel_timeout_s = loc.proxy.tunnel_timeout_s;
+        s.response.tunnel_send_ms = static_cast<std::uint32_t>(loc.proxy.options.send_timeout.count());
         s.response.upstream = "upgrade";
     }
     x.completed = true;

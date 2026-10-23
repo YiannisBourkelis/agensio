@@ -46,6 +46,7 @@ struct Response {
     // client and the origin (the handler's exchange holds the origin connection).
     bool upgrade = false;
     std::uint32_t tunnel_timeout_s = 0;  // idle limit for the tunnel, 0 = none
+    std::uint32_t tunnel_send_ms = 0;    // longest wait of a tunnel write to either side (proxy.send_timeout), 0 = none
     // The site's [[site.response_headers]] (core/response_fields.hpp): an application's answer
     // decided in the upstream loop, so no writer applies them again; and a text block of agensio's
     // own that holds fields of its own (no-store, Retry-After), which the rules leave standing.
@@ -77,6 +78,7 @@ struct Response {
         upstream = nullptr;
         upgrade = false;
         tunnel_timeout_s = 0;
+        tunnel_send_ms = 0;
         fields_decided = false;
         own_fields = false;
         unsettled_file = false;

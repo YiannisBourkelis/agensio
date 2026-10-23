@@ -1348,6 +1348,105 @@ sleep 3  # the client reads nothing more: the send buffers fill, the tunnel's ne
 check "a TLS WebSocket client that stops reading (the 2026-10-04 incident): the tunnel's writes wait in the loop instead of sleeping in write(2), a plain request is answered within 3 s meanwhile, and every socket of the server carries O_NONBLOCK" "200 yes all-nonblocking" "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8080/) $(grep -q '^read' bench/tmp/ws/client.log && echo yes) $(bad=0; for f in /proc/$PID/fd/*; do case "$(readlink "$f" 2>/dev/null)" in socket*) grep -qE '^flags:[[:space:]]*[0-7]*[4-7][0-7]{3}$' /proc/$PID/fdinfo/$(basename "$f") || bad=$((bad+1));; esac; done; [ $bad = 0 ] && echo all-nonblocking || echo "$bad blocking")"
 kill $WSC $WSB 2>/dev/null; wait $WSC $WSB 2>/dev/null
 cpost /v1/sites/ws.test/delete '{"confirm":true,"reason":"ws"}' > /dev/null
+# A tunnel write that does not finish within proxy.send_timeout ends the tunnel (the follow-up of
+# the 2026-10-04 incident): before, a client that stopped reading held its connection and the
+# origin's until the kernel gave up, fifteen minutes. A private instance with send_timeout = 2 and an
+# origin with three paths: /flood sends without pause (its client stops reading), /sink never reads
+# (its client sends without pause), /quiet only waits (its client sends four bytes after 5 s): the
+# first two are cut, in each direction (the flood's origin within 10 s, while its client still holds
+# the connection for 14), the quiet one, with nothing waiting to be written, stays.
+mkdir -p bench/tmp/tunnel
+printf '[server]\nworkers = 1\n[log]\naccess = "off"\nerror = "%s/bench/tmp/tunnel/error.log"\nlevel = "info"\n[[site]]\nserver_name = ["tun.test"]\nlisten = ["127.0.0.1:18448"]\napp = "proxy"\nupstream = "http://127.0.0.1:18991"\nproxy = { send_timeout = 2 }\n[[site]]\nserver_name = ["idle.test"]\nlisten = ["127.0.0.1:18449"]\napp = "proxy"\nupstream = "http://127.0.0.1:18991"\nproxy = { tunnel_timeout = 2 }\n' "$ROOT" > bench/tmp/tunnel/agensio.toml
+rm -f bench/tmp/tunnel/error.log
+python3 - > bench/tmp/tunnel/origin.log 2>&1 <<'PYT' &
+import socket, threading, time
+def handle(c):
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        d = c.recv(4096)
+        if not d: return
+        buf += d
+    path = buf.split(b" ")[1]
+    c.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n")
+    if path == b"/flood":
+        t0 = time.time()
+        try:
+            while True: c.sendall(b"x" * 65536)
+        except OSError:
+            print("flood closed after", "early" if time.time() - t0 < 10 else "late", flush=True)  # its client lets go after 14 s
+    elif path == b"/quiet":
+        while True:
+            d = c.recv(4096)
+            if not d: break
+            print("quiet got", len(d), flush=True)
+    else:
+        time.sleep(60)  # /sink: never reads
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", 18991)); s.listen(8)
+while True:
+    c, _ = s.accept(); threading.Thread(target=handle, args=(c,), daemon=True).start()
+PYT
+TUO=$!
+"$BIN" -c bench/tmp/tunnel/agensio.toml > bench/tmp/tunnel/server.out 2>&1 & TUP=$!
+for _ in $(seq 1 50); do nc -z 127.0.0.1 18448 2>/dev/null && nc -z 127.0.0.1 18991 2>/dev/null && break; sleep 0.1; done
+python3 - > bench/tmp/tunnel/clients.log 2>&1 <<'PYT'
+import socket, threading, time
+def upgrade(path, rcvbuf=None, port=18448, host=b"tun.test"):
+    s = socket.socket()
+    if rcvbuf: s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+    s.connect(("127.0.0.1", port))
+    s.sendall(b"GET " + path + b" HTTP/1.1\r\nHost: " + host + b"\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+    head = b""
+    while b"\r\n\r\n" not in head:
+        d = s.recv(1)  # byte by byte: nothing past the head is taken
+        if not d: break
+        head += d
+    return s, head.split(b" ")[1] if b" " in head else b"-"
+out = {}
+def flood():  # reads the 101 and stops: the origin's bytes pile up towards it
+    s, code = upgrade(b"/flood", 4096)
+    out["flood"] = code.decode()
+    time.sleep(14)
+def sink():  # sends without pause towards an origin that never reads
+    s, code = upgrade(b"/sink")
+    s.settimeout(0.5)
+    end = time.time() + 14
+    state = "open"
+    while time.time() < end:
+        try:
+            s.send(b"y" * 65536)
+        except socket.timeout:
+            continue
+        except OSError:
+            state = "closed"
+            break
+    out["sink"] = code.decode() + ":" + state
+def quiet():  # nothing either way for 5 s, then four bytes: the tunnel still carries them
+    s, code = upgrade(b"/quiet")
+    time.sleep(5)
+    try:
+        s.sendall(b"ping")
+        out["quiet"] = code.decode() + ":sent"
+    except OSError:
+        out["quiet"] = code.decode() + ":closed"
+    time.sleep(1)
+def idle():  # tunnel_timeout = 2 on its site: nothing moves, so the tunnel ends after 2 s
+    s, code = upgrade(b"/quiet", port=18449, host=b"idle.test")
+    s.settimeout(6)
+    try:
+        out["idle"] = code.decode() + (":closed" if s.recv(16) == b"" else ":data")
+    except socket.timeout:
+        out["idle"] = code.decode() + ":open"
+    except OSError:
+        out["idle"] = code.decode() + ":closed"
+ts = [threading.Thread(target=f) for f in (flood, sink, quiet, idle)]
+for t in ts: t.start()
+for t in ts: t.join()
+print("flood", out.get("flood"), "sink", out.get("sink"), "quiet", out.get("quiet"), "idle", out.get("idle"), flush=True)
+PYT
+check "a tunnel write that does not finish within proxy.send_timeout (2 s) ends the tunnel, toward the client (origin bytes for a client that stopped reading: the origin sees its connection end) and toward the origin (a client's bytes for an origin that never reads), each said in the error log; a quiet tunnel, nothing waiting, still carries bytes after 5 s; tunnel_timeout (2 s) still ends a quiet one" \
+  "flood 101 sink 101:closed quiet 101:sent idle 101:closed|flood closed after early|quiet got 4|yes yes" \
+  "$(cat bench/tmp/tunnel/clients.log)|$(grep -m1 '^flood closed' bench/tmp/tunnel/origin.log)|$(grep -m1 '^quiet got' bench/tmp/tunnel/origin.log)|$(grep -q 'a write of [0-9]* bytes to the client did not finish within 2 s' bench/tmp/tunnel/error.log && echo yes || echo no) $(grep -q 'a write of [0-9]* bytes to the origin did not finish within 2 s' bench/tmp/tunnel/error.log && echo yes || echo no)"
+kill -INT $TUP 2>/dev/null; kill $TUO 2>/dev/null; wait $TUP $TUO 2>/dev/null
 check "encoded_slashes = allow on a site (site_create, then --encoded-slashes deny through ctl): the escape is decoded and looked up, then 404 again; a bad value is refused; site_show says which" "201 200 404 allow 404 deny 400" "$(cpost /v1/sites "{\"domain\":\"es.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8096\",\"encoded_slashes\":\"allow\",\"confirm\":true,\"reason\":\"es\"}") $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: es.test' 'http://127.0.0.1:8096/x%2F..%2Fstyle.css') $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: es.test' 'http://127.0.0.1:8096/x%2F..%2Fnothing.css') $(curl -sS --unix-socket $CS http://control/v1/sites/es.test | python3 -c 'import json,sys; print(json.load(sys.stdin)["encoded_slashes"])') $("$BIN" ctl site-update es.test --encoded-slashes deny --yes --reason es --socket $CS > /dev/null; curl -sS -o /dev/null -w '%{http_code}' -H 'Host: es.test' 'http://127.0.0.1:8096/x%2F..%2Fstyle.css') $(curl -sS --unix-socket $CS http://control/v1/sites/es.test | python3 -c 'import json,sys; print(json.load(sys.stdin)["encoded_slashes"])') $(cpost /v1/sites/es.test '{"encoded_slashes":"maybe","confirm":true}')"
 cpost /v1/sites/es.test/delete '{"confirm":true,"reason":"es"}' > /dev/null
 check "mcp: protection_show is a read-only viewer tool and answers the rendering" "True False 5" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'

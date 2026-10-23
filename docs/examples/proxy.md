@@ -249,7 +249,9 @@ connection becomes a tunnel that copies bytes both ways until a side closes. The
 read timeout dropping idle WebSockets is the usual surprise there). An application that pings
 its clients ends the tunnels of the ones that stopped answering by itself; `tunnel_timeout`
 is for one that does not, and closes a tunnel on which no byte moved in either direction for
-that long. A reload leaves open tunnels alone: each finishes on the configuration it started
+that long. A client that stops reading while Rocket.Chat sends to it (a phone that lost its
+signal) is let go when one write to it has waited `send_timeout` (30 s), and Rocket.Chat sees its
+connection end; a quiet chat has nothing waiting and is never cut that way. A reload leaves open tunnels alone: each finishes on the configuration it started
 with.
 
 An upload is read in full before Rocket.Chat is contacted (to a temporary file above 256 KB),

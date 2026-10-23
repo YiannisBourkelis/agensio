@@ -155,7 +155,7 @@ const std::vector<KeyDef>& key_defs() {
         {"proxy = {}", "tunnel_timeout", "seconds", "0 (none)", "Idle timeout of an upgraded tunnel.", "reload", "site file", "12"},
         {"proxy = {}", "read_timeout", "seconds", "60", "Waiting for the origin's answer: 504 beyond.", "reload", "site file", "12"},
         {"proxy = {}", "connect_timeout", "seconds", "5", "Connecting to the origin: 502 beyond.", "reload", "site file", "12"},
-        {"proxy = {}", "send_timeout", "seconds", "30", "Sending to the origin.", "reload", "site file", "12"},
+        {"proxy = {}", "send_timeout", "seconds", "30", "Sending to the origin; on a WebSocket or other tunnel, the longest one write to either side may wait before the tunnel is closed (a quiet tunnel has none waiting).", "reload", "site file", "12"},
         {"proxy = {}", "max_connections", "int", "256", "Connections to the origin per worker.", "reload", "site file", "12"},
         {"proxy = {}", "max_idle", "int", "64", "Kept idle connections per worker.", "reload", "site file", "12"},
         {"proxy = {}", "idle_timeout", "seconds", "30", "Kept connection closed after this long idle (0 = until the origin closes it).", "reload", "site file", "12"},

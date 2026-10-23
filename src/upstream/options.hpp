@@ -123,6 +123,8 @@ struct UpstreamConfig {
     // Proxy: forward `Upgrade` requests (WebSocket) and, on a 101, tunnel bytes both ways
     // until a side closes; `tunnel_timeout_s` closes an idle tunnel (0 = never, the
     // default: nginx's 60 s read timeout dropping idle WebSockets is a classic complaint).
+    // `send_timeout` bounds each tunnel write, to the client or to the origin (nginx's
+    // send_timeout and proxy_send_timeout): a quiet tunnel has none pending and stays.
     bool upgrade = true;
     std::uint32_t tunnel_timeout_s = 0;
     TlsClientConfig tls;

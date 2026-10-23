@@ -171,9 +171,10 @@ public:
         log_request();
         if (peer_) {
             const std::uint32_t idle_s = stream_.response.tunnel_timeout_s;
+            const std::uint32_t send_ms = stream_.response.tunnel_send_ms;
             stream_.reset();
             compact();
-            start_tunnel(idle_s);
+            start_tunnel(idle_s, send_ms);
             return;
         }
         stream_.reset();
@@ -381,6 +382,7 @@ private:
         timer_.async_wait([self](const asio::error_code& ec) {
             if (ec) return;  // cancelled
             if (!self->lowest().is_open() || self->handed_over_) return;
+            if (self->tunnel_) return self->tunnel_tick();  // a wait that fired as the tunnel started
             auto idle = std::chrono::steady_clock::now() - self->last_activity_;
             if (idle >= self->timeout_) {
                 // A handler still working on the request (an upstream exchange, bounded by its
@@ -640,13 +642,22 @@ private:
     // Client bytes go to the origin, origin bytes to the client, each direction with its
     // own buffer and read in flight. Whatever either side had already sent past the head
     // goes first. A side's EOF half-closes the other; the second EOF or any error ends
-    // both. Idle limit: the connection's own timer with the tunnel's timeout (0 = none).
+    // both. Two limits on the connection's own timer: the idle one (tunnel_timeout, 0 =
+    // none) and the send limit (proxy.send_timeout): a write to either side not finished
+    // within it ends the tunnel. Before, a client that stopped reading held both connections
+    // until the kernel gave up, fifteen minutes (the follow-up of the 2026-10-04 incident).
+    // Each write notes when it began (the read before it just read the clock); the timer runs
+    // only while a limit applies, so a quiet tunnel without an idle limit has none at all.
 
-    void start_tunnel(std::uint32_t idle_s) {
+    void start_tunnel(std::uint32_t idle_s, std::uint32_t send_ms) {
         tunnel_ = true;
         body_pending_ = false;
-        if (idle_s == 0) timer_.cancel();
-        else rearm(std::chrono::seconds(idle_s));
+        tunnel_idle_ = std::chrono::seconds(idle_s);
+        tunnel_send_limit_ = std::chrono::milliseconds(send_ms);
+        last_activity_ = std::chrono::steady_clock::now();
+        timer_.cancel();
+        tunnel_timer_ = false;
+        if (idle_s != 0) arm_tunnel_timer(tunnel_idle_);
         peer_->sock().set_option(asio::ip::tcp::no_delay(true), tunnel_ec_);
         if (peer_->in.size() < 16 * 1024) peer_->in.resize(16 * 1024);
         // Client bytes after the request head (in_[0, in_len_)) and origin bytes after
@@ -663,11 +674,15 @@ private:
     }
 
     void tunnel_write_peer(std::size_t n) {
+        tunnel_to_peer_since_ = last_activity_;  // the read of these bytes, or the tunnel's start
+        tunnel_to_peer_bytes_ = n;
+        if (!tunnel_timer_ && tunnel_send_limit_.count() > 0) arm_tunnel_timer(tunnel_send_limit_);
         auto self = this->shared_from_this();
         peer_->async_write(asio::buffer(in_.data(), n),
                           immediate([self](const asio::error_code& ec, std::size_t) {
                               if (!self->tunnel_) return;
                               if (ec) return self->close();
+                              self->tunnel_to_peer_since_ = {};
                               self->in_len_ = 0;
                               self->tunnel_read_client();
                           }));
@@ -685,14 +700,62 @@ private:
     }
 
     void tunnel_write_client(std::size_t n) {
+        tunnel_to_client_since_ = last_activity_;
+        tunnel_to_client_bytes_ = n;
+        if (!tunnel_timer_ && tunnel_send_limit_.count() > 0) arm_tunnel_timer(tunnel_send_limit_);
         auto self = this->shared_from_this();
         asio::async_write(socket_, asio::buffer(peer_->in.data(), n),
                           immediate([self](const asio::error_code& ec, std::size_t) {
                               if (!self->tunnel_) return;
                               if (ec) return self->close();
+                              self->tunnel_to_client_since_ = {};
                               self->peer_->in_len = 0;
                               self->tunnel_read_peer();
                           }));
+    }
+
+    void arm_tunnel_timer(std::chrono::steady_clock::duration d) {
+        tunnel_timer_ = true;
+        auto self = this->shared_from_this();
+        timer_.expires_after(d);
+        timer_.async_wait([self](const asio::error_code& ec) {
+            if (ec) return;  // cancelled
+            if (!self->lowest().is_open() || self->handed_over_) return;
+            self->tunnel_tick();
+        });
+    }
+
+    // A pending write past the send limit ends the tunnel, said at info with its direction; so does
+    // the idle limit. Otherwise the timer waits for the earliest deadline still ahead, or stops.
+    void tunnel_tick() {
+        using clock = std::chrono::steady_clock;
+        tunnel_timer_ = false;
+        if (!tunnel_) return;
+        const clock::time_point now = clock::now();
+        const bool limited = tunnel_send_limit_.count() > 0;
+        const bool to_client = limited && tunnel_to_client_since_ != clock::time_point{} && now - tunnel_to_client_since_ >= tunnel_send_limit_;
+        const bool to_peer = limited && tunnel_to_peer_since_ != clock::time_point{} && now - tunnel_to_peer_since_ >= tunnel_send_limit_;
+        if (to_client || to_peer) {
+            if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info)) {
+                fill_connection_info();
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(tunnel_send_limit_).count();
+                log->info("tunnel of " + (site_ && !site_->server_names.empty() ? site_->server_names.front() : std::string("-")) + " for " + remote_ +
+                          " closed: a write of " + std::to_string(to_client ? tunnel_to_client_bytes_ : tunnel_to_peer_bytes_) + " bytes to the " +
+                          (to_client ? "client" : "origin") + " did not finish within " +
+                          (ms % 1000 == 0 ? std::to_string(ms / 1000) + " s" : std::to_string(ms) + " ms") + " (proxy.send_timeout)");
+            }
+            close();
+            return;
+        }
+        if (tunnel_idle_.count() > 0 && now - last_activity_ >= tunnel_idle_) {
+            close();
+            return;
+        }
+        clock::duration next = clock::duration::max();
+        if (limited && tunnel_to_client_since_ != clock::time_point{}) next = std::min(next, tunnel_to_client_since_ + tunnel_send_limit_ - now);
+        if (limited && tunnel_to_peer_since_ != clock::time_point{}) next = std::min(next, tunnel_to_peer_since_ + tunnel_send_limit_ - now);
+        if (tunnel_idle_.count() > 0) next = std::min(next, last_activity_ + tunnel_idle_ - now);
+        if (next != clock::duration::max()) arm_tunnel_timer(next);
     }
 
     void tunnel_client_eof() {
@@ -1066,6 +1129,12 @@ private:
     bool client_eof_ = false;
     bool peer_eof_ = false;
     asio::error_code tunnel_ec_;
+    // The tunnel's limits and its pending writes (start_tunnel): when each began, the epoch for none.
+    std::chrono::steady_clock::duration tunnel_idle_{};
+    std::chrono::steady_clock::duration tunnel_send_limit_{};
+    std::chrono::steady_clock::time_point tunnel_to_client_since_{}, tunnel_to_peer_since_{};
+    std::size_t tunnel_to_client_bytes_ = 0, tunnel_to_peer_bytes_ = 0;
+    bool tunnel_timer_ = false;  // the timer waits for one of the tunnel's limits
     Stream stream_;
     Http1Writer<Socket, Http1Connection> writer_;  // last: it references socket_ and *this
 };

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.0-alpha.114
+
+- **A tunnel write that does not finish within `proxy.send_timeout` ends the tunnel** (the first of
+  the two follow-ups of the 2026-10-04 incident, audit item 2.5). A WebSocket's only limit was
+  `tunnel_timeout`, an idle limit off by default, which cancelled the connection's timer. A client
+  that stopped reading while the application sent to it, a phone that lost its signal, held its
+  connection and the application's until the kernel gave up retransmitting, about fifteen minutes.
+  The application meanwhile took the user for online. The same held the other way, for an
+  application that stopped reading.
+  - Now a write to either side that has waited `send_timeout` (30 s, the existing key) closes the
+    tunnel, and the error log says so at `info`, with the direction and the bytes waiting. This is
+    what nginx does with `send_timeout` and `proxy_send_timeout` on an upgraded connection.
+  - A quiet tunnel has no write waiting and is not affected; `tunnel_timeout` keeps its meaning.
+  - No timer per write: each notes when it began, and the connection's one timer runs only while a
+    limit applies.
+
 ## 0.1.0-alpha.113 (2026-10-23)
 
 - **Keep's first step goes on after the trial's timer has fired, and the firewall findings name TCP and

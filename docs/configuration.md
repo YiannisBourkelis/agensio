@@ -1883,7 +1883,14 @@ and an `Upgrade` field is forwarded as one, and when the origin answers 101 the 
 becomes a tunnel that copies bytes both ways until a side closes. There is no idle limit on
 a tunnel by default (nginx's 60 s read timeout silently dropping idle WebSockets is the
 usual surprise); `tunnel_timeout = 3600` sets one, `upgrade = false` refuses upgrades
-on a location.
+on a location. What a tunnel does bound is a write: one to either side that does not finish
+within `send_timeout` (30 s) closes the tunnel, the way nginx applies `send_timeout` and
+`proxy_send_timeout` to an upgraded connection. A client that stops reading while the
+application sends to it (a phone that lost its signal) is let go after that, and the application
+sees its connection end; an application that stops reading is let go the same way. A quiet tunnel
+has no write waiting and is not affected. Each closed tunnel is an `info` line in the error log,
+with the direction and the bytes waiting. Until 0.1.0-alpha.114 such a write waited as long as
+the kernel retransmitted, about fifteen minutes, holding both connections.
 
 **Options** of `proxy = { ... }`, on a site (defaults for its locations) or a location:
 
@@ -1898,7 +1905,7 @@ on a location.
 | `tunnel_timeout` | 0 | seconds a tunnel may stay idle in both directions; 0 = no limit |
 | `buffering` | `true` | collect the whole answer (memory, then a temp file above `buffer_max`) so a slow client never holds the origin; `false` streams with backpressure |
 | `request_buffering` | `true` | collect the request body before connecting; `false` streams it as it arrives |
-| `connect_timeout`, `send_timeout`, `read_timeout` | 5, 30, 60 s | 504 when exceeded; `read_timeout` is between two reads from the origin |
+| `connect_timeout`, `send_timeout`, `read_timeout` | 5, 30, 60 s | 504 when exceeded; `read_timeout` is between two reads from the origin; on a tunnel `send_timeout` bounds each write to either side |
 | `keep_conn`, `max_idle`, `idle_timeout` | `true`, 64, 30 s | keep-alive to the origin; idle connections kept per worker; how long one may stay idle before agensio closes it (0 = until the origin does) |
 | `max_connections`, `queue_depth`, `queue_wait` | 256, 1024, 5 s | per worker: in flight, waiting, and the longest wait before a 503 with `Retry-After` |
 | `head_max` | 64 KB | an origin head larger than this is a 502 |

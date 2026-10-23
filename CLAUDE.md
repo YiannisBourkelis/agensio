@@ -361,8 +361,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   `trusted_proxies`, RFC 7239 on request, `$`-variables in configured fields, hidden
   response fields, origin-pointing Location rewritten; see `docs/configuration.md` 12.
   Upgrades (D3): the origin's 101 hands its connection to `Http1Connection`, which
-  tunnels bytes both ways (`start_tunnel`, two pumps, half-close, idle timer reused with
-  `tunnel_timeout`, none by default). Groups (D4): `upstream = [...]`, round-robin and
+  tunnels bytes both ways (`start_tunnel`, two pumps, half-close, the connection's timer for
+  `tunnel_timeout`, none by default, and for `proxy.send_timeout`, which bounds each write to
+  either side, `tunnel_tick`; alpha.114). Groups (D4): `upstream = [...]`, round-robin and
   passive health per worker in `UpstreamPool` (`pick`, `mark_failure`, `mark_success`),
   next-member retry only when nothing binding was sent (`try_next_address`). TLS to the
   origin (D4b): `BasicTlsStream<Socket>` in client mode inside `UpstreamConnection`,
@@ -1349,9 +1350,10 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    accepted socket; the integration suite holds a stalled TLS WebSocket client against a plain
    request answered meanwhile and checks every socket's flags. Rule: a descriptor handed to
    anything that is not one of our `MSG_DONTWAIT` syscalls (OpenSSL, sendfile, a library) must
-   carry `O_NONBLOCK`, set explicitly, never assumed from Asio. Two follow-ups from the
-   report are open: a per-tunnel write timeout for a client that takes no byte for N seconds
-   while data is pending, and a loop watchdog logging a worker that has not turned for seconds.
+   carry `O_NONBLOCK`, set explicitly, never assumed from Asio. Of the report's two follow-ups the
+   tunnel's write limit is built (alpha.114: a write to either side not finished within
+   `proxy.send_timeout` ends the tunnel); a loop watchdog logging a worker that has not turned
+   for seconds is open.
 
 Still to do (roadmap phases E and H): request-body
 limits and timeouts once bodies exist, security response headers option (HSTS,
