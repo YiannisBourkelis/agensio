@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0-alpha.112
+
+- **`server_status` says what waits for a restart** (the test host's note on alpha.111). While HTTP/3
+  waits for a restart after a reload that could not bind it, only the listener's protocol list
+  (`["h2","h1"]`) showed it: `protocols` rightly says the build supports h3. Now:
+  - status carries the reload's own `restart_needed`, both the restart-only keys changed on disk and
+    `h3 on udp ADDRESS`;
+  - that listener carries `h3_waiting` with the bind's reason.
+
 ## 0.1.0-alpha.111 (2026-10-23)
 
 - **Docs: a file counts as still being written for one to two seconds, not one** (the test host's

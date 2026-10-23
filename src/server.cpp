@@ -1169,11 +1169,21 @@ json::Value Server::status() {
             protocols.push("h1");
         }
         entry.set("protocols", std::move(protocols));
+        // HTTP/3 a reload could not open on this listener (alpha.111): why, until a restart binds it.
+        for (const auto& [address, why] : h3_waiting_)
+            if (address == l.address) entry.set("h3_waiting", why);
         const SiteConfig* all = l.router.default_site();
         entry.set("catch_all", all ? json::Value(all->server_names.front()) : json::Value(nullptr));
         listeners.push(std::move(entry));
     }
     v.set("listeners", std::move(listeners));
+    // What waits for a restart: the reload's own list (restart-only keys changed on disk, h3 a reload
+    // could not open), so status says it too (the alpha.111 report's note).
+    {
+        json::Value pending = json::Value::array();
+        for (const auto& k : restart_pending()) pending.push(k);
+        v.set("restart_needed", std::move(pending));
+    }
     json::Value sites = json::Value::array();
     for (const auto& s : gen_->cfg.sites) {
         json::Value names = json::Value::array();

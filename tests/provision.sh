@@ -327,6 +327,8 @@ CFG
 h3start() { rm -f $H/run/control.sock; "$BIN" -c $H/agensio.toml >> $H/server.out 2>&1 & for _ in $(seq 1 50); do [ -S $H/run/control.sock ] && break; sleep 0.1; done; sleep 0.3; }
 h3protos() { "$BIN" ctl status --socket $H/run/control.sock 2>/dev/null | python3 -c 'import json,sys; print(",".join(next((l["protocols"] for l in json.load(sys.stdin)["listeners"] if l["address"] == "127.0.0.1:443"), ["-"])))' 2>/dev/null || echo none; }
 h3altsvc() { curl -sk --resolve localhost:443:127.0.0.1 -D - -o /dev/null https://localhost/ | grep -ci '^alt-svc'; }
+# status itself says HTTP/3 waits (the alpha.111 report's note): the listener's h3_waiting and the top-level restart_needed.
+h3waiting() { "$BIN" ctl status --socket $H/run/control.sock 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); l=next((l for l in d["listeners"] if l["address"] == "127.0.0.1:443"), {}); print(("waiting" if "Permission denied" in l.get("h3_waiting", "") else "-") + "/" + (",".join(d.get("restart_needed", ["missing"])) or "none"))' 2>/dev/null || echo none; }
 h3cfg '"h2", "h1"'
 # Docker lets any user bind a low port in a container (net.ipv4.ip_unprivileged_port_start=0), so 443
 # is privileged here only when the container runs with --sysctl net.ipv4.ip_unprivileged_port_start=1024.
@@ -342,9 +344,10 @@ elif printf '[server]\nprotocols = ["h3", "h2", "h1"]\n[[site]]\nlisten = ["127.
   check "h3 privileged: a reload turning h3 on at 443 after the privilege drop keeps the server up, answers ok naming h3 on 443 as waiting for a restart; the listener stays h2 and h1 with no alt-svc; the error log and health say so" \
     "alive yes h2,h1 0 yes yes" \
     "$(kill -0 "$(cat $H/agensio.pid 2>/dev/null)" 2>/dev/null && echo alive || echo dead) $(grep -q '"ok":true' $H/reload.out && grep -q 'h3 on udp 127.0.0.1:443' $H/reload.out && echo yes || echo no) $(h3protos) $(h3altsvc) $(grep -q 'h3 on udp 127.0.0.1:443.*restart' $H/logs/error.log && echo yes || echo no) $("$BIN" ctl health --socket $H/run/control.sock 2>/dev/null | grep -q '"code":"h3_waits_for_restart"' && echo yes || echo no)"
+  check "h3 privileged: meanwhile status marks the listener as waiting and lists it under restart_needed" "waiting/h3 on udp 127.0.0.1:443" "$(h3waiting)"
   HP=$(cat $H/agensio.pid 2>/dev/null); [ -n "$HP" ] && kill -TERM $HP 2>/dev/null; for _ in $(seq 1 100); do [ -n "$HP" ] && kill -0 $HP 2>/dev/null || break; sleep 0.1; done
   h3start
-  check "h3 privileged: a restart made as root opens h3 on 443, and answers advertise it" "h2,h1,h3 1" "$(h3protos) $(h3altsvc)"
+  check "h3 privileged: a restart made as root opens h3 on 443, and answers advertise it; status waits for nothing" "h2,h1,h3 1 -/none" "$(h3protos) $(h3altsvc) $(h3waiting)"
   HP=$(cat $H/agensio.pid 2>/dev/null); [ -n "$HP" ] && kill -TERM $HP 2>/dev/null; for _ in $(seq 1 100); do [ -n "$HP" ] && kill -0 $HP 2>/dev/null || break; sleep 0.1; done
 else
   echo "skip h3 privileged checks (this build has no HTTP/3)"
