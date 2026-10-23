@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.112
+## 0.1.0-alpha.112 (2026-10-23)
 
 - **`server_status` says what waits for a restart** (the test host's note on alpha.111). While HTTP/3
   waits for a restart after a reload that could not bind it, only the listener's protocol list
