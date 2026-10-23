@@ -192,6 +192,25 @@ json::Value protocols_json(const BuildFacts& b);
 // has the QUIC API (3.5.1 or later), a TLS site configured: the Debian 12 package on Debian 13, say.
 // Nothing on a system without the API (Debian 12, Ubuntu 22.04 and 24.04: no HTTP/3 there by decision).
 std::optional<Finding> http3_finding(const BuildFacts& b, const Config& cfg);
+// A listener whose HTTP/3 sockets a reload could not bind, what that means and its fix. Only a
+// privileged port after the privilege drop (the alpha.110 report) waits for a restart, which binds as
+// root; for any other cause, a port another process holds above all (the alpha.112 report), a restart
+// would be harmful: a start that cannot bind fails whole and serves no site. A reload tries the bind
+// again, so it is the fix once the cause is gone.
+struct H3BindProblem {
+    std::string address;   // the listener, "0.0.0.0:443"
+    std::string error;     // "cannot bind udp ADDRESS for h3: <reason>", status's h3_waiting
+    bool restart = false;  // a restart binds it: restart_needed, health h3_waits_for_restart
+    std::string cause;     // what the error means here; empty when nothing more is known
+    std::string fix;
+};
+// `code` is the bind's errno, `unprivileged_start` net.ipv4.ip_unprivileged_port_start, `root`
+// whether the server still runs as root.
+H3BindProblem h3_bind_problem(std::string address, unsigned port, std::string error, int code, unsigned unprivileged_start, bool root);
+// health's finding: h3_waits_for_restart, or h3_not_bound for any other cause; and the same in words
+// for the reload's answer and its error-log line.
+Finding h3_bind_finding(const H3BindProblem& p);
+std::string h3_bind_words(const H3BindProblem& p);
 // The refusals at the workers' connection ceiling since start (Server::refusal_report),
 // merged over the workers, for one health finding whose fix follows from their shape
 // (2026-10-02: an agent must tell an attack from a low ceiling from stuck clients).

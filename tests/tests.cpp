@@ -1,5 +1,6 @@
 // Minimal self-contained unit tests (no framework dependency).
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -2135,6 +2136,36 @@ static void test_pools() {
 // What the binary serves (2026-10-22, the owner's request): status's `protocols`, from the build and
 // the OpenSSL loaded, and health's http3_package_available where a system could serve HTTP/3 but this
 // build cannot (the Debian 12 package on Debian 13), never on a system without the QUIC API.
+// A listener whose HTTP/3 sockets a reload could not bind (the alpha.110 and alpha.112 reports): only a
+// privileged port after the privilege drop waits for a restart; a port another process holds, or any
+// other failure, is fixed by a reload once the cause is gone, and a restart would serve no site.
+static void test_h3_bind_problem() {
+    using namespace agensio::control;
+    const std::string e443 = "cannot bind udp 0.0.0.0:443 for h3: Permission denied";
+    const H3BindProblem priv = h3_bind_problem("0.0.0.0:443", 443, e443, EACCES, 1024, false);
+    CHECK(priv.restart && priv.address == "0.0.0.0:443" && priv.error == e443 && priv.cause == "a privileged port, and the server no longer runs as root" &&
+          priv.fix.starts_with("restart the service as root (systemctl restart agensio)"));
+    const Finding pf = h3_bind_finding(priv);
+    CHECK(pf.severity == "warn" && pf.code == "h3_waits_for_restart" &&
+          pf.message == "HTTP/3 on udp 0.0.0.0:443 waits for a restart: " + e443 +
+                            " (a privileged port, and the server no longer runs as root); the listener serves HTTP/2 and HTTP/1 meanwhile and advertises no HTTP/3");
+    CHECK(h3_bind_problem("0.0.0.0:80", 80, "x", EPERM, 1024, false).restart);
+    // Not privileged: as root, on a port at or above the start (a security module refused it), a
+    // start raised by the sysctl.
+    CHECK(!h3_bind_problem("0.0.0.0:443", 443, e443, EACCES, 1024, true).restart && !h3_bind_problem("0.0.0.0:18443", 18443, "x", EACCES, 1024, false).restart &&
+          !h3_bind_problem("0.0.0.0:443", 443, "x", EACCES, 0, false).restart && h3_bind_problem("0.0.0.0:443", 443, "x", EACCES, 0, false).cause.empty());
+    const std::string busy = "cannot bind udp 127.0.0.1:18443 for h3: Address already in use";
+    const H3BindProblem held = h3_bind_problem("127.0.0.1:18443", 18443, busy, EADDRINUSE, 1024, false);
+    CHECK(!held.restart && held.cause == "another process holds udp 18443; ss -lunp 'sport = :18443' names it" && held.fix.starts_with("free udp 18443, then reload") &&
+          held.fix.find("never restart while the port is held") != std::string::npos && held.fix.find("systemctl restart") == std::string::npos);
+    const Finding hf = h3_bind_finding(held);
+    CHECK(hf.code == "h3_not_bound" && hf.message.starts_with("HTTP/3 on udp 127.0.0.1:18443 is not served: " + busy + " (another process holds udp 18443;") &&
+          h3_bind_problem("0.0.0.0:443", 443, "x", EADDRINUSE, 1024, false).cause.starts_with("another process holds udp 443"));  // in use wins over a privileged port
+    const H3BindProblem other = h3_bind_problem("192.0.2.1:443", 443, "cannot bind udp 192.0.2.1:443 for h3: Cannot assign requested address", EADDRNOTAVAIL, 1024, false);
+    CHECK(!other.restart && other.cause.empty() && other.fix.starts_with("remove the cause, then reload") && h3_bind_finding(other).code == "h3_not_bound" &&
+          h3_bind_words(other) == "cannot bind udp 192.0.2.1:443 for h3: Cannot assign requested address; the listener serves HTTP/2 and HTTP/1 meanwhile and advertises no HTTP/3");
+}
+
 static void test_build_protocols() {
     const std::size_t npos = std::string::npos;
     using control::BuildFacts;
@@ -12411,6 +12442,7 @@ int main() {
     test_pools();
     test_served_dir();
     test_build_protocols();
+    test_h3_bind_problem();
     test_tasks();
     test_appenv();
     test_hosting_rules();

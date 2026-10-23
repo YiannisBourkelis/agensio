@@ -2888,6 +2888,31 @@ if [ "$H3" = 1 ] && curl -V 2>/dev/null | grep -q HTTP3; then
   check "$p retry = always: a client that answers the Retry gets its page" "3 200 $IDX" "$(command curl -sS --http3-only -k -o /dev/null -w '%{http_version} %{http_code} ' https://127.0.0.1:18443/; command curl -sS --http3-only -k https://127.0.0.1:18443/ | sum)"
   check "$p alt_svc = false: no field" "" "$(command curl -sSk -I https://127.0.0.1:18443/ | tr -d '\r' | awk 'tolower($1)=="alt-svc:"{print}')"
   kill -INT $RETRY_PID 2>/dev/null; wait $RETRY_PID 2>/dev/null
+  # A reload that adds h3 on a udp port another process holds (the alpha.112 report): a start that
+  # cannot bind it fails whole, so nothing names a restart; the reload's next steps, status, health
+  # and the error log say what holds it and to reload once it is free, and that reload binds it.
+  mkdir -p bench/tmp/h3busy
+  BCS=bench/tmp/h3busy/control.sock
+  h3busy_conf() { printf '[server]\nworkers = 2\nprotocols = [%s]\n[log]\naccess = "off"\nerror = "%s/bench/tmp/h3busy/error.log"\n[control]\nsocket = "%s/%s"\naudit = "%s/bench/tmp/h3busy/audit.log"\n[[site]]\nlisten = ["127.0.0.1:18445"]\nroot = "%s/bench/www"\ntls = { cert = "%s/bench/certs/cert.pem", key = "%s/bench/certs/key.pem" }\n' "$1" "$ROOT" "$ROOT" "$BCS" "$ROOT" "$ROOT" "$ROOT" "$ROOT" > bench/tmp/h3busy/agensio.toml; }
+  h3busy_conf '"h2", "h1"'
+  rm -f bench/tmp/h3busy/error.log $BCS
+  "$BIN" -c bench/tmp/h3busy/agensio.toml > bench/tmp/h3busy/server.out 2>&1 & BUSY_PID=$!
+  for _ in $(seq 1 50); do nc -z 127.0.0.1 18445 2>/dev/null && [ -S $BCS ] && break; sleep 0.1; done
+  python3 -c 'import socket, time; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 18445)); time.sleep(120)' & HOLD_PID=$!
+  sleep 0.3
+  h3busy_conf '"h2", "h1", "h3"'
+  "$BIN" ctl reload --yes --reason h3busy --socket $BCS > bench/tmp/h3busy/reload.json 2>&1
+  "$BIN" ctl status --socket $BCS > bench/tmp/h3busy/status.json 2>&1
+  "$BIN" ctl health --socket $BCS > bench/tmp/h3busy/health.json 2>&1
+  check "$p a reload adding h3 on a udp port another process holds: no restart named (a start would fail whole); next_steps name what holds it and the reload after; status marks the listener; health h3_not_bound with that fix; the error log says so, never 'privileged'" \
+    "none yes|Address already in use|none|warn:h3_not_bound yes|yes" \
+    "$(python3 -c 'import json; d=json.load(open("bench/tmp/h3busy/reload.json")); print(",".join(d.get("restart_needed", [])) or "none", "yes" if any("another process holds udp 18445" in x and "then reload" in x for x in d.get("next_steps", [])) else d.get("next_steps"))')|$(python3 -c 'import json; d=json.load(open("bench/tmp/h3busy/status.json")); l=[x for x in d["listeners"] if x["address"]=="127.0.0.1:18445"][0]; print(l.get("h3_waiting", "-").split(": ")[-1] + "|" + (",".join(d.get("restart_needed", [])) or "none"))')|$(python3 -c 'import json; f=[x for x in json.load(open("bench/tmp/h3busy/health.json"))["findings"] if x["code"].startswith("h3_")]; print(" ".join(x["severity"] + ":" + x["code"] for x in f), "yes" if f and "then reload" in f[0].get("fix", "") and "restart the service" not in f[0].get("fix", "") else [x.get("fix") for x in f])')|$(grep -q 'another process holds udp 18445' bench/tmp/h3busy/error.log && ! grep -q privileged bench/tmp/h3busy/error.log && echo yes)"
+  kill $HOLD_PID 2>/dev/null; wait $HOLD_PID 2>/dev/null
+  "$BIN" ctl reload --yes --reason h3busy --socket $BCS > bench/tmp/h3busy/reload2.json 2>&1
+  "$BIN" ctl status --socket $BCS > bench/tmp/h3busy/status2.json 2>&1
+  check "$p the port freed, a reload with nothing changed binds h3: the listener speaks it, nothing waits, health says nothing of it, an h3 request is answered" "h2,h1,h3 - none 0 3 200" \
+    "$(python3 -c 'import json; d=json.load(open("bench/tmp/h3busy/status2.json")); l=[x for x in d["listeners"] if x["address"]=="127.0.0.1:18445"][0]; print(",".join(l["protocols"]), l.get("h3_waiting", "-"), ",".join(d.get("restart_needed", [])) or "none")') $("$BIN" ctl health --socket $BCS | python3 -c 'import json,sys; print(len([x for x in json.load(sys.stdin)["findings"] if x["code"].startswith("h3_")]))') $(command curl -sS --http3-only -k -m 5 -o /dev/null -w '%{http_version} %{http_code}' https://127.0.0.1:18445/)"
+  kill -INT $BUSY_PID 2>/dev/null; wait $BUSY_PID 2>/dev/null
   # The loss proxy (design 9.2): 3 % of the datagrams dropped and 5 % delayed up to 3 ms in
   # both directions; the handshake, a 1 KB page and the 10 MB file must still complete.
   python3 tests/quic-lossy.py 18444 8443 --loss 0.03 --reorder 0.05 --delay-ms 3 & LOSSY_PID=$!

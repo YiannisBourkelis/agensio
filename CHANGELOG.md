@@ -10,6 +10,20 @@
   true`, and the findings' fixes join every step with `&&`. `firewall_limits_missing`, the unchecked
   note and the summary name the ports by protocol, `TCP 80, 443 and UDP 443 (QUIC)`: the QUIC handshake
   limit goes with the table too.
+- **HTTP/3 that a reload cannot bind is judged by why** (the test host's report on alpha.112). Every
+  failed bind was said to be "a privileged port, and the server no longer runs as root", with "restart
+  the service as root" as the fix and the listener under `restart_needed`. For a UDP port another
+  process holds that advice was harmful: a start that cannot bind its h3 sockets does not start, so a
+  restart while the port was held would have served no site. Meanwhile a reload, once the port was
+  free, bound it.
+  - A privileged port after the privilege drop (`EACCES` or `EPERM` below
+    `net.ipv4.ip_unprivileged_port_start`) is as before: `restart_needed`, health
+    `h3_waits_for_restart`, a restart as root.
+  - Any other cause is health's new `h3_not_bound` (warn) and goes in the reload answer's
+    `next_steps`, not `restart_needed`. A port in use says what holds it (`ss -lunp 'sport = :PORT'`)
+    and to free it, then reload, never restart. Every reload tries the bind again.
+  - Status's `h3_waiting` keeps the bind's error in both cases; the error-log line gives the cause and
+    the fix.
 
 ## 0.1.0-alpha.112 (2026-10-23)
 

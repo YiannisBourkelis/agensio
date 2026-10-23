@@ -3325,6 +3325,15 @@ nothing answers), and says that HTTP/3 there waits for a restart, in its answer 
 it as root. Before 0.1.0-alpha.111 that reload ended the server (the socket was opened after the
 switch, and the failed bind was thrown out of worker 0), and systemd restarted it.
 
+A bind that fails for another reason, a UDP port another process holds above all, is not a matter for
+a restart: a start that cannot bind its h3 sockets does not start, and so serves no site. The reload
+applies the rest the same way and says what holds the port (`ss -lunp 'sport = :PORT'` names it) and
+to reload once it is free: in its answer's `next_steps`, not under `restart_needed`, in the error log,
+and as health's `h3_not_bound`. Every reload tries the bind again, so the next one after the port is
+freed opens HTTP/3 with nothing changed on disk. Status's listener carries `h3_waiting` with the bind's
+error in both cases until then. Until 0.1.0-alpha.113 every failed bind was said to be a privileged port
+waiting for a restart (the alpha.112 report).
+
 The sockets ask the kernel for 4 MB receive and send buffers. Linux grants at most
 `net.core.rmem_max` and `net.core.wmem_max`, 208 KB on an untuned host, and the startup
 line (and the error log) then says so: `receive buffer 208 KB (raise net.core.rmem_max

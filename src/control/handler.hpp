@@ -81,6 +81,9 @@ struct ControlBackend {
     // The restart-only keys the running configuration has other values for than the server
     // started with (control::restart_needed): kept until a restart.
     virtual std::vector<std::string> restart_pending() = 0;
+    // HTTP/3 the last reload could not bind for a reason a restart does not fix (a port another
+    // process holds: the alpha.112 report); a reload tries again. The reload's answer names them.
+    virtual std::vector<control::H3BindProblem> h3_unbound() { return {}; }
     virtual bool privileged() = 0;  // still root (before the drop): a reload can bind any port
     // The provisioning helper (F8): available when the server started as root with
     // [control] provision = true. `provision` sends one request and returns its reply.

@@ -313,10 +313,16 @@ public:
     // stable for that client, and the worker that takes it answers with an id naming
     // itself. No privilege is needed (classic BPF); where the attach is refused, the
     // hash alone routes every connection to one worker until its address changes.
-    bool open(const asio::ip::udp::endpoint& ep, std::string& error, bool reuse_port = false) {
+    // `code`, when given, gets the failed call's error, so the caller can say what it means (a
+    // privileged port, a port another process holds: the alpha.112 report).
+    bool open(const asio::ip::udp::endpoint& ep, std::string& error, bool reuse_port = false, asio::error_code* code = nullptr) {
         asio::error_code ec;
         socket_.open(ep.protocol(), ec);
-        if (ec) { error = ec.message(); return false; }
+        if (ec) {
+            error = ec.message();
+            if (code) *code = ec;
+            return false;
+        }
         fd = socket_.native_handle();
         if (ep.protocol() == asio::ip::udp::v6()) socket_.set_option(asio::ip::v6_only(false), ec);  // [::] takes IPv4 too, as the acceptors do
         int on = 1;
@@ -355,7 +361,11 @@ public:
         }
 #endif
         socket_.bind(ep, ec);
-        if (ec) { error = ec.message(); return false; }
+        if (ec) {
+            error = ec.message();
+            if (code) *code = ec;
+            return false;
+        }
         socket_.non_blocking(true, ec);
         local_ = ep;
         if (reuse_port) steering_ = attach_steering(fd);

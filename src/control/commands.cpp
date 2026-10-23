@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
@@ -563,6 +564,31 @@ std::optional<Finding> http3_finding(const BuildFacts& b, const Config& cfg) {
                        " has the QUIC TLS API, so HTTP/3 could be served here",
                    "on Debian 13 install the release's .deb with deb13 in its name (docs/install.md); elsewhere build from source on this system. "
                    "Then list \"h3\" in [server] protocols and open the TLS ports over UDP (docs/configuration.md 17)"};
+}
+
+H3BindProblem h3_bind_problem(std::string address, unsigned port, std::string error, int code, unsigned unprivileged_start, bool root) {
+    H3BindProblem p{std::move(address), std::move(error), false, {}, {}};
+    const std::string udp = "udp " + std::to_string(port);
+    if ((code == EACCES || code == EPERM) && port < unprivileged_start && !root) {
+        p.restart = true;
+        p.cause = "a privileged port, and the server no longer runs as root";
+        p.fix = "restart the service as root (systemctl restart agensio): a start binds the port before it drops root";
+    } else if (code == EADDRINUSE) {
+        p.cause = "another process holds " + udp + "; ss -lunp 'sport = :" + std::to_string(port) + "' names it";
+        p.fix = "free " + udp + ", then reload (a reload tries the bind again); never restart while the port is held: a start that cannot bind it serves no site";
+    } else {
+        p.fix = "remove the cause, then reload (a reload tries the bind again); a restart would not help: a start that cannot bind it serves no site";
+    }
+    return p;
+}
+
+std::string h3_bind_words(const H3BindProblem& p) {
+    return p.error + (p.cause.empty() ? std::string() : " (" + p.cause + ")") + "; the listener serves HTTP/2 and HTTP/1 meanwhile and advertises no HTTP/3";
+}
+
+Finding h3_bind_finding(const H3BindProblem& p) {
+    if (p.restart) return {"warn", "h3_waits_for_restart", "", "HTTP/3 on udp " + p.address + " waits for a restart: " + h3_bind_words(p), p.fix};
+    return {"warn", "h3_not_bound", "", "HTTP/3 on udp " + p.address + " is not served: " + h3_bind_words(p), p.fix};
 }
 
 std::vector<Finding> notice_findings(const Config& cfg, const std::vector<SiteNotice>& notices, std::time_t now) {

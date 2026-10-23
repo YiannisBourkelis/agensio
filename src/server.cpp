@@ -708,7 +708,7 @@ void Server::open_h3() {
 // The endpoints of one h3 listener: one per worker with reuse_port (the group's members in
 // worker order, steered by connection id), else one on worker 0. `start` posts their
 // reads at once (a listener a reload added); at startup start_h3 does it for all.
-bool Server::open_h3_listener(const Listener& l, const Config& cfg, bool start, std::string& error) {
+bool Server::open_h3_listener(const Listener& l, const Config& cfg, bool start, std::string& error, int* code) {
     const std::size_t count = reuse_port_ ? workers_.size() : 1;
     bool steering = true, gro = true;
     [[maybe_unused]] int rcvbuf = 0;  // the smallest receive buffer the kernel granted (the note is Linux-only)
@@ -731,8 +731,10 @@ bool Server::open_h3_listener(const Listener& l, const Config& cfg, bool start, 
             return c;
         });
         std::string why;
-        if (!ep->open(asio::ip::udp::endpoint(l.endpoint.address(), l.port), why, reuse_port_)) {
+        asio::error_code ec;
+        if (!ep->open(asio::ip::udp::endpoint(l.endpoint.address(), l.port), why, reuse_port_, &ec)) {
             error = "cannot bind udp " + l.address + " for h3: " + why;
+            if (code) *code = ec.value();
             return false;  // the sockets opened so far close with `opened`; none was started
         }
         steering = steering && (!reuse_port_ || ep->steering());
@@ -766,9 +768,17 @@ bool Server::open_h3_listener(const Listener& l, const Config& cfg, bool start, 
     return true;
 }
 
+// net.ipv4.ip_unprivileged_port_start: the ports below it need root (or CAP_NET_BIND_SERVICE) to bind;
+// 1024, the kernel's default, where it cannot be read.
+static unsigned unprivileged_port_start() {
+    std::ifstream f("/proc/sys/net/ipv4/ip_unprivileged_port_start");
+    unsigned v = 0;
+    return f >> v ? v : 1024;
+}
+
 void Server::open_gained_h3(Generation& gen) {
     if (!h3_) h3_ = std::make_unique<H3Endpoints>();
-    std::vector<std::pair<std::string, std::string>> waiting;
+    std::vector<control::H3BindProblem> waiting;
     std::size_t opened = 0;
     for (Listener& l : gen.listeners) {
         if (!l.tls || !l.h3) continue;
@@ -776,16 +786,17 @@ void Server::open_gained_h3(Generation& gen) {
         for (const std::string& a : h3_->addresses) served = served || a == l.address;
         if (served) continue;
         std::string error;
-        if (open_h3_listener(l, gen.cfg, true, error)) {
+        int code = 0;
+        if (open_h3_listener(l, gen.cfg, true, error, &code)) {
             ++opened;
             continue;
         }
-        // Served without h3 until a restart, which binds as root: no socket, so no alt-svc either,
-        // which would send browsers to a port nothing answers.
+        // Served without h3 until a reload binds it, or a restart as root for a privileged port: no
+        // socket, so no alt-svc either, which would send browsers to a port nothing answers.
         l.h3 = false;
         l.alt_svc.clear();
         l.alt_svc_line.clear();
-        waiting.emplace_back(l.address, error);
+        waiting.push_back(control::h3_bind_problem(l.address, l.port, error, code, unprivileged_port_start(), ::geteuid() == 0));
     }
     h3_waiting_ = std::move(waiting);
     if (opened) error_log_.info("h3 endpoints opened by the reload: " + std::to_string(opened));
@@ -845,7 +856,7 @@ void Server::stop_h3() {
 #else
 struct Server::H3Endpoints {};
 void Server::open_h3() {}
-bool Server::open_h3_listener(const Listener&, const Config&, bool, std::string&) { return true; }
+bool Server::open_h3_listener(const Listener&, const Config&, bool, std::string&, int*) { return true; }
 void Server::open_gained_h3(Generation&) {}
 void Server::sync_h3(const std::shared_ptr<const Generation>&) {}
 void Server::start_h3() {}
@@ -1037,12 +1048,7 @@ json::Value Server::health_with(const std::vector<control::Finding>& more) {
     const auto noticed = control::notice_findings(cfg, site_notices().snapshot(), std::time(nullptr));  // what requests saw
     extra.insert(extra.end(), noticed.begin(), noticed.end());
     if (auto f = control::http3_finding(control::build_facts(), cfg)) extra.push_back(std::move(*f));  // HTTP/3 the system could serve
-    for (const auto& [address, why] : h3_waiting_)  // h3 a reload could not open (the alpha.110 report)
-        extra.push_back({"warn", "h3_waits_for_restart", "",
-                         "HTTP/3 on udp " + address + " waits for a restart: " + why +
-                             (::geteuid() != 0 ? " (a privileged port, and the server no longer runs as root)" : "") +
-                             "; the listener serves HTTP/2 and HTTP/1 meanwhile and advertises no HTTP/3",
-                         "restart the service as root (systemctl restart agensio): a start binds the port before it drops root"});
+    for (const auto& w : h3_waiting_) extra.push_back(control::h3_bind_finding(w));  // h3 a reload could not open (the alpha.110 and .112 reports)
     const control::TlsFacts tls = tls_facts();
     return control::health(cfg, cfg_, as_root, std::time(nullptr), extra, &tls);
 }
@@ -1169,9 +1175,9 @@ json::Value Server::status() {
             protocols.push("h1");
         }
         entry.set("protocols", std::move(protocols));
-        // HTTP/3 a reload could not open on this listener (alpha.111): why, until a restart binds it.
-        for (const auto& [address, why] : h3_waiting_)
-            if (address == l.address) entry.set("h3_waiting", why);
+        // HTTP/3 a reload could not open on this listener (alpha.111): why, until a reload or a restart binds it.
+        for (const auto& w : h3_waiting_)
+            if (w.address == l.address) entry.set("h3_waiting", w.error);
         const SiteConfig* all = l.router.default_site();
         entry.set("catch_all", all ? json::Value(all->server_names.front()) : json::Value(nullptr));
         listeners.push(std::move(entry));
@@ -2192,10 +2198,8 @@ bool Server::commit_reload(const std::shared_ptr<Generation>& gen, std::string& 
         return false;
     }
     record_served();
-    for (const auto& [address, why] : h3_waiting_)
-        error_log_.warn("h3 on udp " + address + " is not served after this reload: " + why +
-                        (::geteuid() != 0 ? " (a privileged port, and the server no longer runs as root)" : "") +
-                        "; it opens at a restart (systemctl restart agensio). The listener serves HTTP/2 and HTTP/1 meanwhile and advertises no HTTP/3");
+    for (const auto& w : h3_waiting_)
+        error_log_.warn("h3 on udp " + w.address + " is not served after this reload: " + control::h3_bind_words(w) + ". Fix: " + w.fix);
     error_log_.warn("reloaded " + cfg_.config_path.string() + ": " + std::to_string(gen->cfg.sites.size()) +
                     " site(s), " + std::to_string(gen->listeners.size()) + " listener(s), " +
                     std::to_string(bound) + " bound, " + std::to_string(closed) + " closed");

@@ -304,16 +304,19 @@ private:
     void open_h3();
     void start_h3();
     void reload_h3(const Config& cfg);
-    // False, with `error`, when a socket cannot be bound; nothing of the listener is kept then.
-    bool open_h3_listener(const Listener& l, const Config& cfg, bool start, std::string& error);
+    // False, with `error` (and the bind's errno in `code`), when a socket cannot be bound; nothing of
+    // the listener is kept then.
+    bool open_h3_listener(const Listener& l, const Config& cfg, bool start, std::string& error, int* code = nullptr);
     // A reload, before the switch: the sockets of every listener that gains h3. One that cannot be
-    // bound (a privileged port once the server dropped root; the alpha.110 report: the throw from
-    // after the switch ended the server) keeps h3 off in `gen`, no alt-svc, and waits for a restart.
+    // bound (a privileged port once the server dropped root, the alpha.110 report, whose throw from
+    // after the switch ended the server; a port another process holds, alpha.112) keeps h3 off in
+    // `gen`, no alt-svc; the next reload tries again.
     void open_gained_h3(Generation& gen);
     void sync_h3(const std::shared_ptr<const Generation>& gen);  // after the switch: closes what lost h3
-    // The h3 listeners a reload could not open, by address, with the bind's error: the reload's
-    // answer (restart_pending), its warning and health's h3_waits_for_restart name them (worker 0).
-    std::vector<std::pair<std::string, std::string>> h3_waiting_;
+    // The h3 listeners a reload could not open, with the bind's error, its cause and fix: status's
+    // h3_waiting, the reload's warning, its answer (restart_pending for those a restart binds,
+    // h3_unbound for the rest) and health name them (worker 0).
+    std::vector<control::H3BindProblem> h3_waiting_;
     void stop_h3();
     struct H3Endpoints;
     json::Value status() override;
@@ -330,8 +333,15 @@ private:
     bool reload_now(std::string& error, std::string_view must_load = {}) override { return reload(error, must_load); }
     std::vector<std::string> restart_pending() override {
         std::vector<std::string> keys = control::restart_needed(gen_->cfg, cfg_);
-        for (const auto& w : h3_waiting_) keys.push_back("h3 on udp " + w.first);
+        for (const auto& w : h3_waiting_)
+            if (w.restart) keys.push_back("h3 on udp " + w.address);
         return keys;
+    }
+    std::vector<control::H3BindProblem> h3_unbound() override {
+        std::vector<control::H3BindProblem> out;
+        for (const auto& w : h3_waiting_)
+            if (!w.restart) out.push_back(w);
+        return out;
     }
     bool renew_certificate(std::string_view site, std::string& error, std::string& message) override;
     void reopen_logs() override { logs_.reopen_all(); }

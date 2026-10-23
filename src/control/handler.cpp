@@ -693,6 +693,11 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
             json::Value pools_done = json::Value::array();
             std::vector<std::string> steps;
             pool_report(s, o, {}, what, pools_done, steps);
+            // HTTP/3 a restart would not bind (alpha.112): the cause and its fix, never a restart.
+            for (const auto& w : backend_->h3_unbound()) {
+                answer.set("message", std::string(answer.get("message")) + "; HTTP/3 on udp " + w.address + " is not served, see next_steps");
+                steps.push_back("HTTP/3 on udp " + w.address + " is not served: " + control::h3_bind_words(w) + ". Fix: " + w.fix);
+            }
             if (!pools_done.items().empty()) answer.set("done", pools_done);
             if (!steps.empty()) answer.set("next_steps", strings(steps));
             reply(s, 200, answer);
