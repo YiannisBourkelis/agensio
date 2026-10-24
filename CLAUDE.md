@@ -1352,8 +1352,12 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    anything that is not one of our `MSG_DONTWAIT` syscalls (OpenSSL, sendfile, a library) must
    carry `O_NONBLOCK`, set explicitly, never assumed from Asio. Of the report's two follow-ups the
    tunnel's write limit is built (alpha.114: a write to either side not finished within
-   `proxy.send_timeout` ends the tunnel); a loop watchdog logging a worker that has not turned
-   for seconds is open.
+   `proxy.send_timeout` ends the tunnel). A loop watchdog was decided against (2026-10-24, the
+   owner): no known path on the current code keeps a worker from turning (sockets non-blocking,
+   tunnels bounded); what is left is storage that stops answering (a hung network filesystem
+   under a docroot or the log directory: file and log calls run on the worker, as nginx's do) and
+   bugs not yet written. A monitor or load balancer probing the sites detects a hung server
+   whatever the cause; revisit if a stall is ever seen or docroots move to network storage.
 
 Still to do (roadmap phases E and H): request-body
 limits and timeouts once bodies exist, security response headers option (HSTS,
