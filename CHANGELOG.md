@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.114
+## 0.1.0-alpha.114 (2026-10-24)
 
 - **A tunnel write that does not finish within `proxy.send_timeout` ends the tunnel** (the first of
   the two follow-ups of the 2026-10-04 incident, audit item 2.5). A WebSocket's only limit was
