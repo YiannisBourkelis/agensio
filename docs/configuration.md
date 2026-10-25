@@ -3417,7 +3417,9 @@ accepted above the ceiling is refused at once: a plain listener answers `503 Ser
 Unavailable` with `Retry-After: 2` and closes, a TLS listener closes before any handshake
 work, and a new HTTP/3 connection is refused with QUIC's `CONNECTION_REFUSED` in one small
 Initial packet, before Retry or any handshake work (RFC 9000 20.1; until alpha.116 QUIC
-handshakes went past the ceiling), so a flood buys no CPU. What happened is kept for whoever investigates, without a
+handshakes went past the ceiling), counted once per attempt though a ClientHello with a
+post-quantum key share takes two Initial packets, so a flood buys no CPU. The control socket's
+own connections are never refused and never counted. What happened is kept for whoever investigates, without a
 shell: the error log line (once per worker per ten seconds) says how many connections the
 worker holds and how many of those have been idle for two seconds or more, how many it
 refused since the last line and since start, from which addresses (the most refused first)

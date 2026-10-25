@@ -244,9 +244,9 @@ public:
     std::uint64_t retries_sent = 0, tokens_refused = 0, initials_dropped = 0, resets_sent = 0;
     // The worker's connection ceiling, TCP and QUIC together (server.max_connections): asked once
     // per Initial that would make a connection, never per packet; true answers CONNECTION_REFUSED
-    // statelessly, and the server counts the refusal with the TCP ones. Until alpha.116 QUIC never
-    // asked, so over-limit handshakes completed (audit 2.4).
-    std::function<bool(const sockaddr_storage&)> at_ceiling;
+    // statelessly, and the server counts the refusal with the TCP ones when `count` says this is a
+    // new attempt. Until alpha.116 QUIC never asked, so over-limit handshakes completed (audit 2.4).
+    std::function<bool(const sockaddr_storage&, bool count)> at_ceiling;
 
     void flush() noexcept {
 #ifdef AGENSIO_FUZZ_HOOKS
@@ -548,7 +548,11 @@ private:
             }
             if (!c) {
                 if (h.type != LongType::initial || len < kMinInitialDatagram || h.dcid.len < 8) return;
-                if (at_ceiling && at_ceiling(from)) {  // before Retry: a refusal needs no round trip
+                // A ClientHello larger than one datagram (a post-quantum key share, as curl and the
+                // browsers send) comes in several Initials under the one id the client chose (RFC
+                // 9000 7.2): each is answered, the attempt counted once (alpha.116 counted each).
+                if (at_ceiling && at_ceiling(from, h.dcid != last_refused_)) {  // before Retry: a refusal needs no round trip
+                    last_refused_ = h.dcid;
                     if (unsigned char* out = batch.reserve(256))
                         batch.commit(build_initial_close(out, 256, h, err::connection_refused, "server busy"), from, fromlen);
                     return;
@@ -734,6 +738,7 @@ private:
     std::size_t conns_ = 0;
     long long reset_second_ = -1;
     unsigned resets_in_second_ = 0;
+    Cid last_refused_{};  // the destination id of the last Initial refused at the ceiling
 };
 
 }  // namespace agensio::quic

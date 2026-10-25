@@ -71,7 +71,7 @@ public:
           in_(live_->max_header_size),
           body_source_(*this),
           writer_(socket_, *this, worker.ctx, cfg) {
-        worker_.connections.fetch_add(1, std::memory_order_relaxed);
+        if constexpr (kCounted) worker_.connections.fetch_add(1, std::memory_order_relaxed);
         stream_.conn.peer = this;
         stream_.conn.auth_memo = &auth_memo_;  // [[site.auth]]: this connection's last verified login
         // Known from the socket's type: set before the first request, since routing reads it (a
@@ -116,12 +116,18 @@ public:
     Http1Connection(const Http1Connection&) = delete;
     Http1Connection& operator=(const Http1Connection&) = delete;
     ~Http1Connection() {
-        worker_.connections.fetch_sub(1, std::memory_order_relaxed);
-        if (shed_) worker_.idle.fetch_sub(1, std::memory_order_relaxed);
+        if constexpr (kCounted) {
+            worker_.connections.fetch_sub(1, std::memory_order_relaxed);
+            if (shed_) worker_.idle.fetch_sub(1, std::memory_order_relaxed);
+        }
         ++worker_.sheds;  // freed buffers: the worker's next trim gives the pages back
     }
 
     static constexpr std::chrono::seconds kShedAfter{2};  // idle this long: buffers go, readiness brings them back
+    // The control socket's connections are the administrator's, not clients': never refused at the
+    // ceiling, and not counted in the worker's connections and idle ones, which the ceiling, status
+    // and health read. Until alpha.117 a ctl request counted itself (health said "4 of 3").
+    static constexpr bool kCounted = !IsLocalSocket<Socket>::value;
 
     void start() {
         last_activity_ = std::chrono::steady_clock::now();
@@ -410,7 +416,7 @@ private:
     void shed() {
         if (responding_ || handler_busy_ || body_pending_ || tunnel_ || upstream_ || in_len_ > 0 || !read_pending_ || shedding_) return;
         shed_ = true;
-        worker_.idle.fetch_add(1, std::memory_order_relaxed);  // counted idle for status and the ceiling's diagnosis
+        if constexpr (kCounted) worker_.idle.fetch_add(1, std::memory_order_relaxed);  // counted idle for status and the ceiling's diagnosis
         ++worker_.sheds;
         std::vector<char>().swap(body_buf_);
         std::vector<char>().swap(drain_);
@@ -434,7 +440,7 @@ private:
             self->in_.resize(self->live_->max_header_size);
             if (self->shed_) {
                 self->shed_ = false;
-                self->worker_.idle.fetch_sub(1, std::memory_order_relaxed);
+                if constexpr (kCounted) self->worker_.idle.fetch_sub(1, std::memory_order_relaxed);
             }
             self->last_activity_ = std::chrono::steady_clock::now();
             self->arm_read();
@@ -497,7 +503,7 @@ private:
             }
             if (shed_) {  // bytes arrived first: served as usual, the buffer stays
                 shed_ = false;
-                worker_.idle.fetch_sub(1, std::memory_order_relaxed);
+                if constexpr (kCounted) worker_.idle.fetch_sub(1, std::memory_order_relaxed);
             }
         }
         if (tunnel_) {

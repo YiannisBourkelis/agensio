@@ -763,9 +763,9 @@ bool Server::open_h3_listener(const Listener& l, const Config& cfg, bool start, 
         // The ceiling counts TCP and QUIC together (hardening item 5): a new QUIC connection over it
         // is refused as a TLS one is, before any handshake work (audit 2.4; before alpha.116 the QUIC
         // accept path never asked, and over-limit handshakes completed).
-        ep->at_ceiling = [this, &w, address = l.address](const sockaddr_storage& from) {
+        ep->at_ceiling = [this, &w, address = l.address](const sockaddr_storage& from, bool count) {
             if (w.connections.load(std::memory_order_relaxed) < max_connections_.load(std::memory_order_relaxed)) return false;
-            note_refusal(w, quic_peer_address(from), address);
+            if (count) note_refusal(w, quic_peer_address(from), address);  // once per attempt, not per Initial
             return true;
         };
         opened.push_back(std::move(ep));

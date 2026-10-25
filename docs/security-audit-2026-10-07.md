@@ -762,7 +762,9 @@ The raw `ctl status` **connections is 4, not 3**: the control request itself con
 one connection. A pre-fixture status request establishes that baseline; the held-client
 delta is exactly 3. The health request is likewise counted while health is assembled,
 so its message really says **"the workers hold 4 of 3 connections"**. The rows record,
-rather than rewrite, these answers.
+rather than rewrite, these answers. Since alpha.117 the control socket's connections are not counted (an
+idle instance reports 0, health says "3 of 3"; the integration suite holds both), and the rows wait
+for 0.
 
 #### `health-head-dribble`
 

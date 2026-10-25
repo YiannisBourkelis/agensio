@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0-alpha.117
+
+- **An HTTP/3 attempt refused at the connection ceiling counts once** (the alpha.116 report). A
+  ClientHello with a post-quantum key share, as curl and the browsers send, takes two Initial
+  packets, and each was counted, so `connections_refused` read HTTP/3 refusals about double. Each
+  Initial is still answered with CONNECTION_REFUSED; the attempt, known by the destination id the
+  client chose, is counted once.
+- **The control socket's connections are not counted as the worker's**. A `ctl` or MCP request
+  counted itself, so an idle server reported one connection and health's `connections_refused` said
+  "the workers hold 4 of 3 connections" where the error log said "3 of 3". The control socket's
+  connections were never refused at the ceiling; now they do not count toward it, nor toward
+  `connections` and `connections_idle`.
+- The integration suite holds both: an idle instance reports no connection, health says "3 of 3"
+  with three held, and one refused `curl --http3-only` adds one refusal.
+
 ## 0.1.0-alpha.116 (2026-10-25)
 
 - **Every HTML form POST over HTTP/3 failed: logins and forms did not work for browsers using

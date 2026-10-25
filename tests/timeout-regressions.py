@@ -402,7 +402,7 @@ def health_shape(process, plain, tls, shape):
     deadline = time.monotonic() + 5
     while True:
         baseline = control_json(process, "status")
-        if baseline["connections"] == 1:
+        if baseline["connections"] == 0:  # the control request is not counted (alpha.117; it was 1)
             break
         assert time.monotonic() < deadline, "readiness connections did not retire"
         time.sleep(0.05)

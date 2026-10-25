@@ -3464,7 +3464,8 @@ check "body timeout: response served, then the server closes" "HTTP/1.1 200 OK c
 # fourth over TLS is closed before the handshake, a freed slot serves again; status, health
 # and the error log say what happened.
 mkdir -p bench/tmp/limit
-printf '[server]\nworkers = 1\nmax_connections = 3\nserver_header = "web"\n[log]\naccess = "off"\nerror = "%s/bench/tmp/limit/error.log"\nlevel = "info"\n[control]\nsocket = "%s/bench/tmp/limit/control.sock"\naudit = "%s/bench/tmp/limit/audit.log"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8061"]\nroot = "%s/bench/www"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8461"]\nroot = "%s/bench/www"\ntls = { cert = "%s/bench/certs/cert.pem", key = "%s/bench/certs/key.pem" }\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" > bench/tmp/limit/agensio.toml
+LIMIT_PROTOCOLS=; [ $H3 = 1 ] && LIMIT_PROTOCOLS=$'protocols = ["h2", "h1", "h3"]\n'  # h3 on 8461 for the refusal count below
+printf '[server]\nworkers = 1\nmax_connections = 3\n%sserver_header = "web"\n[log]\naccess = "off"\nerror = "%s/bench/tmp/limit/error.log"\nlevel = "info"\n[control]\nsocket = "%s/bench/tmp/limit/control.sock"\naudit = "%s/bench/tmp/limit/audit.log"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8061"]\nroot = "%s/bench/www"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8461"]\nroot = "%s/bench/www"\ntls = { cert = "%s/bench/certs/cert.pem", key = "%s/bench/certs/key.pem" }\n' "$LIMIT_PROTOCOLS" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" > bench/tmp/limit/agensio.toml
 rm -f bench/tmp/limit/error.log bench/tmp/limit/control.sock
 "$BIN" -c bench/tmp/limit/agensio.toml > bench/tmp/limit/server.out 2>&1 & LPID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8061 2>/dev/null && [ -S bench/tmp/limit/control.sock ] && break; sleep 0.1; done
@@ -3507,6 +3508,33 @@ print(idle[0], idle[1], int(d["connections_idle"]) - 1)  # the one that spoke is
 PY
 )"
 check "connection ceiling: the derived default is logged at start with the open-file limit" "yes" "$(grep -q 'connection ceiling 3 per worker (1 worker(s), open-file limit [0-9]*, server.max_connections)' bench/tmp/limit/error.log && echo yes)"
+# What status and health count (the alpha.116 report): the control connection asking is not one of
+# the worker's connections, so an idle instance holds none and a full one "3 of 3" (it said 1, and
+# "4 of 3"); and an HTTP/3 attempt refused at the ceiling counts once, though its ClientHello (a
+# post-quantum key share, curl's and browsers' alike) spans two Initial packets, each answered with
+# CONNECTION_REFUSED (it counted two).
+lcount() { H3=$H3 python3 - <<'PY'
+import json, os, socket, subprocess, time
+def get(p):
+    return json.loads(subprocess.run(["curl", "-sS", "--unix-socket", "bench/tmp/limit/control.sock", "http://control/v1/" + p], capture_output=True, text=True).stdout)
+time.sleep(0.5)  # the earlier checks' connections are gone
+idle = int(get("status")["connections"])
+held = [socket.create_connection(("127.0.0.1", 8061)) for _ in range(3)]
+time.sleep(0.3)
+before = int(get("status")["connections_refused"])
+h3 = "-"
+if os.environ.get("H3") == "1":
+    subprocess.run(["curl", "-sS", "--http3-only", "-k", "-m", "5", "-o", "/dev/null", "https://127.0.0.1:8461/"], capture_output=True)
+    time.sleep(0.3)
+    h3 = int(get("status")["connections_refused"]) - before
+f = [x for x in get("health")["findings"] if x["code"] == "connections_refused"]
+holds = "3-of-3" if f and "the workers hold 3 of 3 connections" in f[0]["message"] else (f[0]["message"] if f else "none")
+print(idle, holds, h3)
+PY
+}
+LC=$(lcount)
+check "connection ceiling: the control request is not one of the worker's connections: an idle instance holds none, health says 3 of 3 while three are held" "0 3-of-3" "${LC% *}"
+[ $H3 = 1 ] && check "connection ceiling: one HTTP/3 attempt refused counts once, its two Initial packets one refusal" "1" "${LC##* }"
 kill $LPID; wait $LPID 2>/dev/null
 # IPv4 and IPv6 on one port (the cookbook report of 2026-10-09): sites on 0.0.0.0:P and on [::]:P
 # started only with SO_REUSEPORT; with reuse_port = "off" (macOS's way, one shared acceptor) the
