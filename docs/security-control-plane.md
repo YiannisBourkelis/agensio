@@ -189,6 +189,44 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-10-25, the release check of 0.1.0-alpha.116, before the tag. `scripts/fuzz-all.sh -t 300`,
+every target at once (twenty-two, one process each on 24 cores, five minutes): 553 M runs, no
+finding, no timeout. Before it, on their own: `fuzz_h2_conn` ten minutes on eight processes (26.7 M
+runs) after the stalled-writer fix, `fuzz_qpack` ten minutes on six (269.3 M) after the static-table
+fix, both clean. The sanitizer build (`build-asan`, GCC 14): unit, the integration suite (777 checks,
+no sanitizer line), the HTTP/3 attack suite with Retry auto and always, the Pebble suite (21): clean.
+The release build: unit, integration (777), reload (25), auth (50), pools (26), control (27; its MCP
+counts had stayed at sixteen read tools since `php_versions` was added in alpha.107, fixed) and Pebble
+(21) pass; the builds without OpenSSL and without libxcrypt link and pass their unit tests.
+The A/B against alpha.115 (`bench/ab.sh v0.1.0-alpha.115 -2 -3 -r 3`, `ab-20261025-210334.md`): flat
+but the ten-stream HTTP/2 row over TLS at 1.070, which five rounds of the HTTP/2 rows put at 0.993
+(`ab-20261025-211135.md`, every row 0.964 to 1.007).
+
+| target | runs | edges | result |
+|---|---|---|---|
+| fuzz_archive | 12.89 M | 640 | clean |
+| fuzz_auth_users | 20.87 M | 497 | clean |
+| fuzz_chunked | 100.69 M | 63 | clean |
+| fuzz_fcgi | 55.18 M | 96 | clean |
+| fuzz_fields | 6.67 M | 571 | clean |
+| fuzz_h2_conn | 0.78 M | 11,826 | clean |
+| fuzz_hpack | 2.60 M | 529 | clean |
+| fuzz_hpack_roundtrip | 0.37 M | 466 | clean |
+| fuzz_http_head | 64.89 M | 152 | clean |
+| fuzz_json | 7.53 M | 554 | clean |
+| fuzz_log_line | 5.58 M | 746 | clean |
+| fuzz_parser | 48.14 M | 240 | clean |
+| fuzz_path | 11.07 M | 235 | clean |
+| fuzz_php_constraint | 16.34 M | 771 | clean |
+| fuzz_qpack | 6.10 M | 646 | clean |
+| fuzz_quic_conn | 0.54 M | 1,551 | clean |
+| fuzz_quic_packet | 22.88 M | 217 | clean |
+| fuzz_redirect | 4.88 M | 1,232 | clean |
+| fuzz_refuse | 3.50 M | 875 | clean |
+| fuzz_response_headers | 0.59 M | 3,356 | clean |
+| fuzz_sql_scan | 3.10 M | 158 | clean |
+| fuzz_transport_params | 158.25 M | 211 | clean |
+
 2026-10-21, a new target before its commit: `fuzz_php_constraint` (the Composer constraints and the
 `composer.json` and `version.php` readers of row 46), twenty minutes alone on 24 processes
 (`scripts/fuzz-all.sh -t 1200 php_constraint`, ASan and UBSan, clang 19): 1,187.50 M runs, 767 edges,

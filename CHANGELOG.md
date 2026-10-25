@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.116
+## 0.1.0-alpha.116 (2026-10-25)
 
 - **Every HTML form POST over HTTP/3 failed: logins and forms did not work for browsers using
   HTTP/3** (the test VPS's report). Six values of the QPACK static table (RFC 9204 appendix A) held
