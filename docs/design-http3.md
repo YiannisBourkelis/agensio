@@ -351,10 +351,17 @@ validated. `http3.retry = "auto"` sends Retry when the worker's half-open count 
 half its budget, `"always"` always (a deployment under attack), `"never"` never. At the
 full budget further Initials are dropped. NEW_TOKEN for later connections is an I4 item.
 
-The handshake must finish within `idle_timeout` (not enforced yet: the only clock is the idle
-timer, which any datagram reaching the connection refreshes, decrypted or not; the
-connection's creation time is recorded and not read. Security audit 2026-10-07, item 2.4);
-the Initial and Handshake spaces have
+The handshake must finish within `idle_timeout` of the connection's creation, whatever
+arrives meanwhile, or the connection is dropped silently, as at the idle timeout (since
+alpha.116, security audit 2026-10-07, item 2.4; `on_timer` and `reschedule` read `created_`
+while the state is `handshaking`). And only a packet that opens restarts the idle timer (RFC
+9000 10.1), while every datagram on the path still counts for the amplification limit (8.1):
+before, any datagram routed to the connection restarted it, so one undecryptable packet every
+14 s held a half-open handshake indefinitely. The absolute deadline also covers Initial
+packets, which anyone can open. `tests/h3-attacks.py` row `handshake-deadline` holds a
+half-open connection fed one undecryptable Handshake packet at 14 s to a retirement at 15 s,
+with Retry auto and always (alpha.115 kept it past 16 s), and a new handshake is accepted
+meanwhile. The Initial and Handshake spaces have
 their own PTO (6.5) so a lost ServerHello is resent on time; a Handshake packet from a
 peer whose address changed during the handshake is ignored.
 
@@ -862,7 +869,7 @@ time) and the same profile load (`profile-transport.txt` and the files before it
 | Key update flood | a key phase flipped repeatedly | a second update before the previous is acknowledged is KEY_UPDATE_ERROR; old keys kept three PTOs | | `h3-attacks.py key-update` |
 | Path validation flood, migration to a victim | packets from spoofed new addresses | passive changes only, one validation at a time, three times the bytes on the new path until validated, PATH_RESPONSE rate-limited, migration to a validated path only | 1 validation in flight | `h3-attacks.py path-flood` |
 | Spoofed stateless reset, Version Negotiation or CONNECTION_CLOSE | tear down a connection from outside | a reset must end in a token we issued (HMAC under the server secret); Version Negotiation answered only for unknown versions and ignored after the handshake; CONNECTION_CLOSE only from a packet that decrypts | | unit tests; the interop runner |
-| Slow handshake, slowloris | a client that dribbles | `max_idle_timeout` = `idle_timeout`; planned and not built: the handshake bounded by `idle_timeout` and `body_timeout` between DATA frames (audit 2026-10-07, items 2.4 and 2.10) | 15 s, 60 s | integration |
+| Slow handshake, slowloris | a client that dribbles | `max_idle_timeout` = `idle_timeout`; the handshake finishes within `idle_timeout` of the connection's creation, and only a packet that opens restarts the idle timer (alpha.116, audit 2026-10-07, item 2.4); planned and not built: `body_timeout` between DATA frames (item 2.10) | 15 s, 60 s | `h3-attacks.py handshake-deadline` (alpha.115 kept a half-open connection fed undecryptable packets; a silent control and a new handshake beside it) |
 | 0-RTT replay | a replayed early request | early data refused in phase I (`SSL_set_quic_tls_early_data_enabled` off); later opt-in for GET and HEAD only, with `Early-Data: 1` to upstreams | | unit |
 | Memory as a whole | anything that grows | every buffer belongs to a stream, a connection or the worker and has a cap; the worst case is 6.10 | about 3.8 MB per connection at the defaults | the attack suite samples RSS through every run |
 

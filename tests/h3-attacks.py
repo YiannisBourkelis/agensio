@@ -7,8 +7,12 @@ packets, send garbage tokens) and assert the server's answer.
 Usage: tests/h3-attacks.py BINARY [--retry always|auto] [--port 18443] [--rows a,b,c]
 The suite starts the binary on 127.0.0.1:PORT with the bench docroot, runs the rows and
 stops it; exit 1 when a row fails. Under the sanitizer build the server's stderr is
-checked for reports."""
+checked for reports. handshake-deadline (audit 2.4: fails on alpha.115, passes from
+alpha.116) runs first and checks the lifetime via status connection-count deltas on this
+isolated server, which then has a control socket."""
 import argparse
+from contextlib import contextmanager
+import json
 import os
 import random
 import select
@@ -18,12 +22,13 @@ import subprocess
 import sys
 import time
 
-from aioquic.buffer import encode_uint_var
+from aioquic.buffer import Buffer, encode_uint_var
 from aioquic.h3 import connection as h3c
 from aioquic.h3.events import DataReceived, HeadersReceived
 from aioquic.quic import events as qe
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
+from aioquic.quic.packet import pull_quic_header, QuicPacketType
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = ("127.0.0.1", 18443)
@@ -453,6 +458,103 @@ def row_handshake_flood(args):
     return True, "%d Initials in %.1fs: %d Retry, %d other answers; a real client gets 200" % (sent, took, retries, others)
 
 
+@contextmanager
+def half_open_client():
+    cfg = QuicConfiguration(is_client=True, alpn_protocols=["h3"], verify_mode=ssl.CERT_NONE,
+                            server_name="localhost", idle_timeout=60)
+    q = QuicConnection(configuration=cfg)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.settimeout(3)
+        q.connect(SERVER, time.monotonic())
+        deadline = time.monotonic() + 3
+        while True:
+            pending = q.datagrams_to_send(time.monotonic())
+            assert pending, "no client Initial to send"
+            born = time.monotonic()
+            for data, addr in pending:
+                sock.sendto(data, addr)
+            assert time.monotonic() < deadline, "half-open setup exceeded 3 s"
+            data, addr = sock.recvfrom(65536)
+            assert addr == SERVER, "unexpected QUIC peer"
+            header = pull_quic_header(Buffer(data=data))
+            if header.packet_type == QuicPacketType.RETRY:
+                # Verify and answer Retry, but never feed the server's TLS flight to q:
+                # that would let aioquic emit Finished and invalidate the half-open test.
+                q.receive_datagram(data, addr, time.monotonic())
+                continue
+            assert header.packet_type == QuicPacketType.INITIAL, "server did not send an Initial"
+            assert header.destination_cid == q.host_cid, "server Initial addressed another client"
+            assert len(header.source_cid) == 8, "unexpected server connection id"
+            # RFC 9000 17.2.4: a routed Handshake header with bogus ciphertext. An
+            # unknown Handshake cannot allocate a fresh connection after the old one
+            # expires, unlike a corrupted Initial (which would spoil the status delta).
+            forged = (b"\xe0\x00\x00\x00\x01" + bytes([len(header.source_cid)]) + header.source_cid
+                      + bytes([len(q.host_cid)]) + q.host_cid + encode_uint_var(64) + bytes(64))
+            assert pull_quic_header(Buffer(data=forged)).packet_type == QuicPacketType.HANDSHAKE
+            yield sock, forged, born
+            return
+
+
+def status_connections(args):
+    result = subprocess.run([args.binary, "ctl", "status", "--socket",
+                             os.path.join(ROOT, "bench", "tmp", "h3-attacks-control.sock")],
+                            check=True, capture_output=True, text=True, timeout=2)
+    value = json.loads(result.stdout)["connections"]
+    assert isinstance(value, (int, float)) and value >= 0 and int(value) == value, "invalid connection count"
+    return int(value)
+
+
+def row_handshake_deadline(args):
+    # This row runs first when selected: only its known clients and status requests
+    # exist. Status has no half-open field; keep that distinction explicit.
+    baseline = status_connections(args)
+
+    def wait_delta(want, deadline):
+        while True:
+            delta = status_connections(args) - baseline
+            if delta == want or time.monotonic() >= deadline:
+                return delta
+            time.sleep(0.05)
+
+    failures = []
+    for dribble in (False, True):
+        name = "undecryptable-dribble" if dribble else "silent-control"
+        assert wait_delta(0, time.monotonic() + 2) == 0, "server not isolated before " + name
+        with half_open_client() as (sock, forged, born):
+            assert wait_delta(1, born + 3) == 1, "server did not allocate exactly one half-open connection"
+            c = Client()
+            try:
+                assert c.connect(timeout=2), "new handshake refused while a half-open client exists"
+                status, body = c.get("/", timeout=2)
+                assert status == 200 and len(body or b"") == os.path.getsize(
+                    os.path.join(ROOT, "bench", "www", "index.html")), "new client's GET failed"
+            finally:
+                c.close()
+            assert wait_delta(1, born + 5) == 1, "probe did not retire, or half-open connection disappeared early"
+            sent = 0
+            closed = None
+            deadline = born + 16
+            while time.monotonic() < deadline:
+                if dribble and time.monotonic() >= born + 14 * (sent + 1):
+                    sock.sendto(forged, SERVER)
+                    sent += 1
+                delta = status_connections(args) - baseline
+                assert delta in (0, 1), "unexpected status connection delta: %d" % delta
+                if delta == 0:
+                    closed = time.monotonic() - born
+                    break
+                time.sleep(0.05)
+            good = closed is not None and 14.5 <= closed <= 16 and sent == int(dribble)
+            state = "still allocated at 16 s" if closed is None else "retired at %.3f s" % closed
+            log("  %s %s: %s; %d undecryptable datagrams; new handshake and GET passed" %
+                ("PASS" if good else "FAIL", name, state, sent))
+            if not good:
+                failures.append(name)
+    return not failures, ("deadline failed: " + ", ".join(failures) if failures else
+                          "both half-open status deltas retired at 15 s, new handshakes accepted")
+
+
 def varint(v):
     return encode_uint_var(v)
 
@@ -587,6 +689,7 @@ def row_shutdown(args):
 
 
 ROWS = [
+    ("handshake-deadline", row_handshake_deadline),  # first, so its status deltas see no other clients
     ("handshake", row_handshake),
     ("retry", row_retry),
     ("invalid-token", row_invalid_token),
@@ -611,20 +714,25 @@ ROWS = [
 ]
 
 
-def write_config(port, retry, h3=True):
+def write_config(port, retry, h3=True, control=False):
     os.makedirs(os.path.join(ROOT, "bench", "tmp"), exist_ok=True)
     conf = os.path.join(ROOT, "bench", "tmp", "h3-attacks.toml")
     with open(conf, "w") as f:
         f.write('[server]\nworkers = 1\nprotocols = [%s]\nhttp3 = { retry = "%s" }\n' % ('"h2", "h1", "h3"' if h3 else '"h2", "h1"', retry))
         f.write('pid_file = "%s/bench/tmp/h3-attacks.pid"\n' % ROOT)
+        if control:
+            f.write('idle_timeout = 15\n')
         f.write('[log]\naccess = "off"\n')
         f.write('[[site]]\nlisten = ["127.0.0.1:%d"]\nroot = "%s/bench/www"\n' % (port, ROOT))
         f.write('tls = { cert = "%s/bench/certs/cert.pem", key = "%s/bench/certs/key.pem" }\n' % (ROOT, ROOT))
+        if control:
+            f.write('[control]\nsocket = "%s/bench/tmp/h3-attacks-control.sock"\n'
+                    'audit = "%s/bench/tmp/h3-attacks-audit.log"\n' % (ROOT, ROOT))
     return conf
 
 
-def start_server(binary, port, retry):
-    conf = write_config(port, retry)
+def start_server(binary, port, retry, control=False):
+    conf = write_config(port, retry, control=control)
     err = open(os.path.join(ROOT, "bench", "tmp", "h3-attacks.err"), "w")
     p = subprocess.Popen([binary, "-c", conf], stdout=subprocess.DEVNULL, stderr=err)
     for _ in range(50):
@@ -636,6 +744,7 @@ def start_server(binary, port, retry):
         except OSError:
             pass
     p.kill()
+    p.wait(timeout=2)
     raise SystemExit("the server did not come up")
 
 
@@ -644,12 +753,14 @@ def main():
     ap.add_argument("binary")
     ap.add_argument("--retry", default="auto", choices=["auto", "always", "never"])
     ap.add_argument("--port", type=int, default=18443)
-    ap.add_argument("--rows", default="")
+    ap.add_argument("--rows", default="", help="comma-separated rows (default: all)")
     args = ap.parse_args()
     global SERVER
     SERVER = ("127.0.0.1", args.port)
     want = set(args.rows.split(",")) if args.rows else None
-    p = start_server(args.binary, args.port, args.retry)
+    if want and want - {name for name, _ in ROWS}:
+        ap.error("unknown rows: " + ",".join(sorted(want - {name for name, _ in ROWS})))
+    p = start_server(args.binary, args.port, args.retry, control=not want or "handshake-deadline" in want)
     args.server = p
     failed = 0
     try:
@@ -670,6 +781,7 @@ def main():
                 p.wait(5)
             except subprocess.TimeoutExpired:
                 p.kill()
+                p.wait(timeout=2)
     err = open(os.path.join(ROOT, "bench", "tmp", "h3-attacks.err")).read()
     reports = err.count("Sanitizer") + err.count("runtime error")
     if reports:

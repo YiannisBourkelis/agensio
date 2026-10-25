@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.0-alpha.116
+
+- **An HTTP/2 connection fed bytes that complete no frame is closed at the idle timeout** (audit
+  item 2.3). Every read restarted the idle clock, so a client sending one byte of a frame every
+  14 s, with no stream open, held the connection and its slot indefinitely.
+  - The idle close now counts a completed frame, the preface or a write as progress, never a byte
+    that completes nothing.
+  - The deadline of an unfinished header block holds whether or not a stream is open: a request's
+    stream opens only once its block is complete, so this deadline was never checked then.
+- **A QUIC handshake that does not finish within `idle_timeout` of its start is dropped** (audit
+  item 2.4), silently, as at the idle timeout.
+  - Only a packet that opens restarts the idle timer (RFC 9000 10.1); every datagram still counts
+    for the amplification limit (8.1). Before, one undecryptable packet every 14 s kept a half-open
+    handshake, and its share of the worker's budget, indefinitely.
+  - The absolute deadline also covers Initial packets, which anyone can open.
+- `tests/timeout-regressions.py` row `h2-idle` and `tests/h3-attacks.py` row `handshake-deadline`
+  (the latter now first, with a control socket): written first, they failed on alpha.115 and pass
+  now, and are default rows of their suites.
+
 ## 0.1.0-alpha.115 (2026-10-25)
 
 - **The APT repository has two suites, and is ready to go live** once the release signing key is set

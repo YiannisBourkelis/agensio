@@ -249,10 +249,11 @@ public:
         if (state_ == State::closed || state_ == State::draining || !ok_) return;
         bool on_peer_path = fromlen == peer_len_ && std::memcmp(&from, &peer_, fromlen) == 0;
         if (!on_peer_path && state_ != State::established) return;  // the handshake stays on the path it began on
-        if (on_peer_path) {
-            bytes_received_ += len;
-            last_receive_ = now;
-        }
+        // Every datagram on the path counts for the amplification limit, its packets opened or not
+        // (RFC 9000 8.1); only a packet that opens restarts the idle timer (10.1), below. Before, any
+        // datagram routed here did, so one undecryptable packet every few seconds kept a half-open
+        // handshake past its deadline (audit 2.4).
+        if (on_peer_path) bytes_received_ += len;
         if (state_ == State::closing) {
             if (++close_packets_ % 3 == 1) close_due_ = true;  // the close again, at a limited rate (RFC 9000 10.2.1)
             return;
@@ -334,6 +335,7 @@ public:
                 break;
             }
             QUIC_TRACE("quic: <- space=%u pn=%llu len=%zu\n", si, static_cast<unsigned long long>(pn), plain);
+            last_receive_ = now;  // opened, not a duplicate: the peer, wherever it is now (RFC 9000 10.1)
             current_dcid_ = h.dcid;
             from_peer_path_ = on_peer_path;
             non_probing_ = false;
@@ -343,7 +345,6 @@ public:
             if (state_ == State::closing || state_ == State::draining) return;
             rec_.on_packet_received(space, pn, eliciting, now, our_max_ack_delay_);
             if (!on_peer_path) {
-                last_receive_ = now;  // the peer, wherever it is now
                 // A non-probing packet, the highest so far, from a new address: the peer
                 // moved (a NAT rebinding, RFC 9000 9.3); its new path is validated.
                 if (!h.long_form && non_probing_ && (!prev_any || pn > prev_largest)) {
@@ -440,7 +441,11 @@ public:
             return;
         }
         if (state_ == State::closed) return;
-        if (now + std::chrono::microseconds(500) >= last_receive_ + idle_) {
+        // A handshake finishes within idle_timeout of the connection's creation whatever arrives
+        // (design-http3.md 6.3, audit 2.4): Initial packets anyone can open would otherwise keep
+        // it half-open; both ends are silent, as for the idle timeout (RFC 9000 10.1).
+        if (now + std::chrono::microseconds(500) >= last_receive_ + idle_ ||
+            (state_ == State::handshaking && now + std::chrono::microseconds(500) >= created_ + idle_)) {
             QUIC_TRACE("quic: idle timeout\n");
             state_ = State::closed;
             leave_handshake();
@@ -491,6 +496,7 @@ public:
             d = closing_end_;
         } else {
             d = last_receive_ + idle_;
+            if (state_ == State::handshaking && created_ + idle_ < d) d = created_ + idle_;
             const TimePoint lt = rec_.loss_timer(at_amplification_limit());
             if (lt < d) d = lt;
             if (rx_prev_.valid() && prev_keys_end_ < d) d = prev_keys_end_;

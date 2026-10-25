@@ -1,0 +1,65 @@
+starting benchmark...
+spawning thread #0: 16 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+spawning thread #1: 16 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+spawning thread #2: 16 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+spawning thread #3: 16 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+Warm-up started for thread #1.
+Warm-up started for thread #3.
+Warm-up started for thread #2.
+Warm-up phase is over for thread #1.
+Main benchmark duration is started for thread #1.
+Warm-up phase is over for thread #3.
+Main benchmark duration is started for thread #3.
+Warm-up started for thread #0.
+progress: 6% of clients started
+progress: 12% of clients started
+progress: 18% of clients started
+progress: 25% of clients started
+progress: 31% of clients started
+progress: 37% of clients started
+progress: 43% of clients started
+progress: 50% of clients started
+Warm-up phase is over for thread #2.
+Main benchmark duration is started for thread #2.
+progress: 56% of clients started
+progress: 62% of clients started
+progress: 68% of clients started
+progress: 75% of clients started
+progress: 81% of clients started
+progress: 87% of clients started
+progress: 93% of clients started
+progress: 100% of clients started
+Warm-up phase is over for thread #0.
+Main benchmark duration is started for thread #0.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: ECDSA prime256v1 256 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+Main benchmark duration is over for thread #1. Stopping all clients.
+Stopped all clients for thread #1
+Main benchmark duration is over for thread #2. Stopping all clients.
+Stopped all clients for thread #2
+Main benchmark duration is over for thread #3. Stopping all clients.
+Stopped all clients for thread #3
+Main benchmark duration is over for thread #0. Stopping all clients.
+Stopped all clients for thread #0
+
+finished in 5.00s, 55842.80 req/s, 55.92MB/s
+requests: 279214 total, 279278 started, 279214 done, 279214 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 279214 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 279.61MB (293194448) total, 13.05MB (13681486) headers (space savings 73.80%), 264.42MB (277259502) data
+UDP datagram: 546428 sent, 279837 received
+                 min         max         median      p95         p99         mean        sd         +/- sd
+request     :        9us     27.27ms      1.18ms      1.25ms      1.31ms      1.14ms       349us    95.50%
+connect     :     1.12ms     10.08ms      8.86ms      9.88ms     10.08ms      8.64ms      1.49ms    96.88%
+TTFB        :     8.58ms     12.95ms     12.49ms     12.88ms     12.95ms     11.98ms      1.14ms    73.44%
+req/s       :     824.41     2161.86      838.79      844.33     2161.86      872.42      204.07    96.88%
+min RTT     :        5us        29us        17us        27us        29us        17us         6us    62.50%
+smoothed RTT:       27us        59us        47us        57us        59us        48us         6us    70.31%
+packets sent:       8229       15754        8369        8430       15754     8539.94     1095.42    96.88%
+packets recv:       4133       10822        4204        4234       10822     4373.45     1020.38    96.88%
+packets lost:          0           0           0           0           0        0.00        0.00   100.00%
+GRO packets :          1           2           1           1           1        1.00        0.03    99.90%

@@ -557,16 +557,21 @@ One lazy `steady_timer` per connection, deadlines checked when it fires, as HTTP
 
 | Situation | Limit | Action |
 |---|---|---|
-| no stream open, no bytes | `idle_timeout` (15 s) | close (a browser reconnects; the admin raises the key for long-lived pages) |
+| no stream open, no frame completed and nothing written | `idle_timeout` (15 s) | close (a browser reconnects; the admin raises the key for long-lived pages). Bytes that complete no frame do not count: until alpha.116 every read restarted the clock, so one byte of a frame every 14 s held the connection (audit 2.3) |
 | a stream's head incomplete (HEADERS without END_HEADERS, or waiting for CONTINUATION) | `idle_timeout` | `GOAWAY(ENHANCE_YOUR_CALM)` + close: slow headers |
 | a body announced, handler waiting, no DATA | `body_timeout` (60 s) | `RST_STREAM(CANCEL)`, 408 not possible any more, log |
 | response pending, no window progress of at least 1 KB | `idle_timeout` | `RST_STREAM(CANCEL)`, buffers freed: the Bomb's "hold", zero-window slow read; progress is marked when a write carrying the stream's bytes completes. A stream whose next bytes are being read from its application (a pull in flight) is not cut by this clock: the upstream's `read_timeout` bounds it, as on HTTP/1 (alpha.56). A stream already reset, its release deferred while the writer or the pull still holds it, is skipped by the check (alpha.56: before, the check met it again on every pass and never returned, audit 2.1) |
 | response pending, socket not draining | `idle_timeout` | close: TCP-level slow read |
 
-What the code does differs in three places (security audit 2026-10-07, items 2.3 and 2.10):
-the idle clock is refreshed by every read, also one that completes no frame; the
-incomplete-head deadline and the not-draining check run only while at least one stream is
-open; and the not-draining close comes at four idle timeouts, not one.
+Since alpha.116 (security audit 2026-10-07, item 2.3) the idle clock is `last_progress_`: a
+completed frame, the preface, a write or the connection's start move it, a byte that completes
+nothing does not (it moves only the shed's clock, `last_activity_`); and the incomplete-head
+deadline is checked whether or not a stream is open, since a request's stream opens only when
+its header block completes. `tests/timeout-regressions.py` row `h2-idle` holds both dribbles
+(a PING's bytes after the SETTINGS exchange, the first SETTINGS's bytes after the preface) to
+a close at 15 s; alpha.115 kept both open past 17 s. What still differs (item 2.10): the
+not-draining check runs only while at least one stream is open, and closes at four idle
+timeouts, not one.
 
 ### 6.8 Lifecycle
 

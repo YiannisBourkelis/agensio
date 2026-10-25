@@ -2939,9 +2939,9 @@ if python3 -c 'import h2' 2>/dev/null; then
   check "idle 2.6 s then a request on the same connection: HTTP/2 over TLS" "1 1 none open" "$(python3 tests/h2/reload_client.py --tls 8443 / -- sleep 2.6 | awk -F' [|] ' '{print (length($1)>100), (length($2)>100), $3, $4}')"
 fi
 
-# Audit 2.1/2.2: private single-worker instances, including the old timeout-loop hang.
+# Audit 2.1/2.2/2.3: private single-worker instances, including the old timeout-loop hang.
 if [ "$(uname -s)" = Linux ] && python3 -c 'import h2' 2>/dev/null; then
-  timeout_rows=h2-stalled,h1-sendfile,cached-tls
+  timeout_rows=h2-stalled,h1-sendfile,cached-tls,h2-idle
   if [ -n "$PHPFPM" ]; then
     timeout_rows+=,fastcgi
   else
@@ -2950,7 +2950,7 @@ if [ "$(uname -s)" = Linux ] && python3 -c 'import h2' 2>/dev/null; then
   python3 tests/timeout-regressions.py "$BIN" --rows "$timeout_rows" > bench/tmp/timeout-regressions.log 2>&1
   timeout_result=$?
   cat bench/tmp/timeout-regressions.log
-  check "audit 2.1/2.2: stalled writers, paused FastCGI and slow cached TLS" "0" "$timeout_result"
+  check "audit 2.1/2.2/2.3: stalled writers, paused FastCGI, slow cached TLS, and HTTP/2 connections fed bytes of frames past the idle timeout" "0" "$timeout_result"
 else
   echo "skip timeout regressions (Linux and python3-h2 required; run in the devbox)"
 fi

@@ -93,7 +93,7 @@ public:
     }
 
     void start() {
-        last_activity_ = std::chrono::steady_clock::now();
+        last_activity_ = last_progress_ = std::chrono::steady_clock::now();
         arm_timer();
         // Our SETTINGS and the connection window go first (RFC 9113 3.4).
         std::string frames;
@@ -121,7 +121,7 @@ public:
     // ---- what the writer calls ----
 
     WorkerState& worker_state() noexcept { return worker_.state; }
-    void touch() noexcept { last_activity_ = std::chrono::steady_clock::now(); }
+    void touch() noexcept { last_activity_ = last_progress_ = std::chrono::steady_clock::now(); }
     std::chrono::steady_clock::time_point last_activity() const noexcept { return last_activity_; }
     // The clock as of the socket event being handled: a read's frame loop runs in
     // microseconds, so every stream it opens or answers takes the timestamp read once at
@@ -184,6 +184,7 @@ public:
     void fuzz_age(std::chrono::steady_clock::duration d) {
         if (closed_) return;
         last_activity_ -= d;
+        last_progress_ -= d;
         block_since_ -= d;
         reset_window_ -= d;
         ping_rate_.first -= d;
@@ -328,6 +329,7 @@ private:
                 return;
             }
             preface_seen_ = true;
+            last_progress_ = last_activity_;
             pos = kPreface.size();
         }
         // A connection error or a graceful close decided inside a handler ends the loop: the
@@ -345,6 +347,7 @@ private:
                     return;
                 }
                 if (in_len_ - pos < kFrameHeaderSize + h.length) break;  // wait for the rest
+                last_progress_ = last_activity_;  // a complete frame; a byte of one is no progress (audit 2.3)
                 handle_frame(h, p + kFrameHeaderSize);
                 pos += kFrameHeaderSize + h.length;
             }
@@ -1255,22 +1258,30 @@ private:
 
     void check_timeouts() {
         const auto now = std::chrono::steady_clock::now();
+        // A header block opens its stream only once complete (finish_block), so its deadline holds
+        // whether or not another stream is open; before, it was checked only while one was (audit 2.3).
+        if (block_stream_ != 0 && now - block_since_ >= idle_timeout_) {
+            connection_error(ErrorCode::enhance_your_calm, "header block not completed in time");
+            return;
+        }
         if (streams_.active() == 0) {
-            const auto idle = now - last_activity_;
+            // Idle is measured from the last completed frame or write (last_progress_): a client
+            // sending one byte of a frame every few seconds no longer holds the connection past the
+            // idle timeout, as any read refreshing the clock let it (audit 2.3). The shed still
+            // follows the bytes: a connection receiving some is not shedding its buffer.
+            const auto idle = now - last_progress_;
             if (idle >= idle_timeout_) {
                 close();
                 return;
             }
-            if (idle >= kShedAfter) {
+            if (now - last_activity_ >= kShedAfter) {
                 shed();
                 arm_timer(idle_timeout_ - idle);  // nothing more to do until the idle timeout
                 return;
             }
+            arm_timer(std::min<std::chrono::steady_clock::duration>(idle_timeout_ - idle, kShedAfter));
+            return;
         } else {
-            if (block_stream_ != 0 && now - block_since_ >= idle_timeout_) {
-                connection_error(ErrorCode::enhance_your_calm, "header block not completed in time");
-                return;
-            }
             for (std::size_t i = 0; i < streams_.active();) {
                 H2Stream& s = *streams_.all()[i];
                 // Closed already, its release deferred until the writer or the pull completion lets
@@ -1373,6 +1384,9 @@ private:
     std::chrono::steady_clock::duration idle_timeout_;
     std::chrono::steady_clock::duration body_timeout_;
     std::chrono::steady_clock::time_point last_activity_;
+    // The last completed frame, write, or the start: the idle close's clock. Bytes that complete no
+    // frame move only last_activity_ (the shed's and the read's timestamp), not this (audit 2.3).
+    std::chrono::steady_clock::time_point last_progress_;
     std::vector<char> in_;
     std::size_t in_len_ = 0;
     bool read_pending_ = false;

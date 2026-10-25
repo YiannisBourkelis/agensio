@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Security audit 2026-10-07, section 5 items 1 and 2.
+"""Security audit 2026-10-07, section 5 items 1, 2 and 3.
 
 Run inside the Linux devbox: python3 tests/timeout-regressions.py BINARY [--rows a,b]
-Rows: h2-stalled,fastcgi,h1-sendfile,cached-tls. Each owns a single-worker server.
+Rows: h2-stalled,fastcgi,h1-sendfile,cached-tls,h2-idle. Each owns a single-worker server.
+h2-idle (audit 2.3) fails on alpha.115 and passes from the fix in alpha.116.
 Requires python3-h2, openssl and (for fastcgi) php-fpm. Exit 1 on any failed row.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import os
 from pathlib import Path
+import select
 import shutil
 import socket
 import ssl
@@ -101,9 +103,10 @@ def server(binary, row):
                         'handler = "fastcgi"\n'
                         f'fastcgi = {{ socket = "unix:{root}/fpm.sock", buffering = false, '
                         'read_timeout = 20 }\n')
-                idle = 15 if row == "cached-tls" else 3
+                idle = 15 if row in ("cached-tls", "h2-idle") else 3
+                protocols = '"h1", "h2", "h2c"' if row == "h2-idle" else '"h1", "h2"'
                 (root / "agensio.toml").write_text(
-                    f'[server]\nworkers = 1\nidle_timeout = {idle}\nprotocols = ["h1", "h2"]\n'
+                    f'[server]\nworkers = 1\nidle_timeout = {idle}\nprotocols = [{protocols}]\n'
                     f'pid_file = "{root}/agensio.pid"\n'
                     '[cache]\nmax_file_size = "4MB"\nsendfile_min_size = "48KB"\n'
                     '[log]\naccess = "off"\nlevel = "error"\n'
@@ -297,13 +300,86 @@ def cached_tls(process, plain, tls):
         print(f"  cached TLS complete: {len(body)} bytes in {elapsed:.3f} s at 100 KiB/s", flush=True)
 
 
-ROWS = {"h2-stalled": h2_stalled, "fastcgi": fastcgi, "h1-sendfile": h1_sendfile, "cached-tls": cached_tls}
+def h2_idle(process, plain, tls):
+    with ExitStack() as stack:
+        clients = []
+        for name in ("settings-dribble", "preface-dribble", "preface-silent"):
+            sock = stack.enter_context(connect(plain))
+            conn = h2.connection.H2Connection()
+            conn.initiate_connection()
+            preface = conn.data_to_send()
+            # RFC 9113 3.4: the 24-byte magic alone deliberately omits SETTINGS.
+            sock.sendall(preface if name == "settings-dribble" else preface[:24])
+            if name == "settings-dribble":
+                settings = ack = False
+                deadline = time.monotonic() + 3
+                while not (settings and ack):
+                    assert time.monotonic() < deadline, "HTTP/2 SETTINGS exchange exceeded 3 s"
+                    data = sock.recv(65536)
+                    assert data, "EOF during HTTP/2 SETTINGS exchange"
+                    for event in conn.receive_data(data):
+                        settings |= isinstance(event, h2.events.RemoteSettingsChanged)
+                        ack |= isinstance(event, h2.events.SettingsAcknowledged)
+                        assert not isinstance(event, h2.events.ConnectionTerminated), str(event)
+                    pending = conn.data_to_send()
+                    if pending:
+                        sock.sendall(pending)
+                assert conn.open_outbound_streams == 0 and conn.open_inbound_streams == 0
+                conn.ping(b"idleping")
+                fragment = conn.data_to_send()
+            else:
+                fragment = preface[24:]  # dribble the required first SETTINGS, not an invalid frame
+            sock.setblocking(False)
+            clients.append({"name": name, "sock": sock, "started": time.monotonic(),
+                            "fragment": fragment, "sent": 0, "closed": None})
+
+        end = max(c["started"] for c in clients) + 17
+        while time.monotonic() < end and any(c["closed"] is None for c in clients):
+            for c in clients:
+                if c["closed"] is None and c["name"] != "preface-silent":
+                    if time.monotonic() >= c["started"] + 14 * (c["sent"] + 1):
+                        try:
+                            c["sock"].sendall(c["fragment"][c["sent"]:c["sent"] + 1])
+                        except (BrokenPipeError, ConnectionResetError):
+                            c["closed"] = time.monotonic() - c["started"]
+                        else:
+                            c["sent"] += 1
+            pending = [c["sock"] for c in clients if c["closed"] is None]
+            if not pending:
+                break
+            ready, _, _ = select.select(pending, [], [], min(0.05, max(0, end - time.monotonic())))
+            for c in clients:
+                if c["sock"] in ready:
+                    try:
+                        data = c["sock"].recv(65536)
+                    except ConnectionResetError:
+                        data = b""
+                    if not data:
+                        c["closed"] = time.monotonic() - c["started"]
+
+        failures = []
+        for c in clients:
+            age = c["closed"]
+            good = age is not None and 14.5 <= age <= 16
+            state = "still open at 17 s" if age is None else f"closed at {age:.3f} s"
+            if c["name"] != "preface-silent" and c["sent"] != 1:
+                good = False
+            print(f"  {'PASS' if good else 'FAIL'} {c['name']}: {state}; "
+                  f"{c['sent']} frame bytes sent, expected close at 15 s (1 s tolerance)", flush=True)
+            if not good:
+                failures.append(c["name"])
+        worker_available(process, plain)
+        assert not failures, "HTTP/2 idle deadline: " + ", ".join(failures)
+
+
+ROWS = {"h2-stalled": h2_stalled, "fastcgi": fastcgi, "h1-sendfile": h1_sendfile,
+        "cached-tls": cached_tls, "h2-idle": h2_idle}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary")
-    parser.add_argument("--rows", default=",".join(ROWS))
+    parser.add_argument("--rows", default=",".join(ROWS), help="comma-separated rows")
     args = parser.parse_args()
     rows = args.rows.split(",")
     if any(row not in ROWS for row in rows):

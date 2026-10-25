@@ -862,8 +862,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   blocks on TLS as scatter entries between the buffer's runs, a quantum per ready stream
   within its windows, so a read's answers are one send; StreamBody pulls bounded per
   connection; the clock read once per socket event), `connection.hpp` (frames, streams, request assembly with the field rules
-  of `core/fields.hpp`, receive windows sized to the body limit, timeouts, the glitch and
-  reset budgets, GOAWAY). Selection is a hand-over from `Http1Connection`: after the
+  of `core/fields.hpp`, receive windows sized to the body limit, timeouts (the idle close reads
+  `last_progress_`, moved by a completed frame, the preface or a write, never by a byte that
+  completes nothing, and the header-block deadline holds with no stream open; alpha.116, audit
+  2.3), the glitch and reset budgets, GOAWAY). Selection is a hand-over from `Http1Connection`: after the
   handshake when ALPN chose h2, or on the parser's 505 branch when a plain listener with
   `h2c` in `[server] protocols` saw the preface; the accept path and the HTTP/1 request
   path are unchanged (A/B gate). `http2.max_concurrent_streams` is the one HTTP/2 key;
@@ -923,7 +925,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   new address with PATH_CHALLENGE under the byte allowance of the amplification limit and
   falls back to the previous address when that fails, probes the path once for 1,472-byte
   datagrams (1,452 over IPv6; again after an address change), and closes on the reset
-  budget (`H3_EXCESSIVE_LOAD`) and the glitch budget. `tests/h3-attacks.py` (aioquic in
+  budget (`H3_EXCESSIVE_LOAD`) and the glitch budget; a handshake finishes within `idle_timeout`
+  of the connection's creation or is dropped silently, and only a packet that opens restarts the
+  idle timer (RFC 9000 10.1; alpha.116, audit 2.4: one undecryptable packet every 14 s held a
+  half-open handshake before). `tests/h3-attacks.py` (aioquic in
   the devbox image) drives thirteen rows of the design's threat table by hand; the
   integration suite runs it where aioquic is installed, and the sanitizer build runs
   it too. After that step (`ab-20260924-181813.md`, `h3-20260924-182224.md`): the h3

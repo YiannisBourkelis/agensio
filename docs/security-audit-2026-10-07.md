@@ -36,7 +36,8 @@ rows, three rounds) is flat within noise; its one row above 3 %, plain 100 KB at
 | 2.2 cached body in one write | **fixed in alpha.57, regression-proven 2026-10-25**: a memory body beyond the first write and one piece goes out in `stream_chunk_size` (64 KB) pieces, each refreshing the idle clock in `on_write`, over TLS and on plain sockets without sendfile; the first write is unchanged. Previously verified on the test VPS (alpha.57 report, finding 1): with idle_timeout 2 and 3,000,000 bytes at 300 KB/s, alpha.56 cut at 769,798 bytes over TLS and 740,942 on plain HTTP without sendfile; alpha.57 delivered it whole in 10.0 s | `tests/timeout-regressions.py` row `cached-tls`, called by `tests/integration.sh`: with idle_timeout 15, a 4 KB receive buffer and a 2 MiB cached file at 100 KiB/s, alpha.56 cuts at 1,572,614 bytes; alpha.57 receives all 2,097,152 bytes in 20.518 s. Section 5.1 records the loopback MSS setting needed to make this a regression test, not a pass on both tags |
 | 2.5 tunnels | **fixed in alpha.114**: a tunnel write to either side not finished within `proxy.send_timeout` (30 s) ends the tunnel, said at info in the error log; a quiet tunnel, nothing waiting, is not affected, and `tunnel_timeout` keeps its meaning | `tests/integration.sh`, a private instance with `send_timeout = 2`: on `v0.1.0-alpha.113` the stalled tunnels stayed (the flood's origin held until its client let go, the sink's open), on alpha.114 both are cut within the limit; a quiet tunnel and `tunnel_timeout` are checked on both |
 | 2.5 watchdog | **decided against** (2026-10-24, the owner): no path on the current code was found that keeps a worker from turning (the 2026-10-04 cause and 2.1 are fixed, tunnels bounded); what is left is storage that stops answering, a hung network filesystem under a docroot or the log directory, whose file and log calls run on the worker as nginx's do, and future bugs. External checks (a monitor or load balancer probing the sites) detect a hung server whatever the cause; revisit if a stall is seen or docroots move to network storage | none: nothing built |
-| 2.3, 2.4 | **open**: the HTTP/2 idle clock, the QUIC handshake deadline | section 5 lists the checks each needs |
+| 2.3 HTTP/2 idle clock | **fixed in alpha.116, regression-proven 2026-10-25**: the idle close reads `last_progress_` (a completed frame, the preface, a write, the start), not every read; the header-block deadline is checked whether or not a stream is open (a request's stream opens only when its block completes). Still open from the item: the connection-level WINDOW_UPDATE outside the glitch budget (section 5, item 8) | `tests/timeout-regressions.py` row `h2-idle`, now a default row: alpha.115 kept both dribblers open at 17 s, alpha.116 closes all three at 15.000 s. Section 5.2 |
+| 2.4 QUIC handshake deadline | **fixed in alpha.116, regression-proven 2026-10-25**: a handshake must finish within `idle_timeout` of `created_` whatever arrives, else the connection is dropped silently; only a packet that opens restarts the idle timer (RFC 9000 10.1), every datagram still counts for the amplification limit (8.1). Still open from the item: the QUIC accept path does not check the worker's connection ceiling | `tests/h3-attacks.py` row `handshake-deadline`, now a default row: alpha.115 kept the dribbled connection past 16 s, alpha.116 retires it at 15.0 s with Retry auto and always, a new handshake accepted beside it. Section 5.2 |
 
 ## 1. The claims, one by one
 
@@ -295,11 +296,17 @@ a one-off.
    and passes from alpha.57; the alpha.57 report, finding
    1, says what a loopback run needs for the two builds to differ): an HTTPS client with a 4 KB receive buffer reading a 2 MB cached file at
    100 KB/s must receive it whole; the old code cuts it at 15 s.
-3. **2.3**: an h2c client dribbling one byte of a frame every 14 s, and one sending the
-   preface only; the connection must close at the idle timeout after the fix.
-4. **2.4**: a QUIC client that stalls its handshake and sends one garbage datagram every
-   14 s; the half-open count (`status`) must drop at the deadline, and new handshakes
-   must still be accepted with 1,024 such clients. Add the row to `tests/h3-attacks.py`.
+3. **2.3** (**done 2026-10-25**, section 5.2: fails on alpha.115, passes from alpha.116):
+   an h2c client dribbling one byte of a frame every 14 s, and preface-only variants; the
+   connection must close at the idle timeout. Not yet covered by a row: the header-block
+   deadline with no stream open.
+4. **2.4** (**done 2026-10-25**, section 5.2: fails on alpha.115, passes from alpha.116):
+   a QUIC client that stalls its handshake and sends one undecryptable datagram every
+   14 s; its connection must retire at the deadline, measured by the isolated server's
+   `status.connections` delta, and a new handshake accepted while it exists. Not yet
+   covered by a row: the absolute deadline under packets that do open (Initial packets,
+   which anyone can open), and the budget-scale check with 1,024 such clients; the
+   existing `handshake-flood` row sends Initials but does not keep them alive.
 5. **2.6**: `openssl s_client -tls1_2` with a renegotiation request must be refused after
    the fix; the TLS rows of the A/B flat.
 6. **2.7**: change `idle_timeout` and reload; a new keep-alive connection must get the
@@ -377,6 +384,81 @@ For the tag checks, select `--rows h2-stalled,fastcgi,h1-sendfile` on alpha.55 (
 failures, one control pass) and alpha.56 (three passes); select `--rows cached-tls` on
 alpha.56 (failure) and alpha.57 (pass). Any failed row makes the runner exit 1; it
 does not special-case old versions or turn their failures into passes.
+
+### 5.2 Deadline regressions for 2.3 and 2.4 (2026-10-25)
+
+Both rows assert the deadline and exit 1 on alpha.115; neither turns the known failure into a
+pass. Written first, they failed on alpha.115 as the table below records; the fixes in
+alpha.116 make them pass (the last table), and both are now default rows of their suites.
+
+The Release and ASan+UBSan binaries have unchanged alpha.115 server sources; both were
+checked with `cmake --build` inside `agensio-devbox`. The tests use `--network none`,
+with no host networking or published ports. ASan leak detection and UBSan halt-on-error
+were enabled; the failures below had no sanitizer reports.
+
+| Row / variant | Observed on alpha.115, Release and ASan+UBSan | Required after the fix |
+|---|---|---|
+| `h2-idle`: SETTINGS complete, then a partial PING | SETTINGS exchanged and acknowledged, no stream opened; one byte at 14 s keeps the connection open at 17 s | close at 15 s, with 1 s scheduling tolerance |
+| `h2-idle`: preface, then a partial first SETTINGS | only the 24-byte magic initially; one frame byte at 14 s keeps it open at 17 s | same deadline |
+| `h2-idle`: silent preface control | closes at 15.000 s without any dribble | passes already |
+| `handshake-deadline`: silent control | one allocated half-open connection retires after 15.02-15.09 s | passes already |
+| `handshake-deadline`: undecryptable dribble | one packet at 14 s leaves the connection allocated at 16 s | retire at 15 s, with 1 s scheduling tolerance |
+
+The HTTP/2 variants share a fresh single-worker server and open no streams. A plain
+probe still succeeds and the worker's idle CPU sample stays at 0.000 s. The QUIC row
+runs first in its suite, with no other suite clients: each variant allocates exactly
+one connection, verified against a baseline of `status.connections`. The control
+request is present in both counts; the separate normal client's handshake and GET
+must succeed, and its connection must retire before measuring the half-open lifetime.
+No explicit half-open status field is added or implied.
+
+The QUIC client sends a real Initial, verifies and answers Retry if required, and
+observes the server's Initial without feeding its TLS flight into aioquic; it never
+sends Finished. The dribble is a correctly framed Handshake packet with the server's
+issued destination id and bogus ciphertext (RFC 9000 17.2.4), not arbitrary garbage
+that the endpoint would discard before finding the connection. An unknown Handshake
+cannot allocate a new connection after expiry, unlike a corrupted Initial. The
+Release test also reproduces with `--retry always`, proving it is not testing a
+stateless Retry instead of an allocated half-open connection.
+
+Both loops schedule a byte/datagram every 14 s but stop soon after the first missed
+15 s deadline: one dribble suffices for a bounded failure. The fixes also hold the absolute
+handshake deadline under packets that do open (Initial packets anyone can open) and the
+HTTP/2 incomplete-header-block deadline with no stream open, but no row tests either yet;
+nor the 1,024-client budget. The QUIC accept path's connection ceiling is not part of these
+fixes and stays open.
+
+Run from the repository root (the HTTP/3 runner writes its existing `bench/tmp` files):
+
+```sh
+docker run --rm --network none -v "$PWD:/src:ro" agensio-devbox \
+  python3 /src/tests/timeout-regressions.py /src/build/agensio --rows h2-idle
+docker run --rm --network none -v "$PWD:/src" agensio-devbox \
+  python3 /src/tests/h3-attacks.py /src/build/agensio --rows handshake-deadline
+```
+
+With the fixes (alpha.116), the same rows, unchanged:
+
+| Row / variant | alpha.115 | alpha.116 |
+|---|---|---|
+| `h2-idle`: SETTINGS complete, then a partial PING | open at 17 s | closed at 15.000 s |
+| `h2-idle`: preface, then a partial first SETTINGS | open at 17 s | closed at 15.000 s |
+| `h2-idle`: silent preface control | closed at 15.000 s | closed at 15.000 s |
+| `handshake-deadline`: silent control, Retry auto / always | retired at 15.0 s | retired at 15.042 / 15.015 s |
+| `handshake-deadline`: undecryptable dribble, Retry auto / always | allocated at 16 s | retired at 15.017 / 15.013 s |
+
+The two fixes: HTTP/2's idle close reads a clock only a completed frame, the preface, a write
+or the connection's start moves, and its header-block deadline applies with no stream open
+(`http2/connection.hpp`, `check_timeouts`); QUIC's idle timer restarts only for a packet that
+opens, and a connection still handshaking is dropped at `created_ + idle_timeout`
+(`quic/connection.hpp`, `receive`, `on_timer`, `reschedule`). All five timeout rows and all
+22 HTTP/3 attack rows pass on the Release and the ASan+UBSan builds, `fuzz_h2_conn` (15.2M
+runs) and `fuzz_quic_conn` (11.6M) ran ten minutes each clean on the fixed code, and the A/B
+(`bench/ab.sh -2 -3` in the devbox) is flat: the baseline of the unfixed code against itself
+spans 0.934 to 1.013 (`ab-20261025-135840.md`, three rounds); against it the fixed code is 0.973
+to 1.026 over five rounds (`ab-20261025-141825.md`), the HTTP/3 rows 0.966 to 0.996 over eight
+(`ab-20261025-143125.md`), after a three-round run whose 1.05 to 1.11 on four HTTP/2 and
+HTTP/3 rows did not repeat (`ab-20261025-141029.md`).
 
 ## 6. Proposed order
 
