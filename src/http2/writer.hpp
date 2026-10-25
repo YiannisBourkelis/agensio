@@ -193,6 +193,10 @@ public:
     void set_conn_window(std::int32_t w) noexcept { conn_window_ = w; }
     void set_max_frame(std::uint32_t n) noexcept { max_frame_ = n; }
     bool idle() const noexcept { return !writing_ && ctl_.empty() && ready_head_ == nullptr && out_.empty(); }
+    // A write in flight, and the writes completed so far: the connection's timer tells a write the
+    // socket does not take from one that completes, without a clock read per write.
+    bool writing() const noexcept { return writing_; }
+    std::uint64_t writes() const noexcept { return writes_; }
     unsigned pulls() const noexcept { return pulls_; }
 
     // Idle: the coalescing buffer (up to a cycle's worth) and the scatter list go.
@@ -301,6 +305,7 @@ private:
 
     void on_written(const asio::error_code& ec) {
         writing_ = false;
+        ++writes_;
         out_.clear();  // the cycle's bytes are with the kernel; the next cycle builds from empty
         external_.clear();
         if (closed_) return;
@@ -662,6 +667,7 @@ private:
     std::uint32_t max_frame_ = 16384;
     unsigned pulls_ = 0;
     unsigned inline_runs_ = 0;
+    std::uint64_t writes_ = 0;  // completed writes
     bool writing_ = false;
     bool holding_ = false;        // the connection is inside a read's frame loop: cycles wait for release()
     bool building_ = false;       // a cycle is being assembled

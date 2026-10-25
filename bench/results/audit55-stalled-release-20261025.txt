@@ -1,0 +1,140 @@
+Sun Oct 25 18:19:44 UTC 2026
+Linux cc24b24e2e29 6.12.113+deb13-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.113-1 (2026-10-15) x86_64 GNU/Linux
+13.6
+model name	: AMD Ryzen 9 9900X 12-Core Processor
+6803a7cc1ad46f1e8cc73c342dbc96277ff31106
+Server: unmodified git archive, Release
+COMMAND: python3 /src/tests/timeout-regressions.py /src/bench/tmp/audit55-bin/release --rows h2-stalled-silent,h2-stalled-chatty,h2-goaway-stalled
+RUN h2-stalled-silent
+  last read: 16375 body bytes, socket inode=187490702, idle_timeout=3
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  unread server TCP send queue: 30360 bytes
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  deadline: closed=14.011709338985384, observed_age=14.012, server_socket_owned=False, PING ages=[]
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:56097 (h1)  sites: localhost
+  listening on https://127.0.0.1:33981 (h2, h1)  sites: localhost
+agensio stopped
+PASS h2-stalled-silent
+RUN h2-stalled-chatty
+  last read: 16375 body bytes, socket inode=187484100, idle_timeout=3
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  unread server TCP send queue: 31372 bytes
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  deadline: closed=None, observed_age=21.017, server_socket_owned=True, PING ages=[5.005, 10.009, 15.012, 20.016]
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:48083 (h1)  sites: localhost
+  listening on https://127.0.0.1:53637 (h2, h1)  sites: localhost
+agensio stopped
+FAIL h2-stalled-chatty: writer not closed within 4 * idle_timeout + 3 s
+RUN h2-goaway-stalled
+  last read: 16375 body bytes, socket inode=187497861, idle_timeout=3
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  unread server TCP send queue: 31372 bytes
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  deadline: closed=14.011759184999391, observed_age=14.012, server_socket_owned=False, PING ages=[5.005, 10.009]
+  info log: closing, PROTOCOL_ERROR: WINDOW_UPDATE of zero on the connection
+  post-deadline drain: 0 bytes, GOAWAY=None, ConnectionResetError: [Errno 104] Connection reset by peer
+2026/10/25 18:20:19 [info] no record of the site files served before (/var/lib/agensio/.server/served): no conflict between site files at this start, so it was not needed
+2026/10/25 18:20:19 [info] connection ceiling 1073739768 per worker (1 worker(s), open-file limit 1073741816)
+2026/10/25 18:20:19 [warn] the record of the site files served could not be written (cannot write /var/lib/agensio/.server/served.tmp): at the next start a conflict between site files is decided by load order, not by what is served now
+2026/10/25 18:20:20 [info] http2 127.0.0.1: closing, PROTOCOL_ERROR: WINDOW_UPDATE of zero on the connection
+2026/10/25 18:20:23 [info] http2 127.0.0.1 stream 1: no progress, cancelled
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:46341 (h1)  sites: localhost
+  listening on https://127.0.0.1:48809 (h2, h1)  sites: localhost
+agensio stopped
+PASS h2-goaway-stalled
+timeout regressions: 2/3 passed

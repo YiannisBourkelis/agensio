@@ -865,7 +865,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   of `core/fields.hpp`, receive windows sized to the body limit, timeouts (the idle close reads
   `last_progress_`, moved by a completed frame, the preface or a write, never by a byte that
   completes nothing, and the header-block deadline holds with no stream open; alpha.116, audit
-  2.3), the glitch and reset budgets, GOAWAY). Selection is a hand-over from `Http1Connection`: after the
+  2.3; a write in flight with none completed for four idle timeouts closes the connection whatever
+  the client sends, counted by the timer against `Writer::writes()`, alpha.116, audit section 5
+  item 12), the glitch and reset budgets, GOAWAY). Selection is a hand-over from `Http1Connection`: after the
   handshake when ALPN chose h2, or on the parser's 505 branch when a plain listener with
   `h2c` in `[server] protocols` saw the preface; the accept path and the HTTP/1 request
   path are unchanged (A/B gate). `http2.max_concurrent_streams` is the one HTTP/2 key;

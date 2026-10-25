@@ -3269,6 +3269,7 @@ What derives from the other keys, so that HTTP/2 needs no tuning of its own:
 | `SETTINGS_MAX_HEADER_LIST_SIZE`, the decoded size of a request's fields, and the size of a compressed header block | `max_header_size` | 16 KB each; a block over either closes the connection (`ENHANCE_YOUR_CALM`), a peer doing that is not a browser |
 | streams on one connection before `GOAWAY` | `max_requests_per_connection` | 1000, like a keep-alive connection's requests |
 | a connection with no stream open, or a stream whose head or response makes no progress | `idle_timeout` | 15 s |
+| a write the client does not take (it stopped reading), whatever it sends meanwhile | four `idle_timeout`s | 60 s, then the connection is closed (nginx's `send_timeout`); a cycle is at most 64 KB over TLS, so 1.1 KB/s keeps it |
 | a body announced but not arriving | `body_timeout` | 60 s |
 | the request-body limit and the size of the receive windows | `max_body_size`, or the site's own | 1 MB per stream and per connection at most, so an upload runs at the pace of the disk or the origin rather than 64 KB per round trip |
 | `SETTINGS_MAX_FRAME_SIZE`, `SETTINGS_HEADER_TABLE_SIZE` | fixed | 16 KB, 4 KB |

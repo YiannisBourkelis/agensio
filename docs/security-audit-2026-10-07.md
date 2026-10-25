@@ -38,6 +38,7 @@ rows, three rounds) is flat within noise; its one row above 3 %, plain 100 KB at
 | 2.5 watchdog | **decided against** (2026-10-24, the owner): no path on the current code was found that keeps a worker from turning (the 2026-10-04 cause and 2.1 are fixed, tunnels bounded); what is left is storage that stops answering, a hung network filesystem under a docroot or the log directory, whose file and log calls run on the worker as nginx's do, and future bugs. External checks (a monitor or load balancer probing the sites) detect a hung server whatever the cause; revisit if a stall is seen or docroots move to network storage | none: nothing built |
 | 2.3 HTTP/2 idle clock | **fixed in alpha.116, regression-proven 2026-10-25**: the idle close reads `last_progress_` (a completed frame, the preface, a write, the start), not every read; the header-block deadline is checked whether or not a stream is open (a request's stream opens only when its block completes). The connection-level WINDOW_UPDATE outside the glitch budget (section 5, item 8, measured in section 5.3) is **decided against** (2026-10-25, the owner): 52.7 ns per 13-byte update with 128 streams open is about 4 ns of server CPU per byte the client sends, below what ordinary requests cost per byte, so it amplifies nothing; volume from one address is the firewall's | `tests/timeout-regressions.py` rows `h2-idle` and `h2-header-block`, default rows: alpha.115 kept both dribblers open at 17 s and the unfinished header block past 18 s, alpha.116 closes the dribblers at 15.000 s and the block at 15.043 s. Sections 5.2 and 5.3 |
 | 2.4 QUIC handshake deadline | **fixed in alpha.116, regression-proven 2026-10-25**: a handshake must finish within `idle_timeout` of `created_` whatever arrives, else the connection is dropped silently; only a packet that opens restarts the idle timer (RFC 9000 10.1), every datagram still counts for the amplification limit (8.1). The QUIC accept path asks the worker's connection ceiling before Retry: over it a new Initial gets CONNECTION_REFUSED (RFC 9000 20.1), stateless, counted with the TCP refusals | `tests/h3-attacks.py` rows `handshake-deadline`, `handshake-authenticated` and `connection-ceiling`, default rows, and `handshake-budget`, opt-in: alpha.115 kept the dribbled connection past 16 s and completed both QUIC handshakes over the ceiling; alpha.116 retires it at 15.0 s with Retry auto and always, a new handshake accepted beside it, and refuses both over-limit clients with CONNECTION_REFUSED. Sections 5.2 to 5.4 |
+| 5, item 12: HTTP/2 stalled reader that keeps sending | **fixed in alpha.116, regression-proven 2026-10-25**: a write in flight with none completed for four idle timeouts closes the connection whatever the client sends (the check read the clock every read moves) | `tests/timeout-regressions.py` row `h2-stalled-chatty`, now a default row: held at 21 s on `6803a7cc`, closed at 14.0 s after. Section 5.5 |
 
 ## 1. The claims, one by one
 
@@ -328,11 +329,14 @@ a one-off.
    `in_len_ > 0`), the only place `Worker::idle` is raised, and HTTP/2 raises it only with no
    stream open. A ceiling filled by such clients from many addresses would then get
    `refusal_finding`'s third reading, "legitimate load from many addresses: raise the
-   open-file limit", rather than slow clients. To reproduce before deciding anything.
+   open-file limit", rather than slow clients. Reproduced in section 5.5 for incomplete
+   heads and HTTP/1 and HTTP/2 bodies; the idle keep-alive control gets the idle-client
+   diagnosis. No policy or accounting change decided.
 10. **The GOAWAY path of `connection_error`** with a writer that never drains (2.11). By the
     code (2026-10-25) it is bounded: after `connection_error` the read loop stops
     (`closing_after_write_`), so nothing refreshes `last_activity_`, and `check_timeouts`
-    closes a connection whose writer does not drain at four idle timeouts. To confirm live.
+    closes a connection whose writer does not drain at four idle timeouts. Confirmed in
+    section 5.5: `h2-goaway-stalled` closes within the 15 s bound despite PINGs.
 11. **The host itself** (**done 2026-10-25**): `health_check` on the test VPS (alpha.115)
     reports no `firewall_limits_missing`, `fail2ban_missing` or `protection_unchecked`, so
     the nftables table and the jails are applied; what is left is info: the WordPress and
@@ -347,8 +351,10 @@ a one-off.
     `ctl_`, which has no cap. HTTP/1 refreshes its clock only on writes outside tunnels, and
     tunnels have `proxy.send_timeout` (alpha.114); nginx's `send_timeout` closes after 60 s
     without a write whatever the client sends. The fix would time the drain check from the
-    writer's last completed write. To reproduce first: on the current code the connection
-    must still be open well past four idle timeouts.
+    writer's last completed write. Reproduced in section 5.5: the current commit still
+    owns the socket at 21 s after the client's last read; the silent control closes at
+    14 s. **Fixed in alpha.116** (section 5.5, the fix): closed at 14.0 s, and the row is a
+    default row.
 
 ### 5.1 Regression evidence for 2.1 and 2.2 (2026-10-25)
 
@@ -672,6 +678,242 @@ connection. A/B against `d579167b` in the devbox: the baseline of `d579167b` aga
 spans 0.941 to 1.011 (`ab-20261025-161033.md`, `-3 -r 3`); the fix 0.980 to 1.037 over three
 rounds (`ab-20261025-163225.md`), its three rows above 1.03 back at 0.979 to 1.000 over five
 (`ab-20261025-163830.md`, `-3 -r 5`, all rows 0.947 to 1.000).
+
+### 5.5 Stalled writers and the health view of slow clients (2026-10-25)
+
+These rows run the **same current commit**, not an older tag:
+`6803a7cc1ad46f1e8cc73c342dbc96277ff31106`. Release and ASan+UBSan binaries were built
+from its unmodified `git archive`; the test script comes from the working tree.
+The binary still prints alpha.115, so the hash identifies the build. No server code
+changed. Environment: AMD Ryzen 9 9900X, Linux 6.12.113, Debian 13.6, `agensio-devbox`
+image `sha256:db459c20b09dc89fa7959fb8a8a1987a37f4d2a1b49e788eaba965d42994ea87`.
+Every build and live test used `--network none`, no published ports and no host
+networking.
+
+[`tests/timeout-regressions.py`](../tests/timeout-regressions.py) gives each named row
+a fresh single-worker server, temporary files, bounded clients and shutdown, and checks
+the server's stderr for sanitizer reports even when the row fails. The stalled-writer
+rows use `idle_timeout = 3`, TLS HTTP/2, both flow-control windows at `2^31-1`, a 10 MiB
+response, `SO_RCVBUF = 4096` and `TCP_MAXSEG = 1024` set before connecting. They stop
+reading after 16,375 body bytes. A second later, the server's TCP send queue still
+holds 30,360-31,372 bytes, above the client's actual receive-buffer size.
+
+**Closure is measured without reading.** The row records the accepted socket's inode
+from `/proc/<pid>/net/tcp` and tests whether `/proc/<pid>/fd` still owns it. A FIN or
+EOF hidden behind unread TLS records is not mistaken for an open server socket, and a
+test read cannot rescue the stalled writer. Closure times below are the first observations
+of the descriptor being gone, at roughly one-second sampling intervals. Throughout these
+rows, each one-second server CPU sample was **0.000 CPU s** and every plain probe on
+another connection took **at most 0.001 s** (asserted below 0.2 CPU s and 1 s respectively).
+
+#### `h2-stalled-chatty` -- item 12, expected red
+
+| Build | Required result | Observed |
+|---|---|---|
+| `6803a7cc`, Release | Reproduce: still open at 20 s after the last read; eventual fixed pass requires closure within `4 * 3 + 3 = 15` s | **FAIL, reproduced:** socket still owned at 21.017 s; PINGs at 5.005, 10.009, 15.012 and 20.016 s |
+| `6803a7cc`, ASan+UBSan | Same reproduction and future pass condition | **FAIL, reproduced:** still owned at 21.019 s; PINGs at 5.006, 10.010, 15.014 and 20.019 s; no sanitizer report |
+
+The client sends one PING every five seconds and reads nothing after the initial DATA.
+This is well below the control rate. The assertion is already the **fixed** behavior
+(close within 15 s of the last read); the row is in `OPT_IN` while it fails. Remove it
+from that set with a verified fix, not by weakening its assertion. This result establishes
+the live reproduction prerequisite for a fix; it does not claim indefinite survival from
+a bounded 21-second test.
+
+#### `h2-stalled-silent` -- item 12 control
+
+| Build | Required result | Observed |
+|---|---|---|
+| `6803a7cc`, Release | Identical stalled reader, no PINGs; close within 15 s; worker available | **PASS:** closed by 14.012 s |
+| `6803a7cc`, ASan+UBSan | Same | **PASS:** closed by 14.013 s; no sanitizer report |
+
+This is a separate row and a separate server, not a second client affecting the chatty
+row's clocks or counts. It is a default row and is included in the integration hook.
+
+#### `h2-goaway-stalled` -- item 10
+
+| Build | Required result | Observed |
+|---|---|---|
+| `6803a7cc`, Release | Stalled reader, connection WINDOW_UPDATE increment 0, then PINGs every 5 s; close within 15 s of last read, info log PROTOCOL_ERROR, plain probe succeeds | **PASS:** closed by 14.012 s; required log present; PINGs at 5.005 and 10.009 s |
+| `6803a7cc`, ASan+UBSan | Same | **PASS:** closed by 14.013 s; required log present; no sanitizer report |
+
+The zero increment on stream 0 is a connection error (RFC 9113 6.9). It is sent after the
+one-second blocked-write check, with info logging enabled. Both builds log:
+
+```text
+closing, PROTOCOL_ERROR: WINDOW_UPDATE of zero on the connection
+```
+
+Only **after** observing the server close does the client attempt a bounded drain to
+report GOAWAY delivery. Both runs get `ConnectionResetError` before any additional
+decrypted bytes; **no GOAWAY is decoded by the client**. The info log proves the intended
+error path ran, not delivery of its queued GOAWAY. The row is a default and is included in
+the integration hook.
+
+#### Health fixture -- item 9
+
+All four `health-*` rows are opt-in observations, each on its own server, with
+`max_connections = 3`, one worker and a control socket. Three clients occupy the slots,
+then four further clients bind separately to `127.0.0.2`, `.3`, `.4`, `.5`. Each gets
+503, Retry-After and EOF. Each address contributes exactly one refusal, so the dominant
+address diagnosis cannot win.
+
+The raw `ctl status` **connections is 4, not 3**: the control request itself contributes
+one connection. A pre-fixture status request establishes that baseline; the held-client
+delta is exactly 3. The health request is likewise counted while health is assembled,
+so its message really says **"the workers hold 4 of 3 connections"**. The rows record,
+rather than rewrite, these answers.
+
+#### `health-head-dribble`
+
+| Build | Required result | Observed |
+|---|---|---|
+| `6803a7cc`, Release | Record three incomplete HTTP/1 heads, one byte every 2 s; code predicts 0 idle and the legitimate-load fix | `connections=4`, `connections_idle=0`, `connections_refused=4`; message says 0 idle; legitimate-load fix |
+| `6803a7cc`, ASan+UBSan | Same observation | Same counts and diagnosis; no sanitizer report |
+
+Each client sends only `G`, `E`, `T`, space at 0/2/4/6 s, never completing its head.
+
+#### `health-body-dribble`
+
+| Build | Required result | Observed |
+|---|---|---|
+| `6803a7cc`, Release | Record HTTP/1 bodies with Content-Length 1,000,000, one byte every 2 s, through a body-reading handler; code predicts 0 idle and the legitimate-load fix | `connections=4`, `connections_idle=0`, `connections_refused=4`; message says 0 idle; legitimate-load fix |
+| `6803a7cc`, ASan+UBSan | Same observation | Same counts and diagnosis; no sanitizer report |
+
+The handler is local FastCGI/PHP. Each client first receives 100 Continue, demonstrating
+that the body pull has started. After recording health, one client supplies the remaining
+999,996 bytes and PHP reports **1,000,000 bytes read from `php://input`**.
+
+#### `health-h2-dribble`
+
+| Build | Required result | Observed |
+|---|---|---|
+| `6803a7cc`, Release | Record three HTTP/2 connections with DATA arriving one byte every 2 s through the body-reading handler; code predicts 0 idle and the legitimate-load fix | `connections=4`, `connections_idle=0`, `connections_refused=4`; message says 0 idle; legitimate-load fix |
+| `6803a7cc`, ASan+UBSan | Same observation | Same counts and diagnosis; no sanitizer report |
+
+Each h2c connection has one POST stream with Content-Length 1,000,000 and sends four
+one-byte DATA frames without END_STREAM at 0/2/4/6 s. After health, completing one body
+within the advertised flow-control windows yields PHP's **1,000,000-byte** count and
+END_STREAM. This is not an early response whose unread DATA is merely discarded.
+
+#### `health-idle` -- completed-request control
+
+| Build | Required result | Observed |
+|---|---|---|
+| `6803a7cc`, Release | Three complete HTTP/1 keep-alive responses, then silence for 3 s; expect 3 idle and the idle-client fix | **PASS:** `connections=4`, `connections_idle=3`, `connections_refused=4`; message says 3 idle; "full of idle connections" fix |
+| `6803a7cc`, ASan+UBSan | Same | **PASS:** same counts and diagnosis; no sanitizer report |
+
+All three 256-byte response bodies are consumed before the silent interval. The three
+dribble rows do not assert which advice health should give; this idle row asserts the
+expected control shape. No accounting or policy change is made.
+
+The finding is `connections_refused`, severity `warn`. Its common message, with only the
+ephemeral listener port and idle count substituted, is:
+
+```text
+4 connection(s) refused at the ceiling since start (first 0 s ago, last 0 s ago) on 127.0.0.1:<port>, from 127.0.0.2 x1, 127.0.0.3 x1, 127.0.0.4 x1 and 1 more address; the workers hold 4 of 3 connections, <0 or 3> idle for 2 s or more (server.max_connections 3 per worker)
+```
+
+The exact fix for all three dribble shapes:
+
+```text
+legitimate load from many addresses: raise the open-file limit (LimitNOFILE in the unit) or server.max_connections, then reload (docs/configuration.md 18)
+```
+
+The exact idle-control fix:
+
+```text
+the workers are full of idle connections: slow or stuck clients, or a client keeping connections open; compare with the request rate (logs_query on the access log), lower server.idle_timeout (15 s by default), and limit connections per address in the firewall (docs/configuration.md 18)
+```
+
+#### Raw output and reproduction commands
+
+Raw output includes machine, OS, UTC date, full source hash and the test command:
+
+- [Release stalled-writer rows](../bench/results/audit55-stalled-release-20261025.txt):
+  two passes and the required red chatty row.
+- [Release health rows](../bench/results/audit55-health-release-20261025.txt):
+  all four observations complete, including both PHP body-count checks.
+- [ASan+UBSan, all seven new rows](../bench/results/audit55-sanitized-20261025.txt):
+  six passes, only the required chatty failure, no sanitizer reports.
+- [Release default timeout suite](../bench/results/audit55-default-release-20261025.txt):
+  **8/8 pass**, including the original FastCGI and cached-TLS regressions.
+
+The optional `h2-settings-flood` row (item 8) was **not added or measured** in this
+change; the SETTINGS part of that item remains open.
+
+Commands from the repository root, including the offline archive build:
+
+```sh
+docker run --rm --network none --memory 4g -v "$PWD:/src" agensio-devbox bash -c '
+set -euo pipefail
+mkdir -p /src/bench/tmp/audit55-bin
+mkdir /tmp/audit55
+git -C /src archive 6803a7cc | tar -x -C /tmp/audit55
+for kind in release asan; do
+  extra=()
+  if [ "$kind" = asan ]; then extra=(-DAGENSIO_SANITIZE=address,undefined); fi
+  cmake -S /tmp/audit55 -B /tmp/audit55/build-$kind -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=OFF \
+    -DASIO_INCLUDE_DIR=/src/build/_deps/asio-src/include "${extra[@]}" \
+    > /src/bench/tmp/audit55-bin/build-$kind.log 2>&1
+  cmake --build /tmp/audit55/build-$kind --target agensio -j2 \
+    >> /src/bench/tmp/audit55-bin/build-$kind.log 2>&1
+  cp /tmp/audit55/build-$kind/agensio /src/bench/tmp/audit55-bin/$kind
+done'
+
+# Expected exit 1: chatty is red; silent and GOAWAY pass.
+docker run --rm --network none --memory 2g -v "$PWD:/src" agensio-devbox \
+  python3 /src/tests/timeout-regressions.py /src/bench/tmp/audit55-bin/release \
+  --rows h2-stalled-silent,h2-stalled-chatty,h2-goaway-stalled
+
+# Expected exit 0: four recorded health shapes.
+docker run --rm --network none --memory 2g -v "$PWD:/src" agensio-devbox \
+  python3 /src/tests/timeout-regressions.py /src/bench/tmp/audit55-bin/release \
+  --rows health-head-dribble,health-body-dribble,health-h2-dribble,health-idle
+
+# Expected exit 1, only chatty fails; stderr is still checked on failed rows.
+docker run --rm --network none --memory 3g -v "$PWD:/src" \
+  -e ASAN_OPTIONS=detect_leaks=1 -e UBSAN_OPTIONS=halt_on_error=1 \
+  agensio-devbox python3 /src/tests/timeout-regressions.py /src/bench/tmp/audit55-bin/asan \
+  --rows h2-stalled-silent,h2-stalled-chatty,h2-goaway-stalled,health-head-dribble,health-body-dribble,health-h2-dribble,health-idle
+
+# Expected exit 0; opt-in reproductions are excluded.
+docker run --rm --network none --memory 2g -v "$PWD:/src" agensio-devbox \
+  python3 /src/tests/timeout-regressions.py /src/bench/tmp/audit55-bin/release
+```
+
+The build uses the existing Asio cache to avoid a network fetch. Each raw test log was
+captured inside its devbox with `set -o pipefail` and a group containing `date -u`,
+`uname -a`, `cat /etc/debian_version`, `grep -m1 "model name" /proc/cpuinfo`,
+`git -C /src rev-parse HEAD`, the printed command and the test invocation, followed by
+`2>&1 | tee /src/bench/results/<log-name>`. Thus the expected failing row retains exit 1
+instead of the successful `tee` hiding it.
+
+#### The fix for item 12 (alpha.116)
+
+The check for a write the socket does not take now counts writes instead of reading
+`last_activity_`: the HTTP/2 writer counts its completed writes (`Writer::writes()`), and
+`check_timeouts`, at the top so it holds with or without a stream open, notes the count and
+the time at the first tick that sees a write in flight; the same count four idle timeouts
+later closes the connection, with an info line (`closing, a write not taken by the client for
+N s`). Nothing is added per request: one increment per completed write, no clock read. With no
+stream open the timer ticks every two seconds while a write is in flight. A write cycle is at
+most 64 KB over TLS and 256 KB on plain sockets, so a client draining 1.1 KB/s (TLS) or 4.3
+KB/s keeps its connection; HTTP/1 asks one 64 KB piece per idle timeout.
+
+| Row | Before (`6803a7cc`) | After, Release and ASan+UBSan |
+|---|---|---|
+| `h2-stalled-chatty` | still owned at 21.0 s | closed at 14.0 s; now a default row and in the integration hook |
+| `h2-stalled-silent` | closed at 14.0 s | closed at 14.0 s |
+| `h2-goaway-stalled` | closed at 14.0 s | closed at 14.0 s |
+| `h2-stalled`, `h2-idle`, `h2-header-block` | pass | pass |
+
+A/B in the devbox (`bench/ab.sh HEAD -2 -r 3`, HEAD `6803a7cc`): the baseline of HEAD against
+itself spans 0.946 to 1.024, its HTTP/2 rows 0.999 to 1.023 (`ab-20261025-184915.md`); the fix
+0.933 to 1.029, its HTTP/2 rows 0.933 to 0.988 (`ab-20261025-190044.md`). `fuzz_h2_conn`
+(whose `fuzz_age` moves the new time point) ran 26.7M inputs in ten minutes on the fix, clean;
+the unit tests and the integration suite (776 checks) pass.
 
 ## 6. Proposed order
 

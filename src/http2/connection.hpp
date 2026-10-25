@@ -185,6 +185,7 @@ public:
         if (closed_) return;
         last_activity_ -= d;
         last_progress_ -= d;
+        stall_since_ -= d;
         block_since_ -= d;
         reset_window_ -= d;
         ping_rate_.first -= d;
@@ -1264,6 +1265,24 @@ private:
             connection_error(ErrorCode::enhance_your_calm, "header block not completed in time");
             return;
         }
+        // A write the socket does not take: one in flight with no write completed for four idle
+        // timeouts closes the connection, whatever the client sends meanwhile (nginx's send_timeout).
+        // The check read last_activity_ before, which every read moves, so a client that stopped
+        // reading and sent a PING now and then held the connection, its streams and the bytes in its
+        // socket indefinitely (security audit 2026-10-07, section 5 item 12). Counted by the ticks:
+        // the first one that sees a write in flight starts the count, no clock read per write.
+        if (writer_.writing()) {
+            if (writer_.writes() != stall_writes_) {
+                stall_writes_ = writer_.writes();
+                stall_since_ = now;
+            } else if (now - stall_since_ >= idle_timeout_ * 4) {
+                if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
+                    log->info("http2 " + remote_text() + ": closing, a write not taken by the client for " +
+                              std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now - stall_since_).count()) + " s");
+                close();
+                return;
+            }
+        }
         if (streams_.active() == 0) {
             // Idle is measured from the last completed frame or write (last_progress_): a client
             // sending one byte of a frame every few seconds no longer holds the connection past the
@@ -1276,7 +1295,9 @@ private:
             }
             if (now - last_activity_ >= kShedAfter) {
                 shed();
-                arm_timer(idle_timeout_ - idle);  // nothing more to do until the idle timeout
+                // Nothing more to do until the idle timeout, unless a write is in flight to watch.
+                arm_timer(writer_.writing() ? std::min<std::chrono::steady_clock::duration>(idle_timeout_ - idle, kShedAfter)
+                                            : idle_timeout_ - idle);
                 return;
             }
             arm_timer(std::min<std::chrono::steady_clock::duration>(idle_timeout_ - idle, kShedAfter));
@@ -1317,10 +1338,6 @@ private:
                     continue;  // the slot was swapped
                 }
                 ++i;
-            }
-            if (now - last_activity_ >= idle_timeout_ * 4 && !writer_.idle()) {  // the socket does not drain
-                close();
-                return;
             }
         }
         arm_timer();
@@ -1387,6 +1404,9 @@ private:
     // The last completed frame, write, or the start: the idle close's clock. Bytes that complete no
     // frame move only last_activity_ (the shed's and the read's timestamp), not this (audit 2.3).
     std::chrono::steady_clock::time_point last_progress_;
+    // The write in flight the timer last saw: the completed-write count then and that tick's time.
+    std::uint64_t stall_writes_ = ~std::uint64_t{0};
+    std::chrono::steady_clock::time_point stall_since_;
     std::vector<char> in_;
     std::size_t in_len_ = 0;
     bool read_pending_ = false;

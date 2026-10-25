@@ -1,0 +1,197 @@
+Sun Oct 25 18:24:08 UTC 2026
+Linux df6cea8995db 6.12.113+deb13-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.113-1 (2026-10-15) x86_64 GNU/Linux
+13.6
+model name	: AMD Ryzen 9 9900X 12-Core Processor
+6803a7cc1ad46f1e8cc73c342dbc96277ff31106
+Server: unmodified git archive, Release with ASan+UBSan; ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1
+COMMAND: python3 /src/tests/timeout-regressions.py /src/bench/tmp/audit55-bin/asan --rows h2-stalled-silent,h2-stalled-chatty,h2-goaway-stalled,health-head-dribble,health-body-dribble,health-h2-dribble,health-idle
+RUN h2-stalled-silent
+  last read: 16375 body bytes, socket inode=187575426, idle_timeout=3
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  unread server TCP send queue: 31372 bytes
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  deadline: closed=14.012850294006057, observed_age=14.013, server_socket_owned=False, PING ages=[]
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:53477 (h1)  sites: localhost
+  listening on https://127.0.0.1:57955 (h2, h1)  sites: localhost
+agensio stopped
+PASS h2-stalled-silent
+RUN h2-stalled-chatty
+  last read: 16375 body bytes, socket inode=187574029, idle_timeout=3
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  unread server TCP send queue: 30360 bytes
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  deadline: closed=None, observed_age=21.019, server_socket_owned=True, PING ages=[5.006, 10.01, 15.014, 20.019]
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:44959 (h1)  sites: localhost
+  listening on https://127.0.0.1:39237 (h2, h1)  sites: localhost
+agensio stopped
+FAIL h2-stalled-chatty: writer not closed within 4 * idle_timeout + 3 s
+RUN h2-goaway-stalled
+  last read: 16375 body bytes, socket inode=187582679, idle_timeout=3
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  unread server TCP send queue: 30360 bytes
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.000 s
+  deadline: closed=14.013399712042883, observed_age=14.013, server_socket_owned=False, PING ages=[5.006, 10.01]
+  info log: closing, PROTOCOL_ERROR: WINDOW_UPDATE of zero on the connection
+  post-deadline drain: 0 bytes, GOAWAY=None, ConnectionResetError: [Errno 104] Connection reset by peer
+2026/10/25 18:24:43 [info] no record of the site files served before (/var/lib/agensio/.server/served): no conflict between site files at this start, so it was not needed
+2026/10/25 18:24:43 [info] connection ceiling 1073739768 per worker (1 worker(s), open-file limit 1073741816)
+2026/10/25 18:24:43 [warn] the record of the site files served could not be written (cannot write /var/lib/agensio/.server/served.tmp): at the next start a conflict between site files is decided by load order, not by what is served now
+2026/10/25 18:24:44 [info] http2 127.0.0.1: closing, PROTOCOL_ERROR: WINDOW_UPDATE of zero on the connection
+2026/10/25 18:24:47 [info] http2 127.0.0.1 stream 1: no progress, cancelled
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:37797 (h1)  sites: localhost
+  listening on https://127.0.0.1:53465 (h2, h1)  sites: localhost
+agensio stopped
+PASS h2-goaway-stalled
+RUN health-head-dribble
+  head: four one-byte drips per client at 0/2/4/6 s
+  refusal from 127.0.0.2: 503, Retry-After, EOF
+  refusal from 127.0.0.3: 503, Retry-After, EOF
+  refusal from 127.0.0.4: 503, Retry-After, EOF
+  refusal from 127.0.0.5: 503, Retry-After, EOF
+  status: {"connections": 4, "connections_idle": 0, "connections_refused": 4}
+  health: {"code": "connections_refused", "fix": "legitimate load from many addresses: raise the open-file limit (LimitNOFILE in the unit) or server.max_connections, then reload (docs/configuration.md 18)", "message": "4 connection(s) refused at the ceiling since start (first 0 s ago, last 0 s ago) on 127.0.0.1:56571, from 127.0.0.2 x1, 127.0.0.3 x1, 127.0.0.4 x1 and 1 more address; the workers hold 4 of 3 connections, 0 idle for 2 s or more (server.max_connections 3 per worker)", "severity": "warn"}
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:56571 (h1)  sites: localhost
+  listening on https://127.0.0.1:38865 (h2, h1)  sites: localhost
+  control socket /tmp/agensio-timeouts-8qvc259z/control.sock
+agensio stopped
+PASS health-head-dribble
+RUN health-body-dribble
+  body: four one-byte drips per client at 0/2/4/6 s
+  refusal from 127.0.0.2: 503, Retry-After, EOF
+  refusal from 127.0.0.3: 503, Retry-After, EOF
+  refusal from 127.0.0.4: 503, Retry-After, EOF
+  refusal from 127.0.0.5: 503, Retry-After, EOF
+  status: {"connections": 4, "connections_idle": 0, "connections_refused": 4}
+  health: {"code": "connections_refused", "fix": "legitimate load from many addresses: raise the open-file limit (LimitNOFILE in the unit) or server.max_connections, then reload (docs/configuration.md 18)", "message": "4 connection(s) refused at the ceiling since start (first 0 s ago, last 0 s ago) on 127.0.0.1:49189, from 127.0.0.2 x1, 127.0.0.3 x1, 127.0.0.4 x1 and 1 more address; the workers hold 4 of 3 connections, 0 idle for 2 s or more (server.max_connections 3 per worker)", "severity": "warn"}
+  body reader verified: PHP received 1000000 bytes
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:49189 (h1)  sites: localhost
+  listening on https://127.0.0.1:42639 (h2, h1)  sites: localhost
+  control socket /tmp/agensio-timeouts-azmd6bs3/control.sock
+agensio stopped
+PASS health-body-dribble
+RUN health-h2-dribble
+  h2: four one-byte drips per client at 0/2/4/6 s
+  refusal from 127.0.0.2: 503, Retry-After, EOF
+  refusal from 127.0.0.3: 503, Retry-After, EOF
+  refusal from 127.0.0.4: 503, Retry-After, EOF
+  refusal from 127.0.0.5: 503, Retry-After, EOF
+  status: {"connections": 4, "connections_idle": 0, "connections_refused": 4}
+  health: {"code": "connections_refused", "fix": "legitimate load from many addresses: raise the open-file limit (LimitNOFILE in the unit) or server.max_connections, then reload (docs/configuration.md 18)", "message": "4 connection(s) refused at the ceiling since start (first 0 s ago, last 0 s ago) on 127.0.0.1:33235, from 127.0.0.2 x1, 127.0.0.3 x1, 127.0.0.4 x1 and 1 more address; the workers hold 4 of 3 connections, 0 idle for 2 s or more (server.max_connections 3 per worker)", "severity": "warn"}
+  DATA reader verified: PHP received 1000000 bytes
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:33235 (h2c, h1)  sites: localhost
+  listening on https://127.0.0.1:59779 (h2, h1)  sites: localhost
+  control socket /tmp/agensio-timeouts-qw2hoos6/control.sock
+agensio stopped
+PASS health-h2-dribble
+RUN health-idle
+  refusal from 127.0.0.2: 503, Retry-After, EOF
+  refusal from 127.0.0.3: 503, Retry-After, EOF
+  refusal from 127.0.0.4: 503, Retry-After, EOF
+  refusal from 127.0.0.5: 503, Retry-After, EOF
+  status: {"connections": 4, "connections_idle": 3, "connections_refused": 4}
+  health: {"code": "connections_refused", "fix": "the workers are full of idle connections: slow or stuck clients, or a client keeping connections open; compare with the request rate (logs_query on the access log), lower server.idle_timeout (15 s by default), and limit connections per address in the firewall (docs/configuration.md 18)", "message": "4 connection(s) refused at the ceiling since start (first 0 s ago, last 0 s ago) on 127.0.0.1:39637, from 127.0.0.2 x1, 127.0.0.3 x1, 127.0.0.4 x1 and 1 more address; the workers hold 4 of 3 connections, 3 idle for 2 s or more (server.max_connections 3 per worker)", "severity": "warn"}
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:39637 (h1)  sites: localhost
+  listening on https://127.0.0.1:41665 (h2, h1)  sites: localhost
+  control socket /tmp/agensio-timeouts-_is3womr/control.sock
+agensio stopped
+PASS health-idle
+timeout regressions: 6/7 passed

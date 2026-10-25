@@ -1,0 +1,65 @@
+Sun Oct 25 18:23:03 UTC 2026
+Linux 0a9ccd3a8ef9 6.12.113+deb13-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.113-1 (2026-10-15) x86_64 GNU/Linux
+13.6
+model name	: AMD Ryzen 9 9900X 12-Core Processor
+6803a7cc1ad46f1e8cc73c342dbc96277ff31106
+Server: unmodified git archive, Release
+COMMAND: python3 /src/tests/timeout-regressions.py /src/bench/tmp/audit55-bin/release --rows health-head-dribble,health-body-dribble,health-h2-dribble,health-idle
+RUN health-head-dribble
+  head: four one-byte drips per client at 0/2/4/6 s
+  refusal from 127.0.0.2: 503, Retry-After, EOF
+  refusal from 127.0.0.3: 503, Retry-After, EOF
+  refusal from 127.0.0.4: 503, Retry-After, EOF
+  refusal from 127.0.0.5: 503, Retry-After, EOF
+  status: {"connections": 4, "connections_idle": 0, "connections_refused": 4}
+  health: {"code": "connections_refused", "fix": "legitimate load from many addresses: raise the open-file limit (LimitNOFILE in the unit) or server.max_connections, then reload (docs/configuration.md 18)", "message": "4 connection(s) refused at the ceiling since start (first 0 s ago, last 0 s ago) on 127.0.0.1:55345, from 127.0.0.2 x1, 127.0.0.3 x1, 127.0.0.4 x1 and 1 more address; the workers hold 4 of 3 connections, 0 idle for 2 s or more (server.max_connections 3 per worker)", "severity": "warn"}
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:55345 (h1)  sites: localhost
+  listening on https://127.0.0.1:52285 (h2, h1)  sites: localhost
+  control socket /tmp/agensio-timeouts-4f6t_b5p/control.sock
+agensio stopped
+PASS health-head-dribble
+RUN health-body-dribble
+  body: four one-byte drips per client at 0/2/4/6 s
+  refusal from 127.0.0.2: 503, Retry-After, EOF
+  refusal from 127.0.0.3: 503, Retry-After, EOF
+  refusal from 127.0.0.4: 503, Retry-After, EOF
+  refusal from 127.0.0.5: 503, Retry-After, EOF
+  status: {"connections": 4, "connections_idle": 0, "connections_refused": 4}
+  health: {"code": "connections_refused", "fix": "legitimate load from many addresses: raise the open-file limit (LimitNOFILE in the unit) or server.max_connections, then reload (docs/configuration.md 18)", "message": "4 connection(s) refused at the ceiling since start (first 0 s ago, last 0 s ago) on 127.0.0.1:60331, from 127.0.0.2 x1, 127.0.0.3 x1, 127.0.0.4 x1 and 1 more address; the workers hold 4 of 3 connections, 0 idle for 2 s or more (server.max_connections 3 per worker)", "severity": "warn"}
+  body reader verified: PHP received 1000000 bytes
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:60331 (h1)  sites: localhost
+  listening on https://127.0.0.1:56949 (h2, h1)  sites: localhost
+  control socket /tmp/agensio-timeouts-896y3n3t/control.sock
+agensio stopped
+PASS health-body-dribble
+RUN health-h2-dribble
+  h2: four one-byte drips per client at 0/2/4/6 s
+  refusal from 127.0.0.2: 503, Retry-After, EOF
+  refusal from 127.0.0.3: 503, Retry-After, EOF
+  refusal from 127.0.0.4: 503, Retry-After, EOF
+  refusal from 127.0.0.5: 503, Retry-After, EOF
+  status: {"connections": 4, "connections_idle": 0, "connections_refused": 4}
+  health: {"code": "connections_refused", "fix": "legitimate load from many addresses: raise the open-file limit (LimitNOFILE in the unit) or server.max_connections, then reload (docs/configuration.md 18)", "message": "4 connection(s) refused at the ceiling since start (first 0 s ago, last 0 s ago) on 127.0.0.1:47697, from 127.0.0.2 x1, 127.0.0.3 x1, 127.0.0.4 x1 and 1 more address; the workers hold 4 of 3 connections, 0 idle for 2 s or more (server.max_connections 3 per worker)", "severity": "warn"}
+  DATA reader verified: PHP received 1000000 bytes
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:47697 (h2c, h1)  sites: localhost
+  listening on https://127.0.0.1:37579 (h2, h1)  sites: localhost
+  control socket /tmp/agensio-timeouts-ejfy2k7d/control.sock
+agensio stopped
+PASS health-h2-dribble
+RUN health-idle
+  refusal from 127.0.0.2: 503, Retry-After, EOF
+  refusal from 127.0.0.3: 503, Retry-After, EOF
+  refusal from 127.0.0.4: 503, Retry-After, EOF
+  refusal from 127.0.0.5: 503, Retry-After, EOF
+  status: {"connections": 4, "connections_idle": 3, "connections_refused": 4}
+  health: {"code": "connections_refused", "fix": "the workers are full of idle connections: slow or stuck clients, or a client keeping connections open; compare with the request rate (logs_query on the access log), lower server.idle_timeout (15 s by default), and limit connections per address in the firewall (docs/configuration.md 18)", "message": "4 connection(s) refused at the ceiling since start (first 0 s ago, last 0 s ago) on 127.0.0.1:38937, from 127.0.0.2 x1, 127.0.0.3 x1, 127.0.0.4 x1 and 1 more address; the workers hold 4 of 3 connections, 3 idle for 2 s or more (server.max_connections 3 per worker)", "severity": "warn"}
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:38937 (h1)  sites: localhost
+  listening on https://127.0.0.1:55861 (h2, h1)  sites: localhost
+  control socket /tmp/agensio-timeouts-n8czj2qk/control.sock
+agensio stopped
+PASS health-idle
+timeout regressions: 4/4 passed

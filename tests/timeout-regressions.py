@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Security audit 2026-10-07, section 5 items 1, 2 and 3.
+"""Security audit 2026-10-07, section 5 timeout, stalled-writer and health checks.
 
 Run inside the Linux devbox: python3 tests/timeout-regressions.py BINARY [--rows a,b]
 Rows: h2-stalled,fastcgi,h1-sendfile,cached-tls,h2-idle. Each owns a single-worker server.
 h2-idle (audit 2.3) fails on alpha.115 and passes from the fix in alpha.116.
 Also h2-header-block; opt-in h2-window-flood measures audit section 5 item 8.
-Requires python3-h2, openssl and (for fastcgi) php-fpm. Exit 1 on any failed row.
+Audit 5 items 12/10: h2-stalled-chatty (held past 21 s before alpha.116's fix), h2-stalled-silent,
+h2-goaway-stalled. Item 9: opt-in health-{head,body,h2}-dribble and health-idle.
+Requires python3-h2, openssl and (for fastcgi and the body-health rows) php-fpm.
+Exit 1 on any failed row.
 """
 import argparse
 from contextlib import contextmanager, ExitStack
+import json
 import os
 from pathlib import Path
 import select
@@ -84,11 +88,15 @@ def server(binary, row):
         with (root / "server.log").open("w+") as log, (root / "php.log").open("w+") as php_log:
             try:
                 location = ""
-                if row == "fastcgi":
+                health_row = row.startswith("health-")
+                if row in ("fastcgi", "health-body-dribble", "health-h2-dribble"):
                     fpm = next((p for name in ("php-fpm8.4", "php-fpm8.3", "php-fpm")
                                 if (p := shutil.which(name))), None)
                     assert fpm, "FastCGI regression requires php-fpm"
-                    (root / "pause.php").write_text(
+                    script = "body.php" if health_row else "pause.php"
+                    (root / script).write_text(
+                        '<?php $n = strlen(file_get_contents("php://input")); '
+                        'header("Content-Length: " . strlen((string)$n)); echo $n;\n' if health_row else
                         '<?php header("Content-Type: application/octet-stream");'
                         'echo str_repeat("a", 65536); flush(); sleep(8);'
                         'echo str_repeat("b", 65536); flush();\n')
@@ -101,19 +109,23 @@ def server(binary, row):
                                            stdout=php_log, stderr=subprocess.STDOUT)
                     wait_ready(php, lambda: (root / "fpm.sock").exists())
                     location = (
-                        '\n[[site.location]]\npath = "/pause.php"\nmatch = "exact"\n'
+                        f'\n[[site.location]]\npath = "/{script}"\nmatch = "exact"\n'
                         'handler = "fastcgi"\n'
                         f'fastcgi = {{ socket = "unix:{root}/fpm.sock", buffering = false, '
                         'read_timeout = 20 }\n')
-                idle = 30 if row == "h2-window-flood" else 15 if row in ("cached-tls", "h2-idle", "h2-header-block") else 3
-                protocols = '"h1", "h2", "h2c"' if row in ("h2-idle", "h2-header-block", "h2-window-flood") else '"h1", "h2"'
+                idle = 30 if row == "h2-window-flood" else 15 if health_row or row in ("cached-tls", "h2-idle", "h2-header-block") else 3
+                protocols = '"h1", "h2", "h2c"' if row in ("h2-idle", "h2-header-block", "h2-window-flood", "health-h2-dribble") else '"h1", "h2"'
+                ceiling = 'max_connections = 3\n' if health_row else ""
+                control = (f'[control]\nsocket = "{root}/control.sock"\naudit = "{root}/audit.log"\n'
+                           'host_protection = "off"\n') if health_row else ""
+                level = "info" if row == "h2-goaway-stalled" else "error"
                 (root / "agensio.toml").write_text(
                     f'[server]\nworkers = 1\nidle_timeout = {idle}\nprotocols = [{protocols}]\n'
-                    f'pid_file = "{root}/agensio.pid"\n'
+                    f'pid_file = "{root}/agensio.pid"\n' + ceiling + control +
                     '[cache]\nmax_file_size = "4MB"\nsendfile_min_size = "48KB"\n'
-                    '[log]\naccess = "off"\nlevel = "error"\n'
+                    f'[log]\naccess = "off"\nlevel = "{level}"\n'
                     f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{plain}"]\n'
-                    f'root = "{root}"\n'
+                    f'root = "{root}"\n' + (location if health_row else "") +
                     f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{tls}"]\n'
                     f'root = "{root}"\ntls = {{ cert = "{root}/cert.pem", key = "{root}/key.pem" }}\n'
                     + location)
@@ -244,6 +256,264 @@ def h2_stalled(process, plain, tls):
         worker_available(process, plain)
         worker_available(process, plain)
         worker_available(process, plain)
+
+
+def server_socket(process, sock):
+    local = f"0100007F:{sock.getpeername()[1]:04X}"
+    remote = f"0100007F:{sock.getsockname()[1]:04X}"
+    for line in Path(f"/proc/{process.pid}/net/tcp").read_text().splitlines()[1:]:
+        fields = line.split()
+        if fields[1:3] == [local, remote] and fields[9] != "0":
+            return fields[9], int(fields[4].split(":")[0], 16)
+    return None, 0
+
+
+def owns_socket(process, inode):
+    # FIN/EOF may sit behind unread TLS records. Observe close without draining them.
+    for fd in Path(f"/proc/{process.pid}/fd").iterdir():
+        try:
+            target = os.readlink(fd)
+        except FileNotFoundError:
+            continue  # the probe's socket can close between listing and readlink
+        if target == f"socket:[{inode}]":
+            return True
+    return False
+
+
+def h2_stalled_deadline(process, plain, tls, *, chatty=False, error=False):
+    with connect(tls, "h2") as sock:
+        conn = h2_start(sock, "/large.bin")
+        body = bytearray()
+        deadline = time.monotonic() + 3
+        while not body:
+            assert time.monotonic() < deadline, "no initial DATA"
+            assert not h2_read(sock, conn, body), "response already finished"
+        started = time.monotonic()
+        inode, _ = server_socket(process, sock)
+        assert inode and owns_socket(process, inode), "accepted server socket not found"
+        print(f"  last read: {len(body)} body bytes, socket inode={inode}, idle_timeout=3", flush=True)
+        worker_available(process, plain)
+        _, queued = server_socket(process, sock)
+        assert queued > sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF), (
+            f"fixture did not fill the small receive window: tx_queue={queued}")
+        print(f"  unread server TCP send queue: {queued} bytes", flush=True)
+        if error:
+            # RFC 9113 6.9: zero increment on stream 0 is a connection PROTOCOL_ERROR.
+            sock.sendall(WindowUpdateFrame(0, window_increment=0).serialize())
+        closed = None
+        sent = []
+        while time.monotonic() < started + 20.2:
+            if not owns_socket(process, inode):
+                closed = time.monotonic() - started
+                break
+            if chatty and time.monotonic() >= started + 5 * (len(sent) + 1):
+                conn.ping(b"stalled!")
+                try:
+                    sock.sendall(conn.data_to_send())
+                except OSError:
+                    if owns_socket(process, inode):
+                        raise
+                    closed = time.monotonic() - started
+                    break
+                sent.append(round(time.monotonic() - started, 3))
+            worker_available(process, plain)
+        age = time.monotonic() - started
+        still_owned = owns_socket(process, inode)
+        if closed is None and not still_owned:
+            closed = age
+        print(f"  deadline: closed={closed}, observed_age={age:.3f}, "
+              f"server_socket_owned={still_owned}, PING ages={sent}", flush=True)
+        if error:
+            output = (Path(process.args[-1]).parent / "server.log").read_text()
+            reason = "closing, PROTOCOL_ERROR: WINDOW_UPDATE of zero on the connection"
+            assert reason in output, "missing info log for the intended connection error"
+            print("  info log: " + reason, flush=True)
+            # Only after checking the deadline may the client drain its queued records.
+            goaway = None
+            finish = "read deadline"
+            end = time.monotonic() + 3
+            drained = 0
+            sock.settimeout(0.2)
+            while not still_owned and time.monotonic() < end and drained < 10 * MIB:
+                try:
+                    data = sock.recv(65536)
+                except socket.timeout:
+                    continue
+                except (ConnectionResetError, ssl.SSLError) as exc:
+                    finish = type(exc).__name__ + ": " + str(exc)
+                    break
+                if not data:
+                    finish = "EOF"
+                    break
+                drained += len(data)
+                for ev in conn.receive_data(data):
+                    if isinstance(ev, h2.events.ConnectionTerminated):
+                        goaway = int(ev.error_code)
+            print(f"  post-deadline drain: {drained} bytes, GOAWAY={goaway}, {finish}", flush=True)
+            assert goaway in (None, 1), f"wrong GOAWAY error: {goaway}"
+        assert closed is not None and closed <= 15, "writer not closed within 4 * idle_timeout + 3 s"
+
+
+def h2_stalled_silent(process, plain, tls):
+    h2_stalled_deadline(process, plain, tls)
+
+
+def h2_stalled_chatty(process, plain, tls):
+    h2_stalled_deadline(process, plain, tls, chatty=True)
+
+
+def h2_goaway_stalled(process, plain, tls):
+    h2_stalled_deadline(process, plain, tls, chatty=True, error=True)
+
+
+def control_json(process, command):
+    result = subprocess.run([process.args[0], "ctl", command, "--socket",
+                             str(Path(process.args[-1]).parent / "control.sock")],
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, f"ctl {command}: {result.stderr}\n{result.stdout}"
+    return json.loads(result.stdout)
+
+
+def read_h1_response(sock):
+    head = bytearray()
+    end = time.monotonic() + 3
+    while not head.endswith(b"\r\n\r\n"):
+        assert len(head) < 16384 and time.monotonic() < end, "response head exceeded bounds"
+        data = sock.recv(1)
+        assert data, "EOF in response head"
+        head.extend(data)
+    if head.startswith(b"HTTP/1.1 100 "):
+        return 100, b""
+    assert head.startswith(b"HTTP/1.1 200 "), f"unexpected response: {head!r}"
+    headers = dict(line.lower().split(b":", 1) for line in bytes(head).split(b"\r\n")[1:] if b":" in line)
+    assert b"content-length" in headers, f"expected a sized fixture response: {head!r}"
+    size = int(headers[b"content-length"])
+    assert size <= 4096, f"unexpected body length {size}"
+    body = bytearray()
+    while len(body) < size:
+        assert time.monotonic() < end, "response body exceeded deadline"
+        data = sock.recv(size - len(body))
+        assert data, "truncated response body"
+        body.extend(data)
+    return 200, bytes(body)
+
+
+def health_shape(process, plain, tls, shape):
+    deadline = time.monotonic() + 5
+    while True:
+        baseline = control_json(process, "status")
+        if baseline["connections"] == 1:
+            break
+        assert time.monotonic() < deadline, "readiness connections did not retire"
+        time.sleep(0.05)
+    assert baseline["connections_refused"] == 0, "refusals before the fixture"
+    with ExitStack() as stack:
+        clients = [stack.enter_context(socket.create_connection(("127.0.0.1", plain), timeout=3))
+                   for _ in range(3)]
+        h2_clients = []
+        for sock in clients:
+            if shape == "idle":
+                sock.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                assert read_h1_response(sock) == (200, BLOCK[:256])
+            elif shape == "body":
+                sock.sendall(b"POST /body.php HTTP/1.1\r\nHost: localhost\r\n"
+                             b"Content-Length: 1000000\r\nContent-Type: application/octet-stream\r\n"
+                             b"Expect: 100-continue\r\n\r\n")
+                assert read_h1_response(sock) == (100, b""), "handler did not start reading the body"
+            elif shape == "h2":
+                conn = h2_ready(sock)
+                conn.send_headers(1, [(":method", "POST"), (":scheme", "http"),
+                                     (":authority", "localhost"), (":path", "/body.php"),
+                                     ("content-length", "1000000"), ("content-type", "application/octet-stream")])
+                sock.sendall(conn.data_to_send())
+                h2_clients.append(conn)
+        started = time.monotonic()
+        if shape == "idle":
+            time.sleep(3)
+        else:
+            for tick in range(4):
+                time.sleep(max(0, started + tick * 2 - time.monotonic()))
+                for i, sock in enumerate(clients):
+                    if shape == "h2":
+                        h2_clients[i].send_data(1, b"x")
+                        sock.sendall(h2_clients[i].data_to_send())
+                    else:
+                        sock.sendall(b"GET "[tick:tick + 1] if shape == "head" else b"x")
+            print(f"  {shape}: four one-byte drips per client at 0/2/4/6 s", flush=True)
+        for last in range(2, 6):
+            address = f"127.0.0.{last}"
+            with socket.socket() as refused:
+                refused.settimeout(2)
+                refused.bind((address, 0))
+                refused.connect(("127.0.0.1", plain))
+                reply = bytearray()
+                while len(reply) < 4096:
+                    part = refused.recv(4096 - len(reply))
+                    if not part:
+                        break
+                    reply.extend(part)
+                assert reply.startswith(b"HTTP/1.1 503 ") and b"retry-after:" in reply.lower(), repr(reply)
+                assert len(reply) < 4096, "refusal did not close within response bound"
+                print(f"  refusal from {address}: 503, Retry-After, EOF", flush=True)
+        status = control_json(process, "status")
+        print("  status: " + json.dumps({k: status[k] for k in
+              ("connections", "connections_idle", "connections_refused")}, sort_keys=True), flush=True)
+        assert status["connections"] - baseline["connections"] == 3, "fixture lost a held connection"
+        assert status["connections_refused"] == 4, "wrong refusal count"
+        health = control_json(process, "health")
+        findings = [f for f in health["findings"] if f["code"] == "connections_refused"]
+        assert len(findings) == 1, "missing or duplicate refusal finding"
+        print("  health: " + json.dumps(findings[0], sort_keys=True), flush=True)
+        if shape == "idle":
+            assert status["connections_idle"] == 3, "silent completed requests not counted idle"
+            assert "full of idle connections" in findings[0]["fix"], "wrong idle control diagnosis"
+        # Finish one body after observing health: prove the configured handler actually
+        # consumes the declared body, rather than answering early and discarding DATA.
+        if shape == "body":
+            clients[0].sendall(b"x" * (1000000 - 4))
+            assert read_h1_response(clients[0]) == (200, b"1000000")
+            print("  body reader verified: PHP received 1000000 bytes", flush=True)
+        elif shape == "h2":
+            sock, conn = clients[0], h2_clients[0]
+            remaining = 1000000 - 4
+            body = bytearray()
+            ended = False
+            end = time.monotonic() + 5
+            while not ended:
+                assert time.monotonic() < end, "body completion exceeded 5 s"
+                while remaining and conn.local_flow_control_window(1) > 0:
+                    size = min(remaining, conn.local_flow_control_window(1), conn.max_outbound_frame_size)
+                    remaining -= size
+                    conn.send_data(1, b"x" * size, end_stream=remaining == 0)
+                sock.sendall(conn.data_to_send())
+                data = sock.recv(65536)
+                assert data, "EOF before body reader completed"
+                for ev in conn.receive_data(data):
+                    if isinstance(ev, h2.events.ResponseReceived):
+                        assert dict(ev.headers)[b":status"] == b"200", str(ev)
+                    elif isinstance(ev, h2.events.DataReceived):
+                        body.extend(ev.data)
+                    elif isinstance(ev, h2.events.StreamEnded):
+                        ended = True
+                    assert not isinstance(ev, (h2.events.StreamReset, h2.events.ConnectionTerminated)), str(ev)
+            assert body == b"1000000" and remaining == 0, repr(body)
+            print("  DATA reader verified: PHP received 1000000 bytes", flush=True)
+
+
+def health_head_dribble(process, plain, tls):
+    health_shape(process, plain, tls, "head")
+
+
+def health_body_dribble(process, plain, tls):
+    health_shape(process, plain, tls, "body")
+
+
+def health_h2_dribble(process, plain, tls):
+    health_shape(process, plain, tls, "h2")
+
+
+def health_idle(process, plain, tls):
+    health_shape(process, plain, tls, "idle")
 
 
 def fastcgi(process, plain, tls):
@@ -504,14 +774,19 @@ def h2_window_flood(process, plain, tls):
 
 ROWS = {"h2-stalled": h2_stalled, "fastcgi": fastcgi, "h1-sendfile": h1_sendfile,
         "cached-tls": cached_tls, "h2-idle": h2_idle, "h2-header-block": h2_header_block,
-        "h2-window-flood": h2_window_flood}
+        "h2-window-flood": h2_window_flood, "h2-stalled-silent": h2_stalled_silent,
+        "h2-stalled-chatty": h2_stalled_chatty, "h2-goaway-stalled": h2_goaway_stalled,
+        "health-head-dribble": health_head_dribble, "health-body-dribble": health_body_dribble,
+        "health-h2-dribble": health_h2_dribble, "health-idle": health_idle}
+OPT_IN = {"h2-window-flood", "health-head-dribble", "health-body-dribble",
+          "health-h2-dribble", "health-idle"}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary")
-    parser.add_argument("--rows", default=",".join(row for row in ROWS if row != "h2-window-flood"),
-                        help="comma-separated rows; h2-window-flood is an opt-in CPU measurement")
+    parser.add_argument("--rows", default=",".join(row for row in ROWS if row not in OPT_IN),
+                        help="comma-separated rows; opt-in: " + ",".join(sorted(OPT_IN)))
     args = parser.parse_args()
     rows = args.rows.split(",")
     if any(row not in ROWS for row in rows):

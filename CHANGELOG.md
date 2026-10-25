@@ -20,6 +20,18 @@
   now, and are default rows of their suites. So do `h2-header-block` (an unfinished header block
   with no stream open) and `handshake-authenticated` (Initial packets that open, sent past the
   deadline).
+- **An HTTP/2 client that stops reading is closed after four idle timeouts, whatever it sends**
+  (audit section 5 item 12). The check for a write the socket does not take read the clock that
+  every read moves, so a client that took part of a response, stopped reading and sent a PING now
+  and then held the connection, its stream and the bytes queued for it indefinitely.
+  - The check now counts writes: a write in flight with none completed for four idle timeouts (60 s
+    by default) closes the connection, as nginx's `send_timeout` does, with an info line in the
+    error log. It runs with or without a stream open. A write cycle is at most 64 KB over TLS, so a
+    client draining 1.1 KB/s keeps its connection.
+  - `tests/timeout-regressions.py` row `h2-stalled-chatty` (a PING every 5 s, no reads) was still
+    held at 21 s before and closes now within the bound; `h2-stalled-silent` and
+    `h2-goaway-stalled` (a connection error behind the stalled write) closed at 14 s before and
+    still do. All three are default rows.
 - **A worker at its connection ceiling refuses new HTTP/3 connections too** (audit item 2.4).
   `server.max_connections` counts TCP and QUIC together, but only the TCP accept path checked it,
   so QUIC handshakes completed past the ceiling.

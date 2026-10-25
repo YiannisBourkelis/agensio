@@ -561,7 +561,7 @@ One lazy `steady_timer` per connection, deadlines checked when it fires, as HTTP
 | a stream's head incomplete (HEADERS without END_HEADERS, or waiting for CONTINUATION) | `idle_timeout` | `GOAWAY(ENHANCE_YOUR_CALM)` + close: slow headers |
 | a body announced, handler waiting, no DATA | `body_timeout` (60 s) | `RST_STREAM(CANCEL)`, 408 not possible any more, log |
 | response pending, no window progress of at least 1 KB | `idle_timeout` | `RST_STREAM(CANCEL)`, buffers freed: the Bomb's "hold", zero-window slow read; progress is marked when a write carrying the stream's bytes completes. A stream whose next bytes are being read from its application (a pull in flight) is not cut by this clock: the upstream's `read_timeout` bounds it, as on HTTP/1 (alpha.56). A stream already reset, its release deferred while the writer or the pull still holds it, is skipped by the check (alpha.56: before, the check met it again on every pass and never returned, audit 2.1) |
-| response pending, socket not draining | `idle_timeout` | close: TCP-level slow read |
+| a write in flight that the socket does not take | four `idle_timeout`s (60 s) from the first timer tick that sees it, no write completed meanwhile | close, whatever the client sends meanwhile (nginx's `send_timeout`): TCP-level slow read. Until alpha.116 this read the clock every read moves, so a client that stopped reading and sent a PING now and then held the connection indefinitely (audit 2026-10-07, section 5 item 12); counted by the ticks against the writer's completed writes, no clock read per write. A cycle is at most 64 KB over TLS and 256 KB on plain sockets, so a client draining 1.1 KB/s (TLS) or 4.3 KB/s keeps it |
 
 Since alpha.116 (security audit 2026-10-07, item 2.3) the idle clock is `last_progress_`: a
 completed frame, the preface, a write or the connection's start move it, a byte that completes
@@ -569,9 +569,11 @@ nothing does not (it moves only the shed's clock, `last_activity_`); and the inc
 deadline is checked whether or not a stream is open, since a request's stream opens only when
 its header block completes. `tests/timeout-regressions.py` row `h2-idle` holds both dribbles
 (a PING's bytes after the SETTINGS exchange, the first SETTINGS's bytes after the preface) to
-a close at 15 s; alpha.115 kept both open past 17 s. What still differs (item 2.10): the
-not-draining check runs only while at least one stream is open, and closes at four idle
-timeouts, not one.
+a close at 15 s; alpha.115 kept both open past 17 s. The not-draining check runs whether or
+not a stream is open (a write of control frames alone can stall too) and closes at four idle
+timeouts, not one, as HTTP/1's piece per idle timeout would for a 64 KB cycle at a quarter of
+the rate; `tests/timeout-regressions.py` row `h2-stalled-chatty` (a client that stops reading
+and sends a PING every 5 s) was still held at 21 s before the fix (`6803a7cc`).
 
 ### 6.8 Lifecycle
 
@@ -733,7 +735,7 @@ item 2.10).
 | MadeYouReset (CVE-2025-8671) | provoke the server into resetting streams with invalid frames (a `WINDOW_UPDATE` of 0, a bad PRIORITY, DATA on a half-closed stream) so client-side reset counting never triggers | server-sent resets count in the same counter; each provocation is also a glitch | the same | `h2-attacks.py made-you-reset` |
 | CONTINUATION flood (CVE-2024-27316 etc.) | HEADERS without END_HEADERS followed by CONTINUATION frames for ever | the header block is bounded by compressed bytes and by frame count; over either is a connection error, and the buffer is the 16 KB receive buffer, not a growing string | 16 KB compressed, 8 CONTINUATION frames per block | `h2-attacks.py continuation-flood`; RSS sampled |
 | HPACK bomb (2016) and the HTTP/2 Bomb (CVE-2026-49975) | seed the dynamic table with a large or nearly empty entry and reference it thousands of times, splitting cookies to dodge field counts; hold the result with a zero window and 1-byte updates | decoded size counted per field during decoding, crumbs included, stop at the first byte over 16 KB; the crumbs joined into one field and not counted as fields (the 16 KB is their bound); a stream held by a zero window with under 1 KB of progress is reset at `idle_timeout`; 1-byte updates are glitches, not progress | 16 KB decoded per request, 100 fields, 4 KB table | `h2-attacks.py hpack-bomb`, `bomb-hold`; asserts memory flat |
-| Slow read, zero window (Imperva 2016; CVE-2019-9511 data dribble) | the client stops reading or sets a zero window and never updates it | the write-stall timer; no DATA frame smaller than 1 KB unless it ends the body | `idle_timeout` per stalled stream | `h2-attacks.py slow-read`, `dribble` |
+| Slow read, zero window (Imperva 2016; CVE-2019-9511 data dribble) | the client stops reading or sets a zero window and never updates it | the write-stall timer; no DATA frame smaller than 1 KB unless it ends the body; the connection closed when a write is not taken for four idle timeouts, whatever the client sends meanwhile (alpha.116, audit section 5 item 12) | `idle_timeout` per stalled stream, four per stalled write | `h2-attacks.py slow-read`, `dribble`; `timeout-regressions.py h2-stalled`, `h2-stalled-chatty`, `h2-goaway-stalled` |
 | Internal data buffering (CVE-2019-9517) | huge window advertised, TCP never read; the server buffers whole responses | responses are pulled from cache, file or origin only when a window and a socket accept them; at most 8 chunks in flight per connection | 512 KB per connection | `h2-attacks.py buffering`; origin bytes read counted |
 | PING flood, SETTINGS flood (CVE-2019-9512, 9515) | frames that each demand a reply | answered, but each beyond 10 per second is a glitch | 100 glitches | `h2-attacks.py ping-flood`, `settings-flood` |
 | Empty frames flood, 0-length headers leak (CVE-2019-9518, 9516) | DATA or HEADERS frames with no payload, no END_STREAM | each is a glitch | 100 | `h2-attacks.py empty-frames` |
