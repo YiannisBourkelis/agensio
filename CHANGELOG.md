@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.117
+## 0.1.0-alpha.117 (2026-10-26)
 
 - **An HTTP/3 attempt refused at the connection ceiling counts once** (the alpha.116 report). A
   ClientHello with a post-quantum key share, as curl and the browsers send, takes two Initial
