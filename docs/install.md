@@ -205,6 +205,11 @@ rollback.
    sudo apt update && sudo apt install agensio
    ```
 
+   The key's fingerprint is `ADD0 06A1 6254 435A 221B 31C5 FE78 1D42 12B6 0F11`. `gpg --show-keys
+   /etc/apt/keyrings/agensio.gpg` (gpg is in the `gnupg` package) prints it under `pub ed25519
+   2026-10-25 [SC]`; a key with any other fingerprint is not this project's, so remove it and the
+   list file rather than install from it.
+
    A release reaches the repository about five minutes after it is tagged; GitHub Pages' CDN
    keeps each file up to ten minutes, so a host may see it that much later. Each suite also lists
    the release before (the files a host with a cached index asks for, and a way back:

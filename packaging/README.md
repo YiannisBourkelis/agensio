@@ -50,6 +50,11 @@ The release workflow's `apt` job signs and publishes the repository to GitHub Pa
 4. Run a release (or delete and re-push the current tag). The workflow writes
    `https://yiannisbourkelis.github.io/agensio/agensio.gpg` and `.../apt/`.
 
+The key in use: `ADD006A16254435A221B31C5FE781D4212B60F11` (ed25519, made 2026-10-25, no
+expiry), the fingerprint `docs/install.md` tells users to check. Its secret and its revocation
+certificate (gpg's `openpgp-revocs.d/<fingerprint>.rev`) are kept in the maintainer's backup; a
+new key changes this line and that one.
+
 Each release publishes the whole site anew: each suite lists that release and the one before it,
 whose files stay so that a host meeting an index GitHub Pages' CDN still caches (up to ten
 minutes) finds what it names; the indexes are also served by hash (`Acquire-By-Hash`). Anything
