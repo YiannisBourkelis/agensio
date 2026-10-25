@@ -2939,6 +2939,22 @@ if python3 -c 'import h2' 2>/dev/null; then
   check "idle 2.6 s then a request on the same connection: HTTP/2 over TLS" "1 1 none open" "$(python3 tests/h2/reload_client.py --tls 8443 / -- sleep 2.6 | awk -F' [|] ' '{print (length($1)>100), (length($2)>100), $3, $4}')"
 fi
 
+# Audit 2.1/2.2: private single-worker instances, including the old timeout-loop hang.
+if [ "$(uname -s)" = Linux ] && python3 -c 'import h2' 2>/dev/null; then
+  timeout_rows=h2-stalled,h1-sendfile,cached-tls
+  if [ -n "$PHPFPM" ]; then
+    timeout_rows+=,fastcgi
+  else
+    echo "skip timeout regression fastcgi (php-fpm not installed)"
+  fi
+  python3 tests/timeout-regressions.py "$BIN" --rows "$timeout_rows" > bench/tmp/timeout-regressions.log 2>&1
+  timeout_result=$?
+  cat bench/tmp/timeout-regressions.log
+  check "audit 2.1/2.2: stalled writers, paused FastCGI and slow cached TLS" "0" "$timeout_result"
+else
+  echo "skip timeout regressions (Linux and python3-h2 required; run in the devbox)"
+fi
+
 # Conformance: h2spec against both listeners. Every case must pass.
 if command -v h2spec >/dev/null; then
   h2spec -h 127.0.0.1 -p 8080 -o 5 > bench/tmp/h2spec-h2c.txt 2>&1 || true
