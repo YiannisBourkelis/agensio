@@ -66,7 +66,9 @@
 #include "core/fields.hpp"
 #include "http2/frame.hpp"
 #include "http2/hpack.hpp"
+#include "http2/hpack_tables.hpp"
 #include "http3/qpack.hpp"
+#include "http3/qpack_tables.hpp"
 #ifdef AGENSIO_HAS_QUIC
 #include "quic/connection.hpp"
 #include "quic_vectors.hpp"
@@ -11529,6 +11531,203 @@ static void test_h2_frame_and_settings() {
 
 
 // ---- QPACK (RFC 9204) over the static table, and the QUIC transport's codecs (RFC 9000, 9001, 9002) ----
+// Both static tables byte for byte against references the generator does not read. The generator
+// reads the RFCs' text, whose table cells wrap, and joined every continuation with a space: until
+// alpha.116 six QPACK values held one ("application/x-www- form-urlencoded"), so a form's
+// Content-Type sent as static index 47 reached PHP altered and every form POST over HTTP/3 failed.
+static void test_static_tables_match_rfcs() {
+    // RFC 9204 appendix A, from the RFC's XML source (rfc-editor.org/rfc/rfc9204.xml, sha256
+    // 0b53d78361a5c60302d88c8658c28e469f071f18b98a846f12c601ae9783780c), whose cells do not wrap.
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 99> kQpackRfc = {{
+        {":authority", ""},  // 0
+        {":path", "/"},  // 1
+        {"age", "0"},  // 2
+        {"content-disposition", ""},  // 3
+        {"content-length", "0"},  // 4
+        {"cookie", ""},  // 5
+        {"date", ""},  // 6
+        {"etag", ""},  // 7
+        {"if-modified-since", ""},  // 8
+        {"if-none-match", ""},  // 9
+        {"last-modified", ""},  // 10
+        {"link", ""},  // 11
+        {"location", ""},  // 12
+        {"referer", ""},  // 13
+        {"set-cookie", ""},  // 14
+        {":method", "CONNECT"},  // 15
+        {":method", "DELETE"},  // 16
+        {":method", "GET"},  // 17
+        {":method", "HEAD"},  // 18
+        {":method", "OPTIONS"},  // 19
+        {":method", "POST"},  // 20
+        {":method", "PUT"},  // 21
+        {":scheme", "http"},  // 22
+        {":scheme", "https"},  // 23
+        {":status", "103"},  // 24
+        {":status", "200"},  // 25
+        {":status", "304"},  // 26
+        {":status", "404"},  // 27
+        {":status", "503"},  // 28
+        {"accept", "*/*"},  // 29
+        {"accept", "application/dns-message"},  // 30
+        {"accept-encoding", "gzip, deflate, br"},  // 31
+        {"accept-ranges", "bytes"},  // 32
+        {"access-control-allow-headers", "cache-control"},  // 33
+        {"access-control-allow-headers", "content-type"},  // 34
+        {"access-control-allow-origin", "*"},  // 35
+        {"cache-control", "max-age=0"},  // 36
+        {"cache-control", "max-age=2592000"},  // 37
+        {"cache-control", "max-age=604800"},  // 38
+        {"cache-control", "no-cache"},  // 39
+        {"cache-control", "no-store"},  // 40
+        {"cache-control", "public, max-age=31536000"},  // 41
+        {"content-encoding", "br"},  // 42
+        {"content-encoding", "gzip"},  // 43
+        {"content-type", "application/dns-message"},  // 44
+        {"content-type", "application/javascript"},  // 45
+        {"content-type", "application/json"},  // 46
+        {"content-type", "application/x-www-form-urlencoded"},  // 47
+        {"content-type", "image/gif"},  // 48
+        {"content-type", "image/jpeg"},  // 49
+        {"content-type", "image/png"},  // 50
+        {"content-type", "text/css"},  // 51
+        {"content-type", "text/html; charset=utf-8"},  // 52
+        {"content-type", "text/plain"},  // 53
+        {"content-type", "text/plain;charset=utf-8"},  // 54
+        {"range", "bytes=0-"},  // 55
+        {"strict-transport-security", "max-age=31536000"},  // 56
+        {"strict-transport-security", "max-age=31536000; includesubdomains"},  // 57
+        {"strict-transport-security", "max-age=31536000; includesubdomains; preload"},  // 58
+        {"vary", "accept-encoding"},  // 59
+        {"vary", "origin"},  // 60
+        {"x-content-type-options", "nosniff"},  // 61
+        {"x-xss-protection", "1; mode=block"},  // 62
+        {":status", "100"},  // 63
+        {":status", "204"},  // 64
+        {":status", "206"},  // 65
+        {":status", "302"},  // 66
+        {":status", "400"},  // 67
+        {":status", "403"},  // 68
+        {":status", "421"},  // 69
+        {":status", "425"},  // 70
+        {":status", "500"},  // 71
+        {"accept-language", ""},  // 72
+        {"access-control-allow-credentials", "FALSE"},  // 73
+        {"access-control-allow-credentials", "TRUE"},  // 74
+        {"access-control-allow-headers", "*"},  // 75
+        {"access-control-allow-methods", "get"},  // 76
+        {"access-control-allow-methods", "get, post, options"},  // 77
+        {"access-control-allow-methods", "options"},  // 78
+        {"access-control-expose-headers", "content-length"},  // 79
+        {"access-control-request-headers", "content-type"},  // 80
+        {"access-control-request-method", "get"},  // 81
+        {"access-control-request-method", "post"},  // 82
+        {"alt-svc", "clear"},  // 83
+        {"authorization", ""},  // 84
+        {"content-security-policy", "script-src 'none'; object-src 'none'; base-uri 'none'"},  // 85
+        {"early-data", "1"},  // 86
+        {"expect-ct", ""},  // 87
+        {"forwarded", ""},  // 88
+        {"if-range", ""},  // 89
+        {"origin", ""},  // 90
+        {"purpose", "prefetch"},  // 91
+        {"server", ""},  // 92
+        {"timing-allow-origin", "*"},  // 93
+        {"upgrade-insecure-requests", "1"},  // 94
+        {"user-agent", ""},  // 95
+        {"x-forwarded-for", ""},  // 96
+        {"x-frame-options", "deny"},  // 97
+        {"x-frame-options", "sameorigin"},  // 98
+    }};
+    // RFC 7541 appendix A, as python-hpack holds it (hpack.table.HeaderTable.STATIC_TABLE), an
+    // implementation of its own: the RFC has no XML source, and its text is what the generator reads.
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 61> kHpackRfc = {{
+        {":authority", ""},  // 1
+        {":method", "GET"},  // 2
+        {":method", "POST"},  // 3
+        {":path", "/"},  // 4
+        {":path", "/index.html"},  // 5
+        {":scheme", "http"},  // 6
+        {":scheme", "https"},  // 7
+        {":status", "200"},  // 8
+        {":status", "204"},  // 9
+        {":status", "206"},  // 10
+        {":status", "304"},  // 11
+        {":status", "400"},  // 12
+        {":status", "404"},  // 13
+        {":status", "500"},  // 14
+        {"accept-charset", ""},  // 15
+        {"accept-encoding", "gzip, deflate"},  // 16
+        {"accept-language", ""},  // 17
+        {"accept-ranges", ""},  // 18
+        {"accept", ""},  // 19
+        {"access-control-allow-origin", ""},  // 20
+        {"age", ""},  // 21
+        {"allow", ""},  // 22
+        {"authorization", ""},  // 23
+        {"cache-control", ""},  // 24
+        {"content-disposition", ""},  // 25
+        {"content-encoding", ""},  // 26
+        {"content-language", ""},  // 27
+        {"content-length", ""},  // 28
+        {"content-location", ""},  // 29
+        {"content-range", ""},  // 30
+        {"content-type", ""},  // 31
+        {"cookie", ""},  // 32
+        {"date", ""},  // 33
+        {"etag", ""},  // 34
+        {"expect", ""},  // 35
+        {"expires", ""},  // 36
+        {"from", ""},  // 37
+        {"host", ""},  // 38
+        {"if-match", ""},  // 39
+        {"if-modified-since", ""},  // 40
+        {"if-none-match", ""},  // 41
+        {"if-range", ""},  // 42
+        {"if-unmodified-since", ""},  // 43
+        {"last-modified", ""},  // 44
+        {"link", ""},  // 45
+        {"location", ""},  // 46
+        {"max-forwards", ""},  // 47
+        {"proxy-authenticate", ""},  // 48
+        {"proxy-authorization", ""},  // 49
+        {"range", ""},  // 50
+        {"referer", ""},  // 51
+        {"refresh", ""},  // 52
+        {"retry-after", ""},  // 53
+        {"server", ""},  // 54
+        {"set-cookie", ""},  // 55
+        {"strict-transport-security", ""},  // 56
+        {"transfer-encoding", ""},  // 57
+        {"user-agent", ""},  // 58
+        {"vary", ""},  // 59
+        {"via", ""},  // 60
+        {"www-authenticate", ""},  // 61
+    }};
+    for (std::size_t i = 0; i < kQpackRfc.size(); ++i)
+        if (qpack::kStaticTable[i].name != kQpackRfc[i].first || qpack::kStaticTable[i].value != kQpackRfc[i].second) {
+            std::printf("FAIL qpack static %zu: \"%.*s: %.*s\", RFC 9204 \"%.*s: %.*s\"\n", i,
+                        static_cast<int>(qpack::kStaticTable[i].name.size()), qpack::kStaticTable[i].name.data(),
+                        static_cast<int>(qpack::kStaticTable[i].value.size()), qpack::kStaticTable[i].value.data(),
+                        static_cast<int>(kQpackRfc[i].first.size()), kQpackRfc[i].first.data(),
+                        static_cast<int>(kQpackRfc[i].second.size()), kQpackRfc[i].second.data());
+            ++failures;
+        }
+    for (std::size_t i = 0; i < kHpackRfc.size(); ++i)
+        if (hpack::kStaticTable[i].name != kHpackRfc[i].first || hpack::kStaticTable[i].value != kHpackRfc[i].second) {
+            std::printf("FAIL hpack static %zu: \"%.*s: %.*s\", RFC 7541 \"%.*s: %.*s\"\n", i + 1,
+                        static_cast<int>(hpack::kStaticTable[i].name.size()), hpack::kStaticTable[i].name.data(),
+                        static_cast<int>(hpack::kStaticTable[i].value.size()), hpack::kStaticTable[i].value.data(),
+                        static_cast<int>(kHpackRfc[i].first.size()), kHpackRfc[i].first.data(),
+                        static_cast<int>(kHpackRfc[i].second.size()), kHpackRfc[i].second.data());
+            ++failures;
+        }
+    // The lookups the encoders use find the corrected entries.
+    unsigned i = 0;
+    CHECK(qpack::static_pair("content-type", "application/x-www-form-urlencoded", i) && i == 47);
+    CHECK(qpack::static_pair("content-type", "application/javascript", i) && i == 45);
+}
+
 static void test_qpack() {
     unsigned i = 0;
     CHECK(qpack::static_name("server", i) && i == 92);
@@ -12460,6 +12659,7 @@ int main() {
     test_h2_frame_and_settings();
     test_hpack();
     test_request_assembly_cookies();
+    test_static_tables_match_rfcs();
     test_qpack();
     test_qpack_dynamic();
     test_qpack_encoder();

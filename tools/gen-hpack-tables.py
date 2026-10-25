@@ -64,10 +64,19 @@ for line in qpack_text:
         continue
     c = re.match(r"^\s*\|\s*\|\s*\|\s*(\S.*?)\s*\|\s*$", line)
     if c and qstatic:
-        qstatic[-1][1] += " " + c.group(1)
+        # The text wraps a long cell after a hyphen or a slash, which keep no space (the row
+        # "application/x-www-" goes on with "form-urlencoded"), or at a space, which the break takes
+        # ("text/html;" goes on with "charset=utf-8"). Until alpha.116 every continuation was joined
+        # with a space, which put one into six values; tests.cpp holds the table to the RFC's XML.
+        prev = qstatic[-1][1]
+        qstatic[-1][1] = prev + ("" if prev.endswith(("-", "/")) else " ") + c.group(1)
 assert len(qstatic) == 99, len(qstatic)
 assert qstatic[0] == [":authority", ""] and qstatic[17] == [":method", "GET"] and qstatic[92][0] == "server", qstatic[92]
 assert qstatic[85] == ["content-security-policy", "script-src 'none'; object-src 'none'; base-uri 'none'"], qstatic[85]
+assert qstatic[47] == ["content-type", "application/x-www-form-urlencoded"], qstatic[47]
+assert qstatic[52] == ["content-type", "text/html; charset=utf-8"], qstatic[52]
+assert qstatic[54] == ["content-type", "text/plain;charset=utf-8"], qstatic[54]
+assert qstatic[58] == ["strict-transport-security", "max-age=31536000; includesubdomains; preload"], qstatic[58]
 
 # ---- Huffman code (appendix B) ----
 codes = {}

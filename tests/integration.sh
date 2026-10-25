@@ -2336,6 +2336,14 @@ HDR
   [ $H3 = 1 ] && check "response_headers over HTTP/3: the same fields on a static page and a PHP answer" \
     "cache-control=no-cache|$RP|$NS|x-frame-options=SAMEORIGIN ; $RP|$NS|x-frame-options=DENY" \
     "$(hd https://h.wild.test:8484/ --http3-only) ; $(hd https://h.wild.test:8484/app.php --http3-only)"
+  # A form POST over HTTP/3 (the alpha.115 report): curl's nghttp3, as browsers do, sends a value that
+  # matches the QPACK static table exactly as its index, and until alpha.116 the table held
+  # "application/x-www- form-urlencoded" and five more values with a space RFC 9204 does not have, so
+  # PHP parsed no field and every form and login over HTTP/3 failed.
+  fp() { curl -sk --resolve h.wild.test:8484:127.0.0.1 "$@" https://h.wild.test:8484/form.php; }
+  [ $H3 = 1 ] && check "a form POST and a fetch() text body reach PHP as sent, over HTTP/2 and HTTP/3 alike (QPACK static entries 47, 54, 30)" \
+    "application/x-www-form-urlencoded|2|*/* ; application/x-www-form-urlencoded|2|*/* ; text/plain;charset=utf-8|0|application/dns-message ; text/plain;charset=utf-8|0|application/dns-message" \
+    "$(fp --http2 --data 'a=1&b=2') ; $(fp --http3-only --data 'a=1&b=2') ; $(fp --http2 -H 'content-type: text/plain;charset=utf-8' -H 'accept: application/dns-message' --data x) ; $(fp --http3-only -H 'content-type: text/plain;charset=utf-8' -H 'accept: application/dns-message' --data x)"
   # A rule's lifetime and what the application says to caches (docs/headers.md 2.4, the review's D4):
   # PHP's session no-store stands; an answer with a cookie, or to a request with Authorization, gets
   # the lifetime private (RFC 9111 7.3, 3.5); one with a lifetime of its own gets the rule's.

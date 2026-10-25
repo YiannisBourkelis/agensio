@@ -22,6 +22,6 @@ Keep this list in step with the code: a new protocol feature adds its RFC here f
 | `rfc9001.txt` | Using TLS to Secure QUIC | `src/quic/crypto.*`, `src/quic/tls.*` |
 | `rfc9002.txt` | QUIC Loss Detection and Congestion Control | `src/quic/recovery.*`, `src/quic/ack.hpp` |
 | `rfc9114.txt` | HTTP/3 | `src/http3/` (`docs/design-http3.md` section 7) |
-| `rfc9204.txt` | QPACK: Field Compression for HTTP/3 | `src/http3/qpack.*` |
+| `rfc9204.txt` | QPACK: Field Compression for HTTP/3 | `src/http3/qpack.*`; appendix A is `src/http3/qpack_tables.hpp`, generated from this text by `tools/gen-hpack-tables.py` and held byte for byte to the RFC's XML source by `test_static_tables_match_rfcs` (a cell of the text wraps after a hyphen or a slash without a space: joined with one, six values were wrong until alpha.116) |
 | `rfc9438.txt` | CUBIC for Fast and Long-Distance Networks | `src/quic/recovery.*` (phase I3) |
 | `rfc8899.txt` | Packetization Layer Path MTU Discovery for Datagram Transports | `src/quic/connection.*` (the MTU probe, phase I1b) |

@@ -2,6 +2,25 @@
 
 ## 0.1.0-alpha.116
 
+- **Every HTML form POST over HTTP/3 failed: logins and forms did not work for browsers using
+  HTTP/3** (the test VPS's report). Six values of the QPACK static table (RFC 9204 appendix A) held
+  a space the RFC does not have, among them `application/x-www-form-urlencoded`, held as
+  `application/x-www- form-urlencoded`. A browser sends a form's Content-Type as a reference to that
+  entry, so the request reached the application with an altered Content-Type: PHP parsed no field
+  (`$_POST` empty, a WordPress login came back as the bare form) and Rails answered 406. The body
+  itself arrived intact.
+  - Present since HTTP/3 was added: from alpha.110 in the Debian 13 package, the first with HTTP/3,
+    and from alpha.22 in builds from source with OpenSSL 3.5. HTTP/1.1 and HTTP/2 were never affected.
+  - The other values: `application/dns-message` (indexes 30 and 44), `application/javascript` (45),
+    `text/plain;charset=utf-8` (54, the Content-Type of `fetch()` and `sendBeacon` text bodies) and
+    `public, max-age=31536000` (41). Field names were all right.
+  - The cause: `tools/gen-hpack-tables.py` builds the table from the RFC's text, whose table cells
+    wrap, and joined every wrapped line with a space; a cell wraps after a hyphen or a slash without
+    one. The generator now joins those without a space.
+  - A unit test holds both static tables byte for byte to references the generator does not read:
+    QPACK's to the RFC's XML source, HPACK's to python-hpack's. The integration suite posts a form
+    and a `text/plain;charset=utf-8` body to PHP over HTTP/2 and HTTP/3 and expects the same fields.
+
 - **An HTTP/2 connection fed bytes that complete no frame is closed at the idle timeout** (audit
   item 2.3). Every read restarted the idle clock, so a client sending one byte of a frame every
   14 s, with no stream open, held the connection and its slot indefinitely.

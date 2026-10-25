@@ -895,7 +895,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   `http/stream_pool.hpp`, the same dispatch as HTTP/2, answers as HEADERS and DATA frames
   with the body referenced (a cache entry, a file read in 64 KB windows), request bodies
   pulled from the QUIC stream's buffer so credit returns as the handler reads; QPACK
-  (`http3/qpack.*`): the decoder with its 4 KB dynamic table, the client's encoder stream
+  (`http3/qpack.*`; the static table generated from the RFC's text by `tools/gen-hpack-tables.py`
+  and held byte for byte to RFC 9204's XML source by `test_static_tables_match_rfcs`, HPACK's to
+  python-hpack's: until alpha.116 six QPACK values held a space from the text's line wrapping, so
+  every form POST over HTTP/3 reached the application with a broken Content-Type): the decoder with its 4 KB dynamic table, the client's encoder stream
   and our decoder stream, sections waiting for inserts (16 at most), the rules-once marks
   shared with HPACK; since 2026-09-25 our answers go through the client's dynamic table
   too (`qpack::Encoder`, at most 1 KB: `server`, `date` and `content-type` one index byte
