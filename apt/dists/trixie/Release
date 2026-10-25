@@ -1,0 +1,21 @@
+Acquire-By-Hash: yes
+Architectures: amd64
+Codename: trixie
+Components: main
+Date: Sun, 25 Oct 2026 23:52:54 +0000
+Description: agensio web server (trixie)
+Label: agensio
+Origin: agensio
+Suite: trixie
+MD5Sum:
+ 1b0d4ce44b9daa565f2186e3ba8aaa4f             1740 main/binary-amd64/Packages
+ 0e4dabc024e26a12a907fc973aea7a2c              793 main/binary-amd64/Packages.gz
+SHA1:
+ 5f545ccde1444b6dc9bd78fb6843cbb465214b9d             1740 main/binary-amd64/Packages
+ ea132257da08e65d4cd8b26eb345e1a4c5da9ea8              793 main/binary-amd64/Packages.gz
+SHA256:
+ b9cf990e016888d0c526dfbaf7d579bcfd1f11cf27a6db9879633414df716418             1740 main/binary-amd64/Packages
+ 1476c790bfca01c8bf84869b261da01a1a9838bfc91cf2c10e60e8ed38b0ed81              793 main/binary-amd64/Packages.gz
+SHA512:
+ 0010fe88539cc5cefb246d454719932983b6b109727f157484afdca8636dcf99773ff1fe49ef686e3936303b286d1c21cd3cbaa74ba1ef36fdcef53cd8ad5b24             1740 main/binary-amd64/Packages
+ fd9e7544b5d72eea592f67a672b82994ba77eacef718fdb1c9f526dcb03691d989eb69cc9e0ef0953be3a3d834531bc6f6d91576eda403710c5a43fd85cc54d7              793 main/binary-amd64/Packages.gz
