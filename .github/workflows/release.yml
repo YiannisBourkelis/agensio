@@ -9,9 +9,6 @@ permissions:
 jobs:
   packages:
     runs-on: ubuntu-22.04   # oldest glibc we build against: the .deb runs on Debian 12+, Ubuntu 22.04+
-    env:
-      # `secrets` cannot be read in a step's `if`; the job env carries the answer instead.
-      HAVE_APT_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
       # Ubuntu 22.04 ships CMake 3.22, GCC 11 and asio 1.18: too old for this project. A
@@ -38,6 +35,11 @@ jobs:
           name: rpm
           path: build/*.rpm
           retention-days: 3
+      - uses: actions/upload-artifact@v4  # the APT repository's stable suite (the apt job)
+        with:
+          name: deb-stable
+          path: build/agensio_*_amd64.deb
+          retention-days: 3
       - name: smoke-install the .deb
         run: |
           sudo dpkg -i build/agensio_*.deb
@@ -56,36 +58,6 @@ jobs:
         # The version's section of CHANGELOG.md becomes the release notes; the debian13 job, which
         # runs beside this one, creates the release instead if it finishes first.
         run: packaging/release-upload.sh build/*.deb build/*.rpm
-      - name: build the APT repository
-        if: ${{ env.HAVE_APT_KEY == 'true' }}
-        env:
-          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-        run: |
-          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
-          keyid=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $5; exit}')
-          mkdir -p site/apt/pool/main site/apt/dists/stable/main/binary-amd64
-          cp build/*.deb site/apt/pool/main/
-          cd site/apt
-          dpkg-scanpackages --arch amd64 pool/ > dists/stable/main/binary-amd64/Packages
-          gzip -k9 dists/stable/main/binary-amd64/Packages
-          apt-ftparchive -o APT::FTPArchive::Release::Origin=agensio -o APT::FTPArchive::Release::Label=agensio \
-            -o APT::FTPArchive::Release::Suite=stable -o APT::FTPArchive::Release::Codename=stable \
-            -o APT::FTPArchive::Release::Architectures=amd64 -o APT::FTPArchive::Release::Components=main \
-            release dists/stable > dists/stable/Release
-          gpg --batch --yes -u "$keyid" -abs -o dists/stable/Release.gpg dists/stable/Release
-          gpg --batch --yes -u "$keyid" --clearsign -o dists/stable/InRelease dists/stable/Release
-          gpg --armor --export "$keyid" > ../agensio.gpg
-          cd ../..
-          printf '<h1>agensio packages</h1><p>APT: see docs/install.md</p>' > site/index.html
-      - name: publish the APT repository (GitHub Pages)
-        if: ${{ env.HAVE_APT_KEY == 'true' }}
-        env:
-          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site
-          keep_files: true
 
   debian13:
     # The .deb built on Debian 13 against its own OpenSSL 3.5, so it serves HTTP/3; the packages
@@ -118,6 +90,11 @@ jobs:
           build/agensio -t -c "$d/h3.toml"
       - name: package
         run: cd build && cpack -G DEB && ls -la *.deb
+      - uses: actions/upload-artifact@v4  # the APT repository's trixie suite (the apt job)
+        with:
+          name: deb-trixie
+          path: build/agensio_*+deb13_amd64.deb
+          retention-days: 3
       - name: smoke-install the .deb
         run: |
           apt-get install -y ./build/agensio_*+deb13_amd64.deb
@@ -132,6 +109,59 @@ jobs:
           # In the container the checkout belongs to another uid and git refuses to read it.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           packaging/release-upload.sh build/agensio_*+deb13_amd64.deb
+
+  apt:
+    # The signed APT repository on GitHub Pages (packaging/apt-repo.sh, docs/install.md): the suite
+    # "stable" with the packages job's .deb, "trixie" with the debian13 job's. It waits for both, so
+    # the release's files still go up as soon as each job ends, and the repository follows once.
+    # The site as published (the gh-pages branch) gives the previous release, which each suite keeps
+    # beside the new one; the branch is replaced by one commit each time, so old packages leave its
+    # history too. Skipped until the APT_GPG_PRIVATE_KEY secret exists (packaging/README.md).
+    needs: [packages, debian13]
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    env:
+      # `secrets` cannot be read in a step's `if`; the job env carries the answer instead.
+      HAVE_APT_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY != '' }}
+    steps:
+      - name: tools
+        if: ${{ env.HAVE_APT_KEY == 'true' }}
+        run: apt-get update && apt-get install -y --no-install-recommends ca-certificates git gnupg apt-utils dpkg-dev
+      - uses: actions/checkout@v4
+        if: ${{ env.HAVE_APT_KEY == 'true' }}
+      - uses: actions/download-artifact@v4
+        if: ${{ env.HAVE_APT_KEY == 'true' }}
+        with:
+          pattern: deb-*
+          path: debs
+          merge-multiple: true
+      - name: build the repository on the published one and publish it (gh-pages)
+        if: ${{ env.HAVE_APT_KEY == 'true' }}
+        shell: bash
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          export GNUPGHOME=$(mktemp -d)
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          key=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $5; exit}')
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # The previous release from the branch; none on the first run, but a branch that exists
+          # and cannot be read stops the job rather than publish without it.
+          rc=0; git ls-remote --exit-code --heads "$remote" gh-pages >/dev/null || rc=$?
+          case $rc in
+            0) git clone -q --depth 1 --branch gh-pages "$remote" previous ;;
+            2) mkdir previous ;;
+            *) echo "cannot read the gh-pages branch (git ls-remote exited $rc)"; exit 1 ;;
+          esac
+          packaging/apt-repo.sh --out site --key "$key" --previous previous debs/*.deb
+          cd site
+          git init -q -b gh-pages
+          git add -A
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -q -m "APT repository for $GITHUB_REF_NAME"
+          git push -q --force "$remote" gh-pages
 
   arch:
     # A binary pacman package from packaging/arch/PKGBUILD, built in an Arch container and

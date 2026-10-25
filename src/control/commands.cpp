@@ -562,7 +562,7 @@ std::optional<Finding> http3_finding(const BuildFacts& b, const Config& cfg) {
     return Finding{"info", "http3_package_available", "",
                    "this agensio was built without HTTP/3 (the package for Debian 12 and Ubuntu 22.04), but this system's " + b.openssl +
                        " has the QUIC TLS API, so HTTP/3 could be served here",
-                   "on Debian 13 install the release's .deb with deb13 in its name (docs/install.md); elsewhere build from source on this system. "
+                   "on Debian 13 use the APT repository's trixie suite, or install the release's .deb with deb13 in its name (docs/install.md); elsewhere build from source on this system. "
                    "Then list \"h3\" in [server] protocols and open the TLS ports over UDP (docs/configuration.md 17)"};
 }
 

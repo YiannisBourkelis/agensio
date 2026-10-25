@@ -31,14 +31,15 @@ before the release), RPM `0.1.0-0.1.alpha.1`, Arch `0.1.0alpha1-1`.
 
 ## Publishing the APT repository (one-time setup)
 
-The release workflow signs and publishes `dists/stable` to GitHub Pages only when the
-repository secret `APT_GPG_PRIVATE_KEY` exists.
+The release workflow's `apt` job signs and publishes the repository to GitHub Pages
+(`packaging/apt-repo.sh`: suites `stable` and `trixie`) only when the repository secret
+`APT_GPG_PRIVATE_KEY` exists; `tests/apt-repo.sh` builds and installs from it locally.
 
 1. A signing key without a passphrase (the workflow cannot type one), kept only in the
    GitHub secret and in a backup you control:
 
    ```sh
-   gpg --batch --quick-gen-key --passphrase '' "agensio packages <yiannis@grbytes.com>" ed25519 sign never
+   gpg --batch --pinentry-mode loopback --passphrase '' --quick-gen-key "agensio packages <yiannis@grbytes.com>" ed25519 sign never
    gpg --armor --export-secret-keys "agensio packages" > agensio-apt-signing.key   # the secret; keep it safe
    ```
 
@@ -49,6 +50,9 @@ repository secret `APT_GPG_PRIVATE_KEY` exists.
 4. Run a release (or delete and re-push the current tag). The workflow writes
    `https://yiannisbourkelis.github.io/agensio/agensio.gpg` and `.../apt/`.
 
-Every later release replaces the index with its own packages (older files stay on the
-branch, unindexed). Debian sorts `0.1.0~alpha.2` before `0.1.0~alpha.3` and before
+Each release publishes the whole site anew: each suite lists that release and the one before it,
+whose files stay so that a host meeting an index GitHub Pages' CDN still caches (up to ten
+minutes) finds what it names; the indexes are also served by hash (`Acquire-By-Hash`). Anything
+older is dropped, and the branch is one commit each time, so neither the site nor the repository's
+history grows with the releases. Debian sorts `0.1.0~alpha.2` before `0.1.0~alpha.3` and before
 `0.1.0`, so `apt upgrade` follows the tags in order.

@@ -194,16 +194,22 @@ rollback.
    `sudo apt purge agensio` also removes `/etc/agensio` and `/var/log/agensio`.
 
    **Debian, Ubuntu, from the APT repository** (available once the release signing key is
-   set up, then `apt update` follows new releases by itself). It carries the build for Debian 12
-   and later, without HTTP/3; on Debian 13 a `deb13` file installed from the release page would
-   be replaced by it at the next upgrade, so for HTTP/3 install from the release page and leave the
-   repository out:
+   set up, `packaging/README.md`; then `sudo apt update && sudo apt upgrade` follows new
+   releases). Two suites, the same two builds as the release page: `trixie` on Debian 13 and
+   later, with HTTP/3, and `stable` on Debian 12 and Ubuntu 22.04 and later, without it:
 
    ```sh
-   curl -fsSL https://yiannisbourkelis.github.io/agensio/agensio.gpg | sudo tee /usr/share/keyrings/agensio.gpg >/dev/null
-   echo "deb [signed-by=/usr/share/keyrings/agensio.gpg] https://yiannisbourkelis.github.io/agensio/apt stable main" | sudo tee /etc/apt/sources.list.d/agensio.list
+   sudo install -m 0755 -d /etc/apt/keyrings
+   curl -fsSL https://yiannisbourkelis.github.io/agensio/agensio.gpg | sudo tee /etc/apt/keyrings/agensio.gpg >/dev/null
+   echo "deb [signed-by=/etc/apt/keyrings/agensio.gpg] https://yiannisbourkelis.github.io/agensio/apt trixie main" | sudo tee /etc/apt/sources.list.d/agensio.list   # stable instead of trixie on Debian 12 and Ubuntu
    sudo apt update && sudo apt install agensio
    ```
+
+   A release reaches the repository about five minutes after it is tagged; GitHub Pages' CDN
+   keeps each file up to ten minutes, so a host may see it that much later. Each suite also lists
+   the release before (the files a host with a cached index asks for, and a way back:
+   `sudo apt install agensio=<previous version>`). A Debian 13 host that installed the `deb13`
+   file from the release page moves to the repository with the `trixie` line.
 
    **Fedora, RHEL 9+.** The `.rpm` from the release page (`sudo dnf install ./agensio-0.1.0-0.1.alpha3.x86_64.rpm`),
    or COPR once enabled: `sudo dnf copr enable yiannis/agensio && sudo dnf install agensio`.

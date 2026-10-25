@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.0-alpha.115
+
+- **The APT repository has two suites, and is ready to go live** once the release signing key is set
+  up (`packaging/README.md`). It had never been published: the workflow needed a key that was not
+  set up, and would have carried only the build without HTTP/3.
+  - `trixie` holds the `+deb13` build with HTTP/3 for Debian 13; `stable` holds the build for Debian
+    12 and Ubuntu 22.04 and later. `docs/install.md` gives the line for each.
+  - A new `apt` job builds the repository once both builds are done; the release's files still go
+    up as soon as each job ends. A release reaches the repository about five minutes after its tag.
+  - GitHub Pages' CDN keeps a file up to ten minutes, so a host may meet a new `InRelease` with an
+    old index, or the reverse. Each suite therefore also lists the release before (its files kept,
+    which also lets a host go back one release), and the indexes are served by hash
+    (`Acquire-By-Hash`), as Debian's archive does.
+  - Anything older is dropped, and the `gh-pages` branch is replaced by one commit each time, so the
+    site and the repository's history stay the size of two releases.
+  - The public key is published binary; the earlier, never-run step wrote it armored into
+    `agensio.gpg`, which apt's `signed-by` does not read.
+  - `tests/apt-repo.sh` builds three releases from stand-in packages and installs from them on
+    Debian 12 and Debian 13 containers, including both cached mixes.
+
 ## 0.1.0-alpha.114 (2026-10-24)
 
 - **A tunnel write that does not finish within `proxy.send_timeout` ends the tunnel** (the first of

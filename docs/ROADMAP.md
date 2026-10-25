@@ -972,7 +972,9 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       `runner` account cannot read `/etc/agensio` (0750) and has no `/usr/sbin` on PATH;
       `secrets` is not readable in a step `if`; `gh` inside a container must be told the
       repository because the checkout belongs to another uid; libc++ has no `std::jthread`.
-      Remaining: the GPG key and Pages setup for the APT repository, the COPR project and
+      The APT repository (2026-10-24, `packaging/apt-repo.sh`, the `apt` job): suites `stable` and
+      `trixie` (the `+deb13` build), each the release and the one before, indexes by hash, tested by
+      `tests/apt-repo.sh`. Remaining: the GPG key and Pages setup for it, the COPR project and
       the AUR submission (need accounts), Docker image, Homebrew formula, aarch64 builds.
 - [ ] H7b CI additions: ASan/UBSan builds and the fuzzers on a schedule; Docker image;
       Homebrew formula; aarch64 packages.
