@@ -36,7 +36,7 @@ rows, three rounds) is flat within noise; its one row above 3 %, plain 100 KB at
 | 2.2 cached body in one write | **fixed in alpha.57, regression-proven 2026-10-25**: a memory body beyond the first write and one piece goes out in `stream_chunk_size` (64 KB) pieces, each refreshing the idle clock in `on_write`, over TLS and on plain sockets without sendfile; the first write is unchanged. Previously verified on the test VPS (alpha.57 report, finding 1): with idle_timeout 2 and 3,000,000 bytes at 300 KB/s, alpha.56 cut at 769,798 bytes over TLS and 740,942 on plain HTTP without sendfile; alpha.57 delivered it whole in 10.0 s | `tests/timeout-regressions.py` row `cached-tls`, called by `tests/integration.sh`: with idle_timeout 15, a 4 KB receive buffer and a 2 MiB cached file at 100 KiB/s, alpha.56 cuts at 1,572,614 bytes; alpha.57 receives all 2,097,152 bytes in 20.518 s. Section 5.1 records the loopback MSS setting needed to make this a regression test, not a pass on both tags |
 | 2.5 tunnels | **fixed in alpha.114**: a tunnel write to either side not finished within `proxy.send_timeout` (30 s) ends the tunnel, said at info in the error log; a quiet tunnel, nothing waiting, is not affected, and `tunnel_timeout` keeps its meaning | `tests/integration.sh`, a private instance with `send_timeout = 2`: on `v0.1.0-alpha.113` the stalled tunnels stayed (the flood's origin held until its client let go, the sink's open), on alpha.114 both are cut within the limit; a quiet tunnel and `tunnel_timeout` are checked on both |
 | 2.5 watchdog | **decided against** (2026-10-24, the owner): no path on the current code was found that keeps a worker from turning (the 2026-10-04 cause and 2.1 are fixed, tunnels bounded); what is left is storage that stops answering, a hung network filesystem under a docroot or the log directory, whose file and log calls run on the worker as nginx's do, and future bugs. External checks (a monitor or load balancer probing the sites) detect a hung server whatever the cause; revisit if a stall is seen or docroots move to network storage | none: nothing built |
-| 2.3 HTTP/2 idle clock | **fixed in alpha.116, regression-proven 2026-10-25**: the idle close reads `last_progress_` (a completed frame, the preface, a write, the start), not every read; the header-block deadline is checked whether or not a stream is open (a request's stream opens only when its block completes). Still open from the item: the connection-level WINDOW_UPDATE outside the glitch budget (section 5, item 8), measured in section 5.3 | `tests/timeout-regressions.py` rows `h2-idle` and `h2-header-block`, default rows: alpha.115 kept both dribblers open at 17 s and the unfinished header block past 18 s, alpha.116 closes the dribblers at 15.000 s and the block at 15.043 s. Sections 5.2 and 5.3 |
+| 2.3 HTTP/2 idle clock | **fixed in alpha.116, regression-proven 2026-10-25**: the idle close reads `last_progress_` (a completed frame, the preface, a write, the start), not every read; the header-block deadline is checked whether or not a stream is open (a request's stream opens only when its block completes). The connection-level WINDOW_UPDATE outside the glitch budget (section 5, item 8, measured in section 5.3) is **decided against** (2026-10-25, the owner): 52.7 ns per 13-byte update with 128 streams open is about 4 ns of server CPU per byte the client sends, below what ordinary requests cost per byte, so it amplifies nothing; volume from one address is the firewall's | `tests/timeout-regressions.py` rows `h2-idle` and `h2-header-block`, default rows: alpha.115 kept both dribblers open at 17 s and the unfinished header block past 18 s, alpha.116 closes the dribblers at 15.000 s and the block at 15.043 s. Sections 5.2 and 5.3 |
 | 2.4 QUIC handshake deadline | **fixed in alpha.116, regression-proven 2026-10-25**: a handshake must finish within `idle_timeout` of `created_` whatever arrives, else the connection is dropped silently; only a packet that opens restarts the idle timer (RFC 9000 10.1), every datagram still counts for the amplification limit (8.1). The QUIC accept path asks the worker's connection ceiling before Retry: over it a new Initial gets CONNECTION_REFUSED (RFC 9000 20.1), stateless, counted with the TCP refusals | `tests/h3-attacks.py` rows `handshake-deadline`, `handshake-authenticated` and `connection-ceiling`, default rows, and `handshake-budget`, opt-in: alpha.115 kept the dribbled connection past 16 s and completed both QUIC handshakes over the ceiling; alpha.116 retires it at 15.0 s with Retry auto and always, a new handshake accepted beside it, and refuses both over-limit clients with CONNECTION_REFUSED. Sections 5.2 to 5.4 |
 
 ## 1. The claims, one by one
@@ -211,7 +211,8 @@ documents are what reviewers read; they should say what the code does.
   builds is queued and the socket closed when the writer never drains was not traced.
 - The chunked decoder accepts a bare LF nowhere, the head parser accepts it as a line
   terminator (`parser.cpp:27-36`); the asymmetry is deliberate but undocumented.
-- `fuzz_chunked`, `fuzz_fcgi` and `fuzz_hpack_roundtrip` have no recorded run counts.
+- `fuzz_chunked`, `fuzz_fcgi` and `fuzz_hpack_roundtrip` have no recorded run counts
+  (recorded since, in `security-control-plane.md`'s fuzz tables).
 
 ## 3. Feature gaps that are real, and whether they matter here
 
@@ -318,14 +319,36 @@ a one-off.
 8. **HTTP/2 floods not in the glitch budget**: connection-level WINDOW_UPDATEs of 1 KB
    at the line rate with 128 open streams, CPU per second measured; a SETTINGS flood at
    just under 10 a second; both against the sanitizer build. WINDOW_UPDATE is measured
-   in section 5.3, including a sanitizer run; the SETTINGS reproduction remains to do.
+   in section 5.3, including a sanitizer run, and left as it is (section 0, row 2.3); the
+   SETTINGS reproduction remains to do.
 9. **HTTP/1 body dribble**: one byte per 59 s up to `max_body_size`; parity with nginx,
    so the check is only that the connection is counted idle for health and that the
-   ceiling's refusal shape names it.
-10. **The GOAWAY path of `connection_error`** with a writer that never drains (2.11).
-11. **The host itself**: `health_check` on the VPS says whether the nftables table and
-    the jails rendered on 2026-10-02 are applied; the per-address limits this document
-    leans on exist only once they are.
+   ceiling's refusal shape names it. By the code (2026-10-25) it is not counted: the
+   HTTP/1 `shed()` returns while a body is pending or a head is incomplete (`body_pending_`,
+   `in_len_ > 0`), the only place `Worker::idle` is raised, and HTTP/2 raises it only with no
+   stream open. A ceiling filled by such clients from many addresses would then get
+   `refusal_finding`'s third reading, "legitimate load from many addresses: raise the
+   open-file limit", rather than slow clients. To reproduce before deciding anything.
+10. **The GOAWAY path of `connection_error`** with a writer that never drains (2.11). By the
+    code (2026-10-25) it is bounded: after `connection_error` the read loop stops
+    (`closing_after_write_`), so nothing refreshes `last_activity_`, and `check_timeouts`
+    closes a connection whose writer does not drain at four idle timeouts. To confirm live.
+11. **The host itself** (**done 2026-10-25**): `health_check` on the test VPS (alpha.115)
+    reports no `firewall_limits_missing`, `fail2ban_missing` or `protection_unchecked`, so
+    the nftables table and the jails are applied; what is left is info: the WordPress and
+    Drupal failure jails wait for the applications' side (`fail2ban_failures_unseen`).
+12. **HTTP/2, a stalled reader that keeps sending** (found by reading, 2026-10-25): the
+    check for a writer that does not drain (`check_timeouts`: `now - last_activity_ >=
+    idle_timeout_ * 4 && !writer_.idle()`) reads `last_activity_`, which every read
+    refreshes, and reads go on while the writer is blocked. A client that takes part of a
+    response, stops reading and sends any frame more often than every four idle timeouts
+    (a PING every 50 s, far under the control rate) would keep the connection, its stream
+    and the bytes in its socket indefinitely, the control replies piling up in the writer's
+    `ctl_`, which has no cap. HTTP/1 refreshes its clock only on writes outside tunnels, and
+    tunnels have `proxy.send_timeout` (alpha.114); nginx's `send_timeout` closes after 60 s
+    without a write whatever the client sends. The fix would time the drain check from the
+    writer's last completed write. To reproduce first: on the current code the connection
+    must still be open well past four idle timeouts.
 
 ### 5.1 Regression evidence for 2.1 and 2.2 (2026-10-25)
 
@@ -639,7 +662,9 @@ over-limit QUIC client must be closed with CONNECTION_REFUSED, not only fail to 
 An ordinary aioquic client against `max_connections = 1` with one TCP connection held
 receives the server's answer 2 ms after its Initial; aioquic reports the termination
 (error 0x2, reason `server busy`) after its own draining period, 0.6 s (RFC 9000 10.2.2).
-alpha.115 completes that handshake in 3 ms. The default attack suite passes whole (24 rows,
+alpha.115 completes that handshake in 3 ms. The same over IPv6 (`[::1]`) and through a
+dual-stack `[::]` listener with an IPv4 client: refused, and the error-log line names the
+client `::1` and `127.0.0.1` (unmapped), as the TCP path does. The default attack suite passes whole (24 rows,
 Retry auto), the Retry-always subset with the ceiling row too, and the unit tests.
 
 Cost: two relaxed loads per new-connection Initial, nothing per packet of a known
