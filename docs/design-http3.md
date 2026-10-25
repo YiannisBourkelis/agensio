@@ -350,6 +350,11 @@ address gets its connection, with `retry_source_connection_id` and
 validated. `http3.retry = "auto"` sends Retry when the worker's half-open count passes
 half its budget, `"always"` always (a deployment under attack), `"never"` never. At the
 full budget further Initials are dropped. NEW_TOKEN for later connections is an I4 item.
+Before all of that, a worker at its connection ceiling (`server.max_connections`, TCP and QUIC
+together) answers a new Initial with CONNECTION_REFUSED (RFC 9000 20.1) in one Initial packet
+under the client's keys, as the INVALID_TOKEN answer is built, and counts it with the TCP
+refusals (`server_status`, health, the error-log line); a refusal needs no Retry round trip.
+Until alpha.116 the QUIC accept path never asked (audit 2026-10-07, item 2.4).
 
 The handshake must finish within `idle_timeout` of the connection's creation, whatever
 arrives meanwhile, or the connection is dropped silently, as at the idle timeout (since
@@ -855,7 +860,7 @@ time) and the same profile load (`profile-transport.txt` and the files before it
 | Attack | Mechanism | Defence | Limit | Test |
 |---|---|---|---|---|
 | Amplification with a spoofed source | Initials from a victim's address; the server's answers are several times the size | Initials under 1,200 bytes dropped; three times the bytes received until the address is validated; Retry under load; Version Negotiation only for datagrams of at least 1,200 bytes | 3x, RFC 9000 8.1 | `h3-attacks.py amplification` (a client that never acknowledges); the interop runner's `amplificationlimit` |
-| Handshake flood, half-open exhaustion | Initials that never complete; each costs an `SSL` and keys | the half-open budget per worker, Retry at half, drop at full; the handshake bounded by `idle_timeout` (not yet, see the handshake paragraph above and the audit's item 2.4); CRYPTO buffered at most 16 KB per level | 1,024 half-open per worker | `h3-attacks.py handshake-flood`; RSS and CPU sampled |
+| Handshake flood, half-open exhaustion | Initials that never complete; each costs an `SSL` and keys | the worker's connection ceiling (`server.max_connections`, TCP and QUIC together) asked before anything else: over it a new Initial gets CONNECTION_REFUSED in one Initial packet, no state (RFC 9000 20.1; alpha.116, audit 2026-10-07 item 2.4: before, QUIC never asked); the half-open budget per worker, Retry at half, drop at full; the handshake bounded by `idle_timeout` of its creation (alpha.116, the handshake paragraph above); CRYPTO buffered at most 16 KB per level | the ceiling, 1,024 half-open per worker | `h3-attacks.py handshake-flood`, `connection-ceiling`, `handshake-deadline`, `handshake-authenticated` (`handshake-budget` opt-in); RSS and CPU sampled |
 | Retry token forgery or replay | a token from another address or time | AEAD-sealed with the hourly key, bound to the address, the original id and the time; ten seconds of validity | | unit tests of the token |
 | Optimistic ACK | acknowledge packets never received to inflate the window (RFC 9000 21.4) | an ACK of a number never sent is PROTOCOL_ERROR; packet numbers skipped at random | | `h3-attacks.py optimistic-ack` |
 | ACK frame with many ranges | CPU per frame | 32 ranges processed, the rest ignored; frames bounded by the packet | 32 | `fuzz_quic_packet` |

@@ -3414,7 +3414,9 @@ never below 128, so a worker can never run itself out of descriptors (2048 are k
 cache's open files, the logs and the connections to php-fpm and origins). A connection
 accepted above the ceiling is refused at once: a plain listener answers `503 Service
 Unavailable` with `Retry-After: 2` and closes, a TLS listener closes before any handshake
-work, so a flood buys no CPU. What happened is kept for whoever investigates, without a
+work, and a new HTTP/3 connection is refused with QUIC's `CONNECTION_REFUSED` in one small
+Initial packet, before Retry or any handshake work (RFC 9000 20.1; until alpha.116 QUIC
+handshakes went past the ceiling), so a flood buys no CPU. What happened is kept for whoever investigates, without a
 shell: the error log line (once per worker per ten seconds) says how many connections the
 worker holds and how many of those have been idle for two seconds or more, how many it
 refused since the last line and since start, from which addresses (the most refused first)

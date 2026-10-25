@@ -2941,7 +2941,7 @@ fi
 
 # Audit 2.1/2.2/2.3: private single-worker instances, including the old timeout-loop hang.
 if [ "$(uname -s)" = Linux ] && python3 -c 'import h2' 2>/dev/null; then
-  timeout_rows=h2-stalled,h1-sendfile,cached-tls,h2-idle
+  timeout_rows=h2-stalled,h1-sendfile,cached-tls,h2-idle,h2-header-block
   if [ -n "$PHPFPM" ]; then
     timeout_rows+=,fastcgi
   else

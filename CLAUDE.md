@@ -1290,7 +1290,10 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    `(open-file limit - 2048) / workers` (at least 128), checked in the accept handler with
    one relaxed load against the worker's existing connection counter; above it a plain
    client gets a prebuilt 503 with `Retry-After` in one send and a TLS client is closed
-   before the handshake, no connection object, no allocation (`Server::refuse_connection`).
+   before the handshake, no connection object, no allocation (`Server::refuse_connection`);
+   a new QUIC Initial gets CONNECTION_REFUSED in one stateless Initial packet, before Retry
+   (`quic::EndpointBase::at_ceiling`, `build_initial_close`; alpha.116, audit 2.4: before, the QUIC
+   accept path never asked), counted with the TCP refusals (`Server::note_refusal`).
    Each worker keeps a sample of the refused addresses (eight slots, no allocation), the
    listeners and the times under a mutex taken only on the refusal path, and counts its
    connections idle 2 s or more at the shed hooks of HTTP/1 and HTTP/2 (`Worker::idle`,

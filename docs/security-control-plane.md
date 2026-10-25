@@ -555,8 +555,12 @@ validation at a time, the previous address restored when it fails), the reset bu
 (RESET_STREAM and STOP_SENDING past `http2.max_concurrent_streams` in one second close
 with H3_EXCESSIVE_LOAD) and the glitch budget (100 credit updates that raise nothing).
 `tests/h3-attacks.py` (aioquic, in the devbox image; the integration suite runs it where
-aioquic is installed) asserts twenty-one rows of the design's table against the release and
-sanitizer builds: the handshake, Retry in both modes, a garbage token, a key update and a
+aioquic is installed) asserts twenty-four rows of the design's table against the release and
+sanitizer builds (and a twenty-fifth on request, `handshake-budget`: 1,024 half-open clients
+held to the deadline): the handshake deadline (a half-open connection silent or fed
+undecryptable packets, and one fed Initial packets that open, retired at `idle_timeout` of its
+creation), new connections over `server.max_connections` refused with CONNECTION_REFUSED
+while TCP holds the slots, the handshake, Retry in both modes, a garbage token, a key update and a
 second one before the first is acknowledged, a client that changes its port, retired ids,
 a stateless reset, 3,000 forged packets on a live id, 200 stream resets in a second, 300
 streams beyond the limit, a second SETTINGS, 1,500 Initials in a second, and, as raw

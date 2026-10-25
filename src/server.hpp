@@ -283,6 +283,9 @@ private:
     // 503 with Retry-After, a TLS one closed before any handshake work, one log line per
     // worker per ten seconds. Runs on the worker's own loop.
     void refuse_connection(asio::ip::tcp::socket& sock, const asio::ip::tcp::endpoint& peer, const Listener& l, Worker& w);
+    // A refusal at the ceiling, TCP or QUIC: counted, sampled with the client and the listener, and
+    // one error-log line per worker per ten seconds. Runs on the worker's own loop.
+    void note_refusal(Worker& w, const asio::ip::address& peer, const std::string& listener);
     // The error log line for a worker at its ceiling, from its sample (under refusal_mutex).
     std::string ceiling_line(const Worker& w, const RefusalSample& s, std::chrono::steady_clock::time_point now) const;
     // Every worker's refusals merged, for status and health.

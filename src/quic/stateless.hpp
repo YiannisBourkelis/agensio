@@ -77,14 +77,16 @@ inline void build_stateless_reset(unsigned char* out, std::size_t n, const Cid& 
     reset_token(dcid, out + n - 16);
 }
 
-// The answer to an Initial whose Retry token does not open (8.1.2): one Initial packet
-// under the keys the client derives from its destination id, closing with INVALID_TOKEN,
-// so the client fails at once instead of at its timeout. No state is kept.
-inline std::size_t build_invalid_token_close(unsigned char* out, std::size_t cap, const PacketHeader& h) noexcept {
+// The answer to a client's first Initial that gets no connection: one Initial packet under the
+// keys the client derives from its destination id, closing with `code`, so the client fails at
+// once instead of at its timeout. No state is kept, and the packet is far smaller than the
+// 1,200-byte Initial it answers. INVALID_TOKEN for a Retry token that does not open (8.1.2),
+// CONNECTION_REFUSED for a worker at its connection ceiling (20.1).
+inline std::size_t build_initial_close(unsigned char* out, std::size_t cap, const PacketHeader& h, std::uint64_t code,
+                                       std::string_view reason) noexcept {
     unsigned char client_secret[32], server_secret[32];
     Keys tx;
     if (!initial_secrets(h.dcid, client_secret, server_secret) || !tx.install(Suite::aes128gcm, server_secret, 32, true)) return 0;
-    constexpr std::string_view reason = "invalid token";
     const std::size_t need = 1 + 4 + 1 + h.scid.len + 1 + h.dcid.len + 1 + 2 + 1 + 4 + reason.size() + kAeadTagLen + 8;
     if (cap < need) return 0;
     std::size_t pos = 0;
@@ -101,7 +103,7 @@ inline std::size_t build_invalid_token_close(unsigned char* out, std::size_t cap
     pos += 2;
     const std::size_t pn_offset = pos;
     out[pos++] = 0;  // packet number 0
-    const std::size_t w = put_connection_close(out + pos, cap - pos - kAeadTagLen, false, err::invalid_token, 0, reason);
+    const std::size_t w = put_connection_close(out + pos, cap - pos - kAeadTagLen, false, code, 0, reason);
     if (!w) return 0;
     write_varint_fixed(out + len_pos, 1 + w + kAeadTagLen, 2);
     if (!tx.seal(0, out, pos, w)) return 0;
@@ -109,6 +111,10 @@ inline std::size_t build_invalid_token_close(unsigned char* out, std::size_t cap
     if (!tx.mask(out + pn_offset + 4, mask)) return 0;
     protect_header(out, pn_offset, 1, true, mask);
     return pos + w + kAeadTagLen;
+}
+
+inline std::size_t build_invalid_token_close(unsigned char* out, std::size_t cap, const PacketHeader& h) noexcept {
+    return build_initial_close(out, cap, h, err::invalid_token, "invalid token");
 }
 
 }  // namespace agensio::quic

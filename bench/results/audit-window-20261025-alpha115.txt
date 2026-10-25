@@ -1,0 +1,21 @@
+Sun Oct 25 15:45:45 UTC 2026
+Linux b3b338a912b4 6.12.113+deb13-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.113-1 (2026-10-15) x86_64 GNU/Linux
+13.6
+model name	: AMD Ryzen 9 9900X 12-Core Processor
+354a495c1763d04c673c1d6b1418c44093c26ded
+d100de8b5437bbd9ec06feb8a235a269ce06f3d08ddd2453a862333bdd7e24cb  /src/tests/timeout-regressions.py
+COMMAND: python3 /src/tests/timeout-regressions.py /results/audit-extra-bin/v0.1.0-alpha.115 --rows h2-window-flood
+RUN h2-window-flood
+  control: 1023-byte updates get GOAWAY(ENHANCE_YOUR_CALM)
+  WINDOW_UPDATE streams=0 frames=949452800 connections=950 wall_s=3.000 cpu_s=2.770 cpu_s_per_s=0.923 cpu_ns_per_frame=2.9 frames_per_s=316432111
+  WINDOW_UPDATE streams=128 frames=29982720 connections=30 wall_s=3.016 cpu_s=1.580 cpu_s_per_s=0.524 cpu_ns_per_frame=52.7 frames_per_s=9941959
+  WINDOW_UPDATE streams=128 frames=30982144 connections=31 wall_s=3.069 cpu_s=1.590 cpu_s_per_s=0.518 cpu_ns_per_frame=51.3 frames_per_s=10094734
+  WINDOW_UPDATE streams=0 frames=987430912 connections=988 wall_s=3.002 cpu_s=2.820 cpu_s_per_s=0.939 cpu_ns_per_frame=2.9 frames_per_s=328933265
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:44491 (h2c, h1)  sites: localhost
+  listening on https://127.0.0.1:37435 (h2, h1)  sites: localhost
+agensio stopped
+PASS h2-window-flood
+timeout regressions: 1/1 passed

@@ -1,0 +1,30 @@
+Recorded UTC: Κυρ 25 Οκτ 2026 15:51:48 UTC
+Linux devdeb 6.12.113+deb13-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.113-1 (2026-10-15) x86_64 GNU/Linux
+model name	: AMD Ryzen 9 9900X 12-Core Processor
+Server source: d579167b8e3676b06f41c84aa52f2f9b84045d80
+Devbox: Debian 13.6; image sha256:db459c20b09dc89fa7959fb8a8a1987a37f4d2a1b49e788eaba965d42994ea87
+COMMAND (inside agensio-devbox --network none): ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 python3 /src/tests/timeout-regressions.py /src/build-asan/agensio --rows h2-header-block,h2-window-flood
+Sanitizer correctness run, not a Release performance comparison.
+RUN h2-header-block
+  header block: 3 nonempty CONTINUATION frames; GOAWAY=(<ConnectionTerminated error_code:11, last_stream_id:1, additional_data:68656164657220626c6f636b206e6f7420636f6d>, 15.000336857046932); EOF=15.000346976099536
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.002 s
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:46937 (h2c, h1)  sites: localhost
+  listening on https://127.0.0.1:59787 (h2, h1)  sites: localhost
+agensio stopped
+PASS h2-header-block
+RUN h2-window-flood
+  control: 1023-byte updates get GOAWAY(ENHANCE_YOUR_CALM)
+  WINDOW_UPDATE streams=0 frames=56967168 connections=57 wall_s=3.023 cpu_s=3.010 cpu_s_per_s=0.996 cpu_ns_per_frame=52.8 frames_per_s=18843761
+  WINDOW_UPDATE streams=128 frames=2998272 connections=3 wall_s=3.351 cpu_s=3.200 cpu_s_per_s=0.955 cpu_ns_per_frame=1067.3 frames_per_s=894708
+  WINDOW_UPDATE streams=128 frames=2998272 connections=3 wall_s=3.333 cpu_s=3.200 cpu_s_per_s=0.960 cpu_ns_per_frame=1067.3 frames_per_s=899566
+  WINDOW_UPDATE streams=0 frames=58966016 connections=59 wall_s=3.047 cpu_s=3.030 cpu_s_per_s=0.995 cpu_ns_per_frame=51.4 frames_per_s=19354154
+  idle sample: 0.000 CPU s / 1 s
+  plain probe: 0.001 s
+agensio 0.1.0-alpha.115 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:47293 (h2c, h1)  sites: localhost
+  listening on https://127.0.0.1:52291 (h2, h1)  sites: localhost
+agensio stopped
+PASS h2-window-flood
+timeout regressions: 2/2 passed

@@ -5,17 +5,21 @@ tool does (update keys, change its port, retire ids, reset streams by the hundre
 packets, send garbage tokens) and assert the server's answer.
 
 Usage: tests/h3-attacks.py BINARY [--retry always|auto] [--port 18443] [--rows a,b,c]
-The suite starts the binary on 127.0.0.1:PORT with the bench docroot, runs the rows and
-stops it; exit 1 when a row fails. Under the sanitizer build the server's stderr is
-checked for reports. handshake-deadline (audit 2.4: fails on alpha.115, passes from
-alpha.116) runs first and checks the lifetime via status connection-count deltas on this
-isolated server, which then has a control socket."""
+Each row starts a fresh binary on 127.0.0.1:PORT with the bench docroot and checks its
+stderr for sanitizer reports after bounded shutdown; exit 1 when a row fails.
+handshake-deadline and handshake-authenticated (audit 2.4: fail on alpha.115, pass from
+alpha.116) check lifetimes via status connection-count deltas on isolated servers with
+control sockets. connection-ceiling (audit 2.4: alpha.115 accepted QUIC handshakes past
+server.max_connections, alpha.116 refuses them with CONNECTION_REFUSED) holds the TCP slots
+and counts the refusals. handshake-budget (1024 half-open clients) requires explicit --rows
+selection."""
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import json
 import os
 import random
 import select
+import selectors
 import socket
 import ssl
 import subprocess
@@ -29,6 +33,9 @@ from aioquic.quic import events as qe
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.packet import pull_quic_header, QuicPacketType
+from aioquic.quic.packet import pull_ack_frame
+from aioquic.quic.packet_builder import QuicPacketBuilder
+from aioquic.tls import Epoch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = ("127.0.0.1", 18443)
@@ -37,6 +44,13 @@ LOG = None
 
 def log(msg):
     print(msg, flush=True)
+
+
+def readable(sock, timeout):
+    # The 1024-client budget row puts the probe beyond select()'s FD_SETSIZE.
+    with selectors.DefaultSelector() as poller:
+        poller.register(sock, selectors.EVENT_READ)
+        return bool(poller.select(timeout))
 
 
 class Client:
@@ -95,8 +109,7 @@ class Client:
             wait = end - now
             if t is not None:
                 wait = max(0.0, min(wait, t - now))
-            r, _, _ = select.select([self.sock], [], [], wait)
-            if r:
+            if readable(self.sock, wait):
                 for _ in range(64):
                     try:
                         data, addr = self.sock.recvfrom(65536)
@@ -458,6 +471,56 @@ def row_handshake_flood(args):
     return True, "%d Initials in %.1fs: %d Retry, %d other answers; a real client gets 200" % (sent, took, retries, others)
 
 
+class HalfOpenClient:
+    def __init__(self, sock, quic, server_cid, born, forged):
+        self.sock, self.quic, self.server_cid = sock, quic, server_cid
+        self.born, self.forged = born, forged
+        self.packet_number = 1000
+
+    def initial_ping(self):
+        # RFC 9001 5.2 / RFC 9000 17.2.2: fresh packet numbers, the original
+        # Initial keys, and PING only. Never replay a duplicate or send Finished.
+        number = self.packet_number
+        self.packet_number += 1
+        crypto = self.quic._cryptos[Epoch.INITIAL]
+        builder = QuicPacketBuilder(host_cid=self.quic.host_cid, peer_cid=self.server_cid,
+                                   version=1, is_client=True, max_datagram_size=1200, packet_number=number)
+        builder.start_packet(QuicPacketType.INITIAL, crypto)
+        builder.start_frame(0x01, capacity=1)
+        datagrams, _ = builder.flush()
+        assert len(datagrams) == 1 and len(datagrams[0]) == 1200
+        self.sock.sendto(datagrams[0], SERVER)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            if not readable(self.sock, max(0, deadline - time.monotonic())):
+                break
+            data, addr = self.sock.recvfrom(65536)
+            assert addr == SERVER
+            pos = 0
+            while pos < len(data) and data[pos] & 0xC0 == 0xC0:
+                buf = Buffer(data=data[pos:])
+                header = pull_quic_header(buf)
+                if header.packet_type == QuicPacketType.INITIAL:
+                    _, payload, _, _ = crypto.recv.decrypt_packet(
+                        data[pos:pos + header.packet_length], buf.tell(), 0)
+                    frames = Buffer(data=payload)
+                    while not frames.eof():
+                        kind = frames.pull_uint_var()
+                        if kind in (0, 1):
+                            continue
+                        if kind == 2:
+                            ranges, _ = pull_ack_frame(frames)
+                            if number in ranges:
+                                return number
+                        elif kind == 6:
+                            frames.pull_uint_var()  # CRYPTO offset
+                            frames.pull_bytes(frames.pull_uint_var())
+                        else:
+                            raise AssertionError("unexpected Initial frame: 0x%x" % kind)
+                pos += header.packet_length
+        raise AssertionError("fresh Initial PING %d was not acknowledged (decryption not proven)" % number)
+
+
 @contextmanager
 def half_open_client():
     cfg = QuicConfiguration(is_client=True, alpn_protocols=["h3"], verify_mode=ssl.CERT_NONE,
@@ -492,17 +555,40 @@ def half_open_client():
             forged = (b"\xe0\x00\x00\x00\x01" + bytes([len(header.source_cid)]) + header.source_cid
                       + bytes([len(q.host_cid)]) + q.host_cid + encode_uint_var(64) + bytes(64))
             assert pull_quic_header(Buffer(data=forged)).packet_type == QuicPacketType.HANDSHAKE
-            yield sock, forged, born
+            yield HalfOpenClient(sock, q, header.source_cid, born, forged)
             return
 
 
-def status_connections(args):
+def server_status(args):
     result = subprocess.run([args.binary, "ctl", "status", "--socket",
                              os.path.join(ROOT, "bench", "tmp", "h3-attacks-control.sock")],
                             check=True, capture_output=True, text=True, timeout=2)
-    value = json.loads(result.stdout)["connections"]
+    return json.loads(result.stdout)
+
+
+def status_connections(args):
+    value = server_status(args)["connections"]
     assert isinstance(value, (int, float)) and value >= 0 and int(value) == value, "invalid connection count"
     return int(value)
+
+
+def wait_delta(args, baseline, want, deadline):
+    while True:
+        delta = status_connections(args) - baseline
+        if delta == want or time.monotonic() >= deadline:
+            return delta
+        time.sleep(0.05)
+
+
+def live_probe(timeout=2):
+    c = Client()
+    try:
+        connected = c.connect(timeout=timeout)
+        status, body = c.get("/", timeout=timeout) if connected else (None, None)
+        return connected and status == 200 and len(body or b"") == os.path.getsize(
+            os.path.join(ROOT, "bench", "www", "index.html"))
+    finally:
+        c.close()
 
 
 def row_handshake_deadline(args):
@@ -510,19 +596,13 @@ def row_handshake_deadline(args):
     # exist. Status has no half-open field; keep that distinction explicit.
     baseline = status_connections(args)
 
-    def wait_delta(want, deadline):
-        while True:
-            delta = status_connections(args) - baseline
-            if delta == want or time.monotonic() >= deadline:
-                return delta
-            time.sleep(0.05)
-
     failures = []
     for dribble in (False, True):
         name = "undecryptable-dribble" if dribble else "silent-control"
-        assert wait_delta(0, time.monotonic() + 2) == 0, "server not isolated before " + name
-        with half_open_client() as (sock, forged, born):
-            assert wait_delta(1, born + 3) == 1, "server did not allocate exactly one half-open connection"
+        assert wait_delta(args, baseline, 0, time.monotonic() + 2) == 0, "server not isolated before " + name
+        with half_open_client() as pending:
+            sock, forged, born = pending.sock, pending.forged, pending.born
+            assert wait_delta(args, baseline, 1, born + 3) == 1, "server did not allocate exactly one half-open connection"
             c = Client()
             try:
                 assert c.connect(timeout=2), "new handshake refused while a half-open client exists"
@@ -531,7 +611,7 @@ def row_handshake_deadline(args):
                     os.path.join(ROOT, "bench", "www", "index.html")), "new client's GET failed"
             finally:
                 c.close()
-            assert wait_delta(1, born + 5) == 1, "probe did not retire, or half-open connection disappeared early"
+            assert wait_delta(args, baseline, 1, born + 5) == 1, "probe did not retire, or half-open connection disappeared early"
             sent = 0
             closed = None
             deadline = born + 16
@@ -553,6 +633,102 @@ def row_handshake_deadline(args):
                 failures.append(name)
     return not failures, ("deadline failed: " + ", ".join(failures) if failures else
                           "both half-open status deltas retired at 15 s, new handshakes accepted")
+
+
+def row_handshake_authenticated(args):
+    baseline = status_connections(args)
+    with half_open_client() as pending:
+        assert wait_delta(args, baseline, 1, pending.born + 3) == 1, "half-open connection not allocated"
+        first = pending.initial_ping()
+        log("  authenticated Initial PING %d acknowledged" % first)
+        time.sleep(max(0, pending.born + 14 - time.monotonic()))
+        assert time.monotonic() < pending.born + 14.5, "fixture missed the pre-deadline send"
+        second = pending.initial_ping()
+        log("  authenticated Initial PING %d acknowledged at %.3f s" %
+            (second, time.monotonic() - pending.born))
+        remaining = wait_delta(args, baseline, 0, pending.born + 16)
+        age = time.monotonic() - pending.born
+        assert live_probe(), "fresh handshake/GET failed after deadline"
+        return remaining == 0 and 14.5 <= age <= 16.2, (
+            "status delta %d at %.3f s after creation; both fresh Initials ACKed, no Finished sent; new GET works" %
+            (remaining, age))
+
+
+def row_handshake_budget(args):
+    baseline = status_connections(args)
+    with ExitStack() as stack:
+        clients = []
+        for _ in range(1024):
+            clients.append(stack.enter_context(half_open_client()))
+            assert time.monotonic() - clients[0].born < 10, "1024-client setup exceeded 10 s"
+        first, last = clients[0].born, clients[-1].born
+        assert wait_delta(args, baseline, 1024, first + 11) == 1024, "half-open budget was not filled exactly"
+        blocked = Client()
+        try:
+            assert not blocked.connect(timeout=0.5), "a 1025th handshake fit in a full half-open budget"
+        finally:
+            blocked.sock.close()
+        log("  1024 half-open connections in %.3f s; 1025th handshake blocked at capacity" % (last - first))
+        sent = 0
+        first_drop = None
+        remaining = 1024
+        while time.monotonic() < last + 16:
+            while sent < len(clients) and time.monotonic() >= clients[sent].born + 14:
+                pending = clients[sent]
+                assert time.monotonic() < pending.born + 14.75, "fixture missed a pre-deadline dribble"
+                pending.sock.sendto(pending.forged, SERVER)
+                sent += 1
+            remaining = status_connections(args) - baseline
+            assert 0 <= remaining <= 1024, "unaccounted connections in budget sample"
+            if remaining < 1024 and first_drop is None:
+                first_drop = time.monotonic() - first
+            if remaining == 0:
+                break
+            time.sleep(0.02)
+        age = time.monotonic() - last
+        accepted = live_probe(timeout=1)
+        good = (remaining == 0 and sent == 1024 and first_drop is not None
+                and 14.5 <= first_drop <= 16.2 and age <= 16.2 and accepted)
+        return good, ("dribbles=%d remaining=%d first_drop=%s s, last cohort age=%.3f s; "
+                      "new handshake/GET after deadline=%s" % (sent, remaining, first_drop, age, accepted))
+
+
+def row_connection_ceiling(args):
+    baseline = status_connections(args)
+    with ExitStack() as stack:
+        for _ in range(3):
+            stack.enter_context(socket.create_connection((SERVER[0], SERVER[1] + 1), timeout=2))
+        assert wait_delta(args, baseline, 3, time.monotonic() + 2) == 3, "three TCP slots not occupied"
+        with socket.create_connection((SERVER[0], SERVER[1] + 1), timeout=2) as sock:
+            reply = b""
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                reply += data
+                assert len(reply) <= 4096
+            assert reply.startswith(b"HTTP/1.1 503 ") and b"Retry-After:" in reply, repr(reply)
+        with socket.create_connection(SERVER, timeout=2) as sock:
+            assert sock.recv(1) == b"", "TLS TCP connection was not refused before handshake"
+        accepted = 0
+        refused = 0
+        for _ in range(2):
+            c = Client()
+            stack.callback(c.close)
+            if c.connect(timeout=1):
+                status, body = c.get("/", timeout=1)
+                assert status == 200 and body, "accepted over-limit QUIC connection could not serve"
+                accepted += 1
+            elif c.terminated is not None and c.terminated.error_code == 0x2:  # CONNECTION_REFUSED, RFC 9000 20.1
+                refused += 1
+        facts = server_status(args)
+        assert facts["max_connections"] == 3 and facts["connections_refused"] >= 2, str(facts)
+        delta = facts["connections"] - baseline
+        assert delta == 3 + accepted, "status does not account for the held TCP and QUIC connections"
+        return accepted == 0 and refused == 2, ("ceiling=3, three TCP slots held; extra TCP plain=503, TLS=EOF; "
+                                                "extra QUIC handshakes with GET=%d/2, CONNECTION_REFUSED=%d/2, "
+                                                "connection delta=%d, refusals=%d" %
+                                                (accepted, refused, delta, facts["connections_refused"]))
 
 
 def varint(v):
@@ -690,6 +866,9 @@ def row_shutdown(args):
 
 ROWS = [
     ("handshake-deadline", row_handshake_deadline),  # first, so its status deltas see no other clients
+    ("handshake-authenticated", row_handshake_authenticated),
+    ("handshake-budget", row_handshake_budget),
+    ("connection-ceiling", row_connection_ceiling),  # first, so its status deltas see no other clients
     ("handshake", row_handshake),
     ("retry", row_retry),
     ("invalid-token", row_invalid_token),
@@ -714,7 +893,7 @@ ROWS = [
 ]
 
 
-def write_config(port, retry, h3=True, control=False):
+def write_config(port, retry, h3=True, control=False, ceiling=False):
     os.makedirs(os.path.join(ROOT, "bench", "tmp"), exist_ok=True)
     conf = os.path.join(ROOT, "bench", "tmp", "h3-attacks.toml")
     with open(conf, "w") as f:
@@ -722,17 +901,21 @@ def write_config(port, retry, h3=True, control=False):
         f.write('pid_file = "%s/bench/tmp/h3-attacks.pid"\n' % ROOT)
         if control:
             f.write('idle_timeout = 15\n')
+        if ceiling:
+            f.write('max_connections = 3\n')
         f.write('[log]\naccess = "off"\n')
         f.write('[[site]]\nlisten = ["127.0.0.1:%d"]\nroot = "%s/bench/www"\n' % (port, ROOT))
         f.write('tls = { cert = "%s/bench/certs/cert.pem", key = "%s/bench/certs/key.pem" }\n' % (ROOT, ROOT))
+        if ceiling:
+            f.write('[[site]]\nlisten = ["127.0.0.1:%d"]\nroot = "%s/bench/www"\n' % (port + 1, ROOT))
         if control:
             f.write('[control]\nsocket = "%s/bench/tmp/h3-attacks-control.sock"\n'
                     'audit = "%s/bench/tmp/h3-attacks-audit.log"\n' % (ROOT, ROOT))
     return conf
 
 
-def start_server(binary, port, retry, control=False):
-    conf = write_config(port, retry, control=control)
+def start_server(binary, port, retry, control=False, ceiling=False):
+    conf = write_config(port, retry, control=control, ceiling=ceiling)
     err = open(os.path.join(ROOT, "bench", "tmp", "h3-attacks.err"), "w")
     p = subprocess.Popen([binary, "-c", conf], stdout=subprocess.DEVNULL, stderr=err)
     for _ in range(50):
@@ -753,20 +936,26 @@ def main():
     ap.add_argument("binary")
     ap.add_argument("--retry", default="auto", choices=["auto", "always", "never"])
     ap.add_argument("--port", type=int, default=18443)
-    ap.add_argument("--rows", default="", help="comma-separated rows (default: all)")
+    ap.add_argument("--rows", default="", help="comma-separated rows; handshake-budget is opt-in")
     args = ap.parse_args()
     global SERVER
     SERVER = ("127.0.0.1", args.port)
     want = set(args.rows.split(",")) if args.rows else None
     if want and want - {name for name, _ in ROWS}:
         ap.error("unknown rows: " + ",".join(sorted(want - {name for name, _ in ROWS})))
-    p = start_server(args.binary, args.port, args.retry, control=not want or "handshake-deadline" in want)
-    args.server = p
     failed = 0
-    try:
-        for name, fn in ROWS:
-            if want and name not in want:
-                continue
+    for name, fn in ROWS:
+        if want and name not in want:
+            continue
+        if not want and name == "handshake-budget":
+            log("skip %s (opt-in)" % name)
+            continue
+        p = start_server(args.binary, args.port, args.retry,
+                         control=name in ("handshake-deadline", "handshake-authenticated",
+                                          "handshake-budget", "connection-ceiling"),
+                         ceiling=name == "connection-ceiling")
+        args.server = p
+        try:
             try:
                 ok, msg = fn(args)
             except Exception as e:  # a row that blew up is a failure with the reason
@@ -774,19 +963,19 @@ def main():
             log("%s %-18s %s" % ("ok  " if ok else "FAIL", name, msg))
             if not ok:
                 failed += 1
-    finally:
-        if p.poll() is None:
-            p.send_signal(2)
-            try:
-                p.wait(5)
-            except subprocess.TimeoutExpired:
-                p.kill()
-                p.wait(timeout=2)
-    err = open(os.path.join(ROOT, "bench", "tmp", "h3-attacks.err")).read()
-    reports = err.count("Sanitizer") + err.count("runtime error")
-    if reports:
-        log("FAIL sanitizer reports in the server's stderr: %d" % reports)
-        failed += 1
+        finally:
+            if p.poll() is None:
+                p.send_signal(2)
+                try:
+                    p.wait(5)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait(timeout=2)
+        err = open(os.path.join(ROOT, "bench", "tmp", "h3-attacks.err")).read()
+        reports = err.count("Sanitizer") + err.count("runtime error")
+        if reports:
+            log("FAIL %s sanitizer reports in the server's stderr: %d" % (name, reports))
+            failed += 1
     log("%d row(s) failed" % failed if failed else "all rows passed")
     sys.exit(1 if failed else 0)
 

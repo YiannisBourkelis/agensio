@@ -705,6 +705,25 @@ void Server::open_h3() {
         if (l.tls && l.h3 && !open_h3_listener(l, gen_->cfg, false, error)) throw std::runtime_error(error);  // a start fails whole
 }
 
+// A datagram's sender as an address, an IPv4 client of the dual-stack socket unmapped (as
+// Http3Connection::remote_from reads it), for the refusal sample. The casts are the sockets
+// API's contract: recvmmsg filled the storage with the struct its family names.
+static asio::ip::address quic_peer_address(const sockaddr_storage& from) {
+    if (from.ss_family == AF_INET) {
+        const auto* in = reinterpret_cast<const sockaddr_in*>(&from);
+        asio::ip::address_v4::bytes_type b;
+        std::memcpy(b.data(), &in->sin_addr, 4);
+        return asio::ip::address_v4(b);
+    }
+    if (from.ss_family == AF_INET6) {
+        const auto* in6 = reinterpret_cast<const sockaddr_in6*>(&from);
+        asio::ip::address_v6::bytes_type b;
+        std::memcpy(b.data(), &in6->sin6_addr, 16);
+        return unmapped(asio::ip::address_v6(b));
+    }
+    return {};
+}
+
 // The endpoints of one h3 listener: one per worker with reuse_port (the group's members in
 // worker order, steered by connection id), else one on worker 0. `start` posts their
 // reads at once (a listener a reload added); at startup start_h3 does it for all.
@@ -741,6 +760,14 @@ bool Server::open_h3_listener(const Listener& l, const Config& cfg, bool start, 
         gro = gro && ep->gro();
         if (rcvbuf == 0 || ep->receive_buffer() < rcvbuf) rcvbuf = ep->receive_buffer();
         ep->retry = retry_mode(cfg);
+        // The ceiling counts TCP and QUIC together (hardening item 5): a new QUIC connection over it
+        // is refused as a TLS one is, before any handshake work (audit 2.4; before alpha.116 the QUIC
+        // accept path never asked, and over-limit handshakes completed).
+        ep->at_ceiling = [this, &w, address = l.address](const sockaddr_storage& from) {
+            if (w.connections.load(std::memory_order_relaxed) < max_connections_.load(std::memory_order_relaxed)) return false;
+            note_refusal(w, quic_peer_address(from), address);
+            return true;
+        };
         opened.push_back(std::move(ep));
     }
     for (std::size_t i = 0; i < opened.size(); ++i) {
@@ -1300,13 +1327,17 @@ void Server::refuse_connection(asio::ip::tcp::socket& sock, const asio::ip::tcp:
         sock.send(asio::buffer(w.state.limit_answer), 0, ignored);  // this handler runs on w's loop
     }
     sock.close(ignored);
+    note_refusal(w, peer.address(), l.address);  // the client, as accept(2) gave it
+}
+
+void Server::note_refusal(Worker& w, const asio::ip::address& peer, const std::string& listener) {
     w.refused.fetch_add(1, std::memory_order_relaxed);
     const auto now = std::chrono::steady_clock::now();
     std::string line;
     {
         std::lock_guard<std::mutex> lock(w.refusal_mutex);
         RefusalSample& s = w.refusals;
-        s.note(peer.address(), l.address, now);  // the client, as accept(2) gave it
+        s.note(peer, listener, now);
         if (s.window_start == std::chrono::steady_clock::time_point{} || now - s.window_start >= std::chrono::seconds(10)) {
             line = ceiling_line(w, s, now);
             s.window = 0;

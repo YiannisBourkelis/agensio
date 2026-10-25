@@ -4,6 +4,7 @@
 Run inside the Linux devbox: python3 tests/timeout-regressions.py BINARY [--rows a,b]
 Rows: h2-stalled,fastcgi,h1-sendfile,cached-tls,h2-idle. Each owns a single-worker server.
 h2-idle (audit 2.3) fails on alpha.115 and passes from the fix in alpha.116.
+Also h2-header-block; opt-in h2-window-flood measures audit section 5 item 8.
 Requires python3-h2, openssl and (for fastcgi) php-fpm. Exit 1 on any failed row.
 """
 import argparse
@@ -22,6 +23,7 @@ import h2.config
 import h2.connection
 import h2.events
 import h2.settings
+from hyperframe.frame import HeadersFrame, ContinuationFrame, WindowUpdateFrame
 
 
 MIB = 1024 * 1024
@@ -103,8 +105,8 @@ def server(binary, row):
                         'handler = "fastcgi"\n'
                         f'fastcgi = {{ socket = "unix:{root}/fpm.sock", buffering = false, '
                         'read_timeout = 20 }\n')
-                idle = 15 if row in ("cached-tls", "h2-idle") else 3
-                protocols = '"h1", "h2", "h2c"' if row == "h2-idle" else '"h1", "h2"'
+                idle = 30 if row == "h2-window-flood" else 15 if row in ("cached-tls", "h2-idle", "h2-header-block") else 3
+                protocols = '"h1", "h2", "h2c"' if row in ("h2-idle", "h2-header-block", "h2-window-flood") else '"h1", "h2"'
                 (root / "agensio.toml").write_text(
                     f'[server]\nworkers = 1\nidle_timeout = {idle}\nprotocols = [{protocols}]\n'
                     f'pid_file = "{root}/agensio.pid"\n'
@@ -372,14 +374,144 @@ def h2_idle(process, plain, tls):
         assert not failures, "HTTP/2 idle deadline: " + ", ".join(failures)
 
 
+def h2_ready(sock, streams=0):
+    conn = h2.connection.H2Connection()
+    conn.initiate_connection()
+    if streams:
+        conn.update_settings({h2.settings.SettingCodes.INITIAL_WINDOW_SIZE: 0})
+    sock.sendall(conn.data_to_send())
+    settings = ack = False
+    deadline = time.monotonic() + 3
+    while not (settings and ack):
+        assert time.monotonic() < deadline, "SETTINGS exchange exceeded 3 s"
+        data = sock.recv(65536)
+        assert data, "EOF during SETTINGS"
+        for ev in conn.receive_data(data):
+            settings |= isinstance(ev, h2.events.RemoteSettingsChanged)
+            ack |= isinstance(ev, h2.events.SettingsAcknowledged)
+            assert not isinstance(ev, h2.events.ConnectionTerminated), str(ev)
+        sock.sendall(conn.data_to_send())
+    for i in range(streams):
+        conn.send_headers(2 * i + 1, [(":method", "GET"), (":scheme", "http"),
+                                     (":authority", "localhost"), (":path", "/large.bin")], end_stream=True)
+    sock.sendall(conn.data_to_send())
+    answered = set()
+    while len(answered) < streams:
+        assert time.monotonic() < deadline, "stream setup exceeded 3 s"
+        data = sock.recv(65536)
+        assert data, "EOF during stream setup"
+        for ev in conn.receive_data(data):
+            if isinstance(ev, h2.events.ResponseReceived):
+                assert dict(ev.headers)[b":status"] == b"200", str(ev.headers)
+                answered.add(ev.stream_id)
+            assert not isinstance(ev, (h2.events.StreamEnded, h2.events.StreamReset,
+                                       h2.events.ConnectionTerminated, h2.events.DataReceived)), str(ev)
+        sock.sendall(conn.data_to_send())
+    assert conn.open_outbound_streams == streams
+    return conn
+
+
+def h2_header_block(process, plain, tls):
+    with connect(plain) as sock:
+        conn = h2_ready(sock)
+        block = conn.encoder.encode([(":method", "GET"), (":scheme", "http"), (":authority", "localhost"),
+                                     (":path", "/"), ("x-padding", "a" * 64)], huffman=False)
+        head = HeadersFrame(1)
+        head.flags.add("END_STREAM")
+        head.data = block[:1]
+        started = time.monotonic()
+        sock.sendall(head.serialize())  # no END_HEADERS: agensio has not allocated a stream yet
+        sock.setblocking(False)
+        sent = 0
+        goaway = closed = None
+        while time.monotonic() < started + 18:
+            now = time.monotonic()
+            if goaway is None and now >= started + 4 * (sent + 1):
+                # RFC 9113 6.10: only CONTINUATION may follow. Stay below the eight-frame
+                # and compressed-size budgets, and refresh frame progress, not just reads.
+                frame = ContinuationFrame(1)
+                frame.data = block[sent + 1:sent + 2]
+                sock.sendall(frame.serialize())
+                sent += 1
+            ready, _, _ = select.select([sock], [], [], 0.05)
+            if ready:
+                data = sock.recv(65536)
+                if not data:
+                    closed = time.monotonic() - started
+                    break
+                for ev in conn.receive_data(data):
+                    if isinstance(ev, h2.events.ConnectionTerminated):
+                        goaway = (ev, time.monotonic() - started)
+                    assert not isinstance(ev, (h2.events.ResponseReceived, h2.events.StreamReset)), str(ev)
+        print(f"  header block: {sent} nonempty CONTINUATION frames; GOAWAY={goaway}; EOF={closed}", flush=True)
+        assert goaway is not None, "no GOAWAY by 18 s despite an unfinished header block"
+        event, age = goaway
+        assert event.error_code == 11 and event.additional_data == b"header block not completed in time", str(event)
+        assert 14.5 <= age <= 17 and closed is not None and closed <= 18, "wrong block deadline or missing EOF"
+        assert sent >= 3, "fixture did not maintain frame-level progress"
+    worker_available(process, plain)
+
+
+def h2_window_flood(process, plain, tls):
+    def barrier(sock, conn, expect_cut=False):
+        conn.ping(b"progress")
+        sock.sendall(conn.data_to_send())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            data = sock.recv(65536)
+            assert data, "EOF before flood barrier"
+            for ev in conn.receive_data(data):
+                if isinstance(ev, h2.events.ConnectionTerminated):
+                    assert expect_cut and ev.error_code == 11, str(ev)
+                    return
+                assert not isinstance(ev, (h2.events.StreamEnded, h2.events.StreamReset, h2.events.DataReceived)), str(ev)
+                if isinstance(ev, h2.events.PingAckReceived) and ev.ping_data == b"progress":
+                    assert not expect_cut, "1023-byte WINDOW_UPDATE bypassed the glitch budget"
+                    return
+        raise AssertionError("flood barrier exceeded 5 s")
+
+    with socket.create_connection(("127.0.0.1", plain), timeout=5) as sock:
+        conn = h2_ready(sock, 128)
+        small = WindowUpdateFrame(0, window_increment=1023).serialize()
+        sock.sendall(small * 256)
+        barrier(sock, conn, expect_cut=True)
+        print("  control: 1023-byte updates get GOAWAY(ENHANCE_YOUR_CALM)", flush=True)
+
+    frame = WindowUpdateFrame(0, window_increment=1024).serialize()
+    batch = frame * 4096
+    for streams in (0, 128, 128, 0):
+        started = time.monotonic()
+        cpu = cpu_seconds(process)
+        count = rotations = 0
+        while time.monotonic() - started < 3:
+            with socket.create_connection(("127.0.0.1", plain), timeout=5) as sock:
+                conn = h2_ready(sock, streams)
+                # RFC 9113 6.9.1: rotate below 2^31-1, rather than measuring the
+                # overflow close. The PING ACK proves every preceding update ran.
+                for _ in range(244):
+                    sock.sendall(batch)
+                barrier(sock, conn)
+                assert conn.open_outbound_streams == streams, "streams disappeared during the sample"
+                count += 244 * 4096
+                rotations += 1
+        elapsed = time.monotonic() - started
+        used = cpu_seconds(process) - cpu
+        print(f"  WINDOW_UPDATE streams={streams} frames={count} connections={rotations} "
+              f"wall_s={elapsed:.3f} cpu_s={used:.3f} cpu_s_per_s={used / elapsed:.3f} "
+              f"cpu_ns_per_frame={used * 1e9 / count:.1f} frames_per_s={count / elapsed:.0f}", flush=True)
+    worker_available(process, plain)
+
+
 ROWS = {"h2-stalled": h2_stalled, "fastcgi": fastcgi, "h1-sendfile": h1_sendfile,
-        "cached-tls": cached_tls, "h2-idle": h2_idle}
+        "cached-tls": cached_tls, "h2-idle": h2_idle, "h2-header-block": h2_header_block,
+        "h2-window-flood": h2_window_flood}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary")
-    parser.add_argument("--rows", default=",".join(ROWS), help="comma-separated rows")
+    parser.add_argument("--rows", default=",".join(row for row in ROWS if row != "h2-window-flood"),
+                        help="comma-separated rows; h2-window-flood is an opt-in CPU measurement")
     args = parser.parse_args()
     rows = args.rows.split(",")
     if any(row not in ROWS for row in rows):

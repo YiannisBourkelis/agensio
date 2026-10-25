@@ -289,7 +289,8 @@ about a million: more than a small machine has memory for. An idle HTTP/1 connec
 13 KB and an HTTP/2 one about 19 KB, so 10,000 idle HTTP/2 connections are about 190 MB. A
 connection above the ceiling is refused at once: a plain listener answers `503 Service
 Unavailable` with `Retry-After: 2` and closes, a TLS listener closes before the handshake (the
-browser shows a connection error). The error log says so once per worker per ten seconds
+browser shows a connection error), and a new HTTP/3 connection is refused with QUIC's
+`CONNECTION_REFUSED` before any handshake work. The error log says so once per worker per ten seconds
 (`... at its connection ceiling: ...`), naming the addresses refused most. The ceiling is
 not a per-address limit: one client holding thousands of connections is the firewall's to stop,
 and `agensio ctl protection` renders a table that does it.

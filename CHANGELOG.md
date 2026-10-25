@@ -17,7 +17,20 @@
   - The absolute deadline also covers Initial packets, which anyone can open.
 - `tests/timeout-regressions.py` row `h2-idle` and `tests/h3-attacks.py` row `handshake-deadline`
   (the latter now first, with a control socket): written first, they failed on alpha.115 and pass
-  now, and are default rows of their suites.
+  now, and are default rows of their suites. So do `h2-header-block` (an unfinished header block
+  with no stream open) and `handshake-authenticated` (Initial packets that open, sent past the
+  deadline).
+- **A worker at its connection ceiling refuses new HTTP/3 connections too** (audit item 2.4).
+  `server.max_connections` counts TCP and QUIC together, but only the TCP accept path checked it,
+  so QUIC handshakes completed past the ceiling.
+  - A new Initial over the ceiling now gets QUIC's `CONNECTION_REFUSED` (RFC 9000 20.1) in one
+    small Initial packet, before Retry or any handshake work, and no state is kept. A client fails
+    at once instead of at its timeout.
+  - The refusal is counted and sampled with the TCP ones: `connections_refused` in `server_status`,
+    health's `connections_refused`, and the error-log line once per worker per ten seconds.
+  - `tests/h3-attacks.py` row `connection-ceiling`, now a default row, holds the TCP slots and
+    expects both QUIC clients refused with `CONNECTION_REFUSED`. It failed on alpha.115 (both
+    handshakes and GETs succeeded) and passes now, with Retry auto and always.
 
 ## 0.1.0-alpha.115 (2026-10-25)
 

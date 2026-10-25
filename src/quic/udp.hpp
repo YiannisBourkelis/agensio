@@ -242,6 +242,11 @@ public:
     std::size_t half_open = 0;
     std::size_t half_open_budget = 1024;
     std::uint64_t retries_sent = 0, tokens_refused = 0, initials_dropped = 0, resets_sent = 0;
+    // The worker's connection ceiling, TCP and QUIC together (server.max_connections): asked once
+    // per Initial that would make a connection, never per packet; true answers CONNECTION_REFUSED
+    // statelessly, and the server counts the refusal with the TCP ones. Until alpha.116 QUIC never
+    // asked, so over-limit handshakes completed (audit 2.4).
+    std::function<bool(const sockaddr_storage&)> at_ceiling;
 
     void flush() noexcept {
 #ifdef AGENSIO_FUZZ_HOOKS
@@ -543,6 +548,11 @@ private:
             }
             if (!c) {
                 if (h.type != LongType::initial || len < kMinInitialDatagram || h.dcid.len < 8) return;
+                if (at_ceiling && at_ceiling(from)) {  // before Retry: a refusal needs no round trip
+                    if (unsigned char* out = batch.reserve(256))
+                        batch.commit(build_initial_close(out, 256, h, err::connection_refused, "server busy"), from, fromlen);
+                    return;
+                }
                 AcceptInfo info;
                 info.odcid = h.dcid;
                 const auto seconds = static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
