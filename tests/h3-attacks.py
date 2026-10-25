@@ -264,6 +264,11 @@ def row_key_update_twice(args):
     if not c.connect():
         return False, "handshake did not complete"
     c.get("/")
+    # The server's delayed acknowledgement of the GET goes out first. Otherwise the first update's
+    # packet can be the second ack-eliciting one, acknowledged at once under the new keys, which
+    # makes the second update legal by RFC 9001 6.4: the row then failed on the slower sanitizer
+    # build, five times in five, on every commit back to d579167b (2026-10-25).
+    c.pump(0.2)
     c.quic.request_key_update()
     c.quic.send_ping(1)
     c.send_all()
