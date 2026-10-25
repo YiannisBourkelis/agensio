@@ -331,7 +331,12 @@ a one-off.
    `refusal_finding`'s third reading, "legitimate load from many addresses: raise the
    open-file limit", rather than slow clients. Reproduced in section 5.5 for incomplete
    heads and HTTP/1 and HTTP/2 bodies; the idle keep-alive control gets the idle-client
-   diagnosis. No policy or accounting change decided.
+   diagnosis. **Decided 2026-10-26 (the owner): the wording, alpha.117.** The third reading now says
+   "real load or slow clients", how the access log's request rate tells them apart, and the
+   remedy for each (a higher limit; per-address limits in the firewall and a lower `body_timeout`
+   or `idle_timeout`). No accounting of slow clients was added: the advice it gave was not
+   harmful, a higher limit being the usual answer to slow clients too, and counting them would
+   put a branch on the HTTP/1 read path and bookkeeping per HTTP/2 stream.
 10. **The GOAWAY path of `connection_error`** with a writer that never drains (2.11). By the
     code (2026-10-25) it is bounded: after `connection_error` the read loop stops
     (`closing_after_write_`), so nothing refreshes `last_activity_`, and `check_timeouts`

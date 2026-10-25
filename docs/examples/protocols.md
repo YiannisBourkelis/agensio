@@ -312,7 +312,10 @@ agensio ctl logs --level warn --since 1d | grep 'connection ceiling'
 
 Health's `connections_refused` fix follows from who was refused: most refusals from one address
 (the firewall's job, nothing to raise), workers full of idle connections (lower `idle_timeout`),
-or load from many addresses (raise `max_connections`, or `LimitNOFILE` in the unit).
+or many addresses with busy workers: real load (raise `max_connections`, or `LimitNOFILE` in the
+unit) or slow clients sending a request a byte at a time, which never count as idle (limit
+connections per address in the firewall, lower `body_timeout`); few completed requests in the access
+log for that many connections means slow clients.
 
 **MCP:** `server_status` for the ceiling and the refusals per worker, with the addresses and
 listeners they came from; `health_check` for the cause; the keys are root's (`config_reference`).

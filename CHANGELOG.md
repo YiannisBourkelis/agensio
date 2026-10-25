@@ -14,6 +14,13 @@
   `connections` and `connections_idle`.
 - The integration suite holds both: an idle instance reports no connection, health says "3 of 3"
   with three held, and one refused `curl --http3-only` adds one refusal.
+- **Health no longer calls a ceiling full of slow clients "legitimate load"** (audit 2026-10-07,
+  section 5 item 9). Clients that send a request head or body a byte at a time hold connections
+  without counting as idle, so when many addresses filled the ceiling that way, health's
+  `connections_refused` said "legitimate load from many addresses: raise the open-file limit". It
+  now says "real load or slow clients", how to tell them apart (few completed requests in the
+  access log for that many connections means slow clients), and the remedy for each: a higher
+  limit, or per-address limits in the firewall and a lower `body_timeout` or `idle_timeout`.
 
 ## 0.1.0-alpha.116 (2026-10-25)
 

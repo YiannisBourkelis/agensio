@@ -225,7 +225,8 @@ struct RefusalReport {
 // "3 s", "12 min", "2 h", "3 d", for a message.
 std::string ago_text(double seconds);
 // One address behind most refusals: the firewall's job. Workers full of connections idle
-// for 2 s or more: slow or stuck clients. Else legitimate load wanting a higher limit.
+// for 2 s or more: slow or stuck clients. Else real load, or slow clients mid-request (never
+// counted idle), which the access log's request rate tells apart.
 Finding refusal_finding(const RefusalReport& r);
 // What an administrator should look at: certificates, redirects, port 80 for ACME,
 // recent errors, pending restart, root, shared accounts, stale pools.

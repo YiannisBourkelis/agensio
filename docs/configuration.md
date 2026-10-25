@@ -3428,8 +3428,11 @@ and on which listener; `server_status` shows `max_connections`, `connections_ref
 and times; health reports `connections_refused` with a fix that follows from the shape:
 most refusals from one address (the firewall's job, nothing to raise), workers full of
 connections idle for two seconds or more (slow or stuck clients: compare with the access
-log's request rate, lower `idle_timeout`), or many addresses with busy workers (raise the
-limit). Set it when the derived value is wrong
+log's request rate, lower `idle_timeout`), or many addresses with busy workers: real load or
+slow clients, which send a request head or body a byte at a time and never count as idle; few
+completed requests in the access log for that many connections says which (load: raise the limit;
+slow clients: limit connections per address in the firewall, lower `body_timeout` or
+`idle_timeout`, which bounds an unfinished head). Set it when the derived value is wrong
 for the host: smaller to cap memory (an idle HTTP/1 connection costs about 13 KB, HTTP/2
 19 KB), larger only with a larger `LimitNOFILE`.
 

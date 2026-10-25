@@ -5860,9 +5860,13 @@ static void test_refusal_finding() {
     load.idle = 20;
     load.addresses = {{"a", 5}, {"b", 5}, {"c", 5}};
     f = refusal_finding(load);
-    CHECK(f.message.find("from a x5, b x5, c x5 and more addresses;") != std::string::npos && f.fix.starts_with("legitimate load") && f.fix.find("LimitNOFILE") != std::string::npos);
-    load.connections = 100;  // workers far from full and no address dominating: still load
-    CHECK(refusal_finding(load).fix.starts_with("legitimate load"));
+    // Many addresses, workers not full of idle connections: load, or slow clients mid-request, which
+    // never count as idle (audit 2026-10-07 section 5 item 9: it said "legitimate load" for both).
+    CHECK(f.message.find("from a x5, b x5, c x5 and more addresses;") != std::string::npos && f.fix.starts_with("real load or slow clients") &&
+          f.fix.find("access log") != std::string::npos && f.fix.find("LimitNOFILE") != std::string::npos &&
+          f.fix.find("body_timeout") != std::string::npos && f.fix.find("firewall") != std::string::npos);
+    load.connections = 100;  // workers far from full and no address dominating: the same reading
+    CHECK(refusal_finding(load).fix.starts_with("real load or slow clients"));
 }
 
 // Host protection (2026-10-02, docs/configuration.md 18): the input from a configuration (the

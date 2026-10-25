@@ -2588,7 +2588,13 @@ Finding refusal_finding(const RefusalReport& r) {
         fix = "the workers are full of idle connections: slow or stuck clients, or a client keeping connections open; compare with the request rate (logs_query on the access log), "
               "lower server.idle_timeout (15 s by default), and limit connections per address in the firewall (docs/configuration.md 18)";
     else
-        fix = "legitimate load from many addresses: raise the open-file limit (LimitNOFILE in the unit) or server.max_connections, then reload (docs/configuration.md 18)";
+        // Load, or slow clients mid-request (a head or a body arriving a byte at a time), which never
+        // count as idle; the access log tells them apart (audit 2026-10-07, section 5 item 9).
+        fix = "real load or slow clients from many addresses: clients that send their request head or body a byte at a time hold connections without "
+              "counting as idle. Compare with the request rate in the access log (logs_query): few completed requests for that many connections means slow "
+              "clients, whose requests never complete. Real load: raise the open-file limit (LimitNOFILE in the unit) or server.max_connections, then reload. "
+              "Slow clients: limit connections per address in the firewall (protection_show), and lower server.body_timeout (60 s) or server.idle_timeout "
+              "(15 s, which bounds an unfinished request head) to free their connections sooner (docs/configuration.md 18)";
     return Finding{"warn", "connections_refused", "", msg, fix};
 }
 

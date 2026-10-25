@@ -1307,8 +1307,9 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    refused for their name, marked by the SNI callback in an SSL ex-data slot and noted by the
    connection's handshake-failure branch in a second `RefusalSample`); health's `connections_refused` fix follows from
    the shape (`control::refusal_finding`: one address behind most refusals, workers full of
-   idle connections, or load); the error log line carries the same context once per worker
-   per ten seconds. Decided with it: per-address limits are the
+   idle connections, or load or slow clients mid-request, which never count as idle and which
+   the access log's request rate tells apart, audit 2026-10-07 section 5 item 9, alpha.117); the
+   error log line carries the same context once per worker per ten seconds. Decided with it: per-address limits are the
    firewall's and fail2ban's, not the server's (`docs/configuration.md` 18); the server owns
    what only it can see (timeouts, protocol budgets, its own descriptor budget).
 
