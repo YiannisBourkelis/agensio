@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.115
+## 0.1.0-alpha.115 (2026-10-25)
 
 - **The APT repository has two suites, and is ready to go live** once the release signing key is set
   up (`packaging/README.md`). It had never been published: the workflow needed a key that was not
