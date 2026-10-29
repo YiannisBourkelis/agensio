@@ -407,8 +407,10 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       its file ignored. Built as `[cache] precompressed`, on by default, rather than the
       per-location switch planned below: a file without twins pays two pointer tests per
       request, and the stale-build hazard is what the mtime rule is for. Remaining:
-      on-the-fly gzip/brotli for dynamic responses with a level setting, per site or
-      location, off by default, its CPU and latency cost measured and documented.
+      on-the-fly gzip/brotli/zstd for dynamic responses and copies of static files made once
+      in memory, per site, off by default, its CPU and latency cost measured and documented:
+      designed in `docs/design-compression.md` (2026-10-30, from the research of 2026-10-26,
+      `reports/Web server response compression.md`), staged in its section 11.
 - [~] E3 Request-smuggling and parser hardening: **done 2026-09-16** for the request head
       (CL vs TE rules, duplicate CL/Host, obs-fold, bare CR, CTLs, header count limit,
       `Host` validation; libFuzzer targets for the parser and path normaliser). Remaining:
