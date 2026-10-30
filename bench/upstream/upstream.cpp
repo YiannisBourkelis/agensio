@@ -3,6 +3,8 @@
 // what a run measures. Deliberately shares no code with agensio. Modes by path:
 //   /json           small JSON body
 //   /big            a large JSON body (-b bytes, default 100 KB): buffering and body copies
+//   /page           a 32 KB HTML page of varied markup (text/html): what a response compressor
+//                   works on per request (the -C rows of bench/ab.sh)
 //   /slow?ms=N      the JSON answer after N ms: a working application, connection pools
 //   /chunked        the JSON body in three chunks: the proxy's chunked decoder
 //   /close          the JSON answer with Connection: close: reconnects
@@ -35,13 +37,14 @@ namespace {
 std::atomic<std::uint64_t> g_connections{0};
 std::atomic<std::uint64_t> g_requests{0};
 std::string g_big;
+std::string g_page;  // /page: 32 KB of HTML, each paragraph its own, as a CMS page compresses
 unsigned g_port = 9100;
 
 constexpr std::string_view kJson = R"({"ok":true,"service":"upstream"})";
 
-std::string head(std::string_view content_length, bool close, bool chunked = false) {
+std::string head(std::string_view content_length, bool close, bool chunked = false, std::string_view type = "application/json") {
     std::string h = "HTTP/1.1 200 OK\r\nServer: upstream\r\nX-Upstream-Port: " + std::to_string(g_port) +
-                    "\r\nContent-Type: application/json\r\n";
+                    "\r\nContent-Type: " + std::string(type) + "\r\n";
     if (chunked) h += "Transfer-Encoding: chunked\r\n";
     else h += "Content-Length: " + std::string(content_length) + "\r\n";
     if (close) h += "Connection: close\r\n";
@@ -213,6 +216,7 @@ private:
         }
         if (path == "/json") return send(head(std::to_string(kJson.size()), close), kJson, close);
         if (path == "/big") return send(head(std::to_string(g_big.size()), close), g_big, close);
+        if (path == "/page") return send(head(std::to_string(g_page.size()), close, false, "text/html; charset=utf-8"), g_page, close);
         if (path == "/close") return send(head(std::to_string(kJson.size()), true), kJson, true);
         if (path == "/chunked") {
             static const std::string chunks = "d\r\n{\"ok\":true,\"s\r\n" "f\r\nervice\":\"upstre\r\n" "4\r\nam\"}\r\n" "0\r\n\r\n";
@@ -399,6 +403,41 @@ int main(int argc, char** argv) {
         }
     }
     g_big = "{\"data\":\"" + std::string(big > 12 ? big - 12 : 0, 'x') + "\"}";
+    // The page: markup around prose from a fixed generator, two words in three from a small common
+    // vocabulary and the third made of syllables (a name, a term), so it compresses like a CMS page
+    // (about 3:1 with gzip), not like a run of one byte; the same bytes on every start.
+    {
+        static constexpr const char* kWords[] = {"the", "server", "answers", "every", "request", "with", "a", "page", "that", "holds", "text",
+                                                 "and", "links", "for", "its", "readers", "while", "compression", "cuts", "what", "goes",
+                                                 "over", "wire", "to", "quarter", "of", "bytes", "browser", "asked", "in", "header", "it",
+                                                 "sent", "which", "names", "codings", "takes", "order", "prefers", "site", "decides", "once",
+                                                 "per", "answer", "type", "size", "status", "path", "visitor", "signed", "cache", "keeps",
+                                                 "variant", "each", "coding", "under", "one", "key", "so", "nothing", "else", "changes", "today"};
+        static constexpr const char* kSyllables[] = {"ka", "ri", "mo", "ten", "sal", "vo", "ne", "dru", "lis", "pha", "ger", "ol", "tu", "bre", "ni", "cos",
+                                                     "da", "mir", "sho", "un", "pel", "ya", "fin", "ro", "ste", "zan", "le", "bim", "or", "qui", "wa", "hex"};
+        std::uint32_t seed = 2463534242u;
+        auto next = [&] {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            return seed;
+        };
+        auto word = [&]() -> std::string {
+            const std::uint32_t r = next();
+            if (r % 3 != 2) return kWords[(r >> 2) % (sizeof kWords / sizeof kWords[0])];
+            std::string w;
+            const unsigned n = 2 + (r >> 8) % 3;
+            for (unsigned k = 0; k < n; ++k) w += kSyllables[(next() >> 3) % (sizeof kSyllables / sizeof kSyllables[0])];
+            return w;
+        };
+        g_page = "<!doctype html><html><head><title>Page</title></head><body>\n";
+        for (unsigned i = 0; g_page.size() < 32 * 1024; ++i) {
+            g_page += "<article id=\"entry-" + std::to_string(i) + "\" class=\"post type-post status-publish\"><h2>Entry " + std::to_string(i) + "</h2><p>";
+            for (unsigned w = 0; w < 60; ++w) g_page += word() + (w % 12 == 11 ? ". " : " ");
+            g_page += "<a href=\"/entry/" + std::to_string(i) + "\">more</a></p></article>\n";
+        }
+        g_page += "</body></html>\n";
+    }
     g_port = port;
     if (workers == 0) workers = 1;
 #ifndef SO_REUSEPORT

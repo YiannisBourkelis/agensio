@@ -105,6 +105,10 @@ struct Stream {
     // site without it, which pays the one flag test. The value is Encoding of handlers/encoding.hpp,
     // kept as a byte so this header stays free of the handlers'.
     std::uint8_t coding = 0;
+    // With coding set: the site's compression fields (off paths, signed_in, event_streams) and root's
+    // tuning (min_size, levels), for the decision an upstream answer takes (handlers/compress_answer.hpp).
+    const void* site_compression = nullptr;  // const SiteConfig::Compression*, untyped as conn.site is
+    const void* root_compression = nullptr;  // const CompressionConfig*
 
     void reset() {
         request.reset();
@@ -115,6 +119,7 @@ struct Stream {
         header_node = nullptr;
         header_ending = nullptr;
         coding = 0;
+        site_compression = root_compression = nullptr;
     }
 };
 

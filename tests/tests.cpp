@@ -20,6 +20,7 @@
 
 #include "cache.hpp"
 #include "compress.hpp"
+#include "handlers/compress_answer.hpp"
 #include "http1/chunked.hpp"
 #include "config.hpp"
 #include "control/php.hpp"
@@ -557,6 +558,124 @@ static void test_encoding() {
 // the media type without parameters (nginx's gzip_types trap), never what is compressed already.
 // The one-shot encoders behind the copies of cached files (docs/design-compression.md 5), each
 // decoded back by the reference tool, and the cache's charge for a copy attached after the fill.
+// The decision an application's answer takes (handlers/compress_answer.hpp): every rule of
+// docs/design-compression.md 4 and 6 as a pure function over the fields, and the per-thread gzip
+// context round-tripped and reset between answers.
+static void test_compress_answer() {
+    using namespace compress_answer;
+    SiteConfig::Compression site;
+    site.on = true;
+    site.off_paths = {"/my-account/", "/checkout"};
+    CompressionConfig root;
+    root.types_add = {"application/vnd.api+json"};
+    Stream s;
+    s.site_compression = &site;
+    s.root_compression = &root;
+    s.coding = static_cast<std::uint8_t>(Encoding::gzip);
+    s.request.target = "/page?x=1";
+    Answer a;
+    a.content_type = "text/html; charset=utf-8";
+    a.body_size = 4096;
+    CHECK(decide(s, a) == Reason::compress);
+    a.body_size = 1023;
+    CHECK(decide(s, a) == Reason::size);
+    a.body_size = 1024;
+    CHECK(decide(s, a) == Reason::compress);
+    a.body_size = kWholeMax;
+    CHECK(decide(s, a) == Reason::compress);
+    a.body_size = kWholeMax + 1;
+    CHECK(decide(s, a) == Reason::large);  // step 6's, identity with Vary until then
+    a.body_size = 4096;
+    a.content_type = "image/png";
+    CHECK(decide(s, a) == Reason::type);
+    a.content_type = "application/vnd.api+json; charset=utf-8";
+    CHECK(decide(s, a) == Reason::compress);  // types_add, parameters ignored
+    a.content_type = "";
+    CHECK(decide(s, a) == Reason::type);
+    a.content_type = "text/html";
+    a.content_encoding = "gzip";
+    CHECK(decide(s, a) == Reason::already_encoded);
+    a.content_encoding = "";
+    a.status = 206;
+    CHECK(decide(s, a) == Reason::status);
+    a.status = 200;
+    a.content_range = true;
+    CHECK(decide(s, a) == Reason::status);
+    a.content_range = false;
+    for (const int st : {100, 204, 304}) {
+        a.status = st;
+        CHECK(decide(s, a) == Reason::status);
+    }
+    a.status = 404;
+    CHECK(decide(s, a) == Reason::compress);  // an error page with content is compressed (RFC 9110 12.1)
+    a.status = 200;
+    a.cache_control = "max-age=60, No-Transform";
+    CHECK(decide(s, a) == Reason::no_transform);
+    a.cache_control = "no-transformx";
+    CHECK(decide(s, a) == Reason::compress);
+    a.cache_control = "";
+    s.request.headers.add("cache-control", "no-transform");
+    CHECK(decide(s, a) == Reason::no_transform);
+    s.request.headers.clear();
+    s.request.target = "/my-account/orders";
+    CHECK(decide(s, a) == Reason::path_off);
+    s.request.target = "/checkout?step=2";
+    CHECK(decide(s, a) == Reason::path_off);
+    s.request.target = "/checkouts";
+    CHECK(decide(s, a) == Reason::compress);  // a prefix must end at a segment
+    s.request.target = "/page";
+    a.content_type = "text/event-stream";
+    CHECK(decide(s, a) == Reason::event_stream);
+    site.event_streams = true;
+    CHECK(decide(s, a) == Reason::streamed);
+    site.event_streams = false;
+    a.content_type = "text/html";
+    a.streamed = true;
+    CHECK(decide(s, a) == Reason::streamed);
+    a.streamed = false;
+    a.head = true;
+    a.body_size = 0;
+    CHECK(decide(s, a) == Reason::head);  // not size: a HEAD answer has no body to measure
+    a.content_type = "image/png";
+    CHECK(decide(s, a) == Reason::type);  // the GET's fields still decide what a HEAD varies on
+    a.content_type = "text/html";
+    a.head = false;
+    a.body_size = 4096;
+    s.coding = 0;
+    CHECK(decide(s, a) == Reason::no_accept);
+    s.coding = static_cast<std::uint8_t>(Encoding::gzip);
+    site.on = false;
+    CHECK(decide(s, a) == Reason::mode_off);
+    site.on = true;
+    s.site_compression = nullptr;
+    CHECK(decide(s, a) == Reason::mode_off);
+    CHECK(has_no_transform("no-transform") && has_no_transform("public, no-transform, max-age=1") && !has_no_transform("") && !has_no_transform("no-store"));
+    CHECK(under_off_path("/a/b", {"/a/"}) && under_off_path("/a", {"/a"}) && !under_off_path("/ab", {"/a"}) && under_off_path("/a/b?x", {"/a"}));
+    // The gzip context: two bodies through one context decode back; a reset between them.
+    if (coding_built(Encoding::gzip)) {
+        GzipContext& g = gzip_context();
+        std::string out1, out2;
+        const std::string b1(50000, 'a'), b2 = "second body, short but repeated repeated repeated repeated repeated repeated";
+        CHECK(g.compress(5, b1, out1) && out1.size() < 1000 && g.compress(5, b2, out2) && out2.size() < b2.size());
+        for (const auto& [in, out] : {std::pair{b1, out1}, std::pair{b2, out2}}) {
+            const std::string dir = std::string(AGENSIO_SOURCE_DIR) + "/bench/tmp";
+            std::filesystem::create_directories(dir);
+            const std::string path = dir + "/gzctx-test.gz";
+            {
+                std::ofstream f(path, std::ios::binary);
+                f.write(out.data(), static_cast<std::streamsize>(out.size()));
+            }
+            const int rc = std::system(("gzip -dc " + path + " > " + path + ".out 2>/dev/null").c_str());
+            std::string got;
+            if (std::ifstream f(path + ".out", std::ios::binary); rc == 0 && f) got.assign(std::istreambuf_iterator<char>(f), {});
+            CHECK(rc != 0 || got == in);
+            std::filesystem::remove(path);
+            std::filesystem::remove(path + ".out");
+        }
+        CHECK(g.compress(9, b2, out2) && g.compress(1, b2, out1));  // a level change between answers
+    }
+}
+
 static void test_compress_whole() {
     const std::string text(200000, 'a');
     std::string varied;
@@ -12757,6 +12876,7 @@ int main() {
     test_encoding();
     test_compressible_type();
     test_compress_whole();
+    test_compress_answer();
     test_precompressed();
     test_chunked();
     test_core_types();

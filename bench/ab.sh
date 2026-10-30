@@ -3,7 +3,7 @@
 # in the same session so that run-to-run drift cancels out. This is the gate for every
 # phase checkpoint and every change on the request path (see CLAUDE.md).
 #
-# usage: bench/ab.sh <base-ref> [-r ROUNDS] [-d DURATION] [-t THREADS] [-w WORKERS] [-P] [-A] [-u URLSPEC ...]
+# usage: bench/ab.sh <base-ref> [-r ROUNDS] [-d DURATION] [-t THREADS] [-w WORKERS] [-2] [-3] [-P] [-A] [-C] [-u URLSPEC ...]
 #   base-ref  commit, branch or tag to build as the "base" side (worktree under bench/tmp/ab/)
 #   -2        HTTP/2 gate (phase G): adds the rows "h2c:/:64:1", "h2c:/:64:10", "h2:/:64:1" and
 #             "h2:/:64:10" measured with h2load (proto:path:connections:streams; h2c is prior
@@ -54,6 +54,21 @@
 #             and "proxy-cache:/json:64" (127.0.0.1:8089, the same site with a success-only
 #             Cache-Control set too, the same bytes on both sides: from 0.1.0-alpha.99 the read of
 #             the answer's fields a cache decision adds before that loop, docs/headers.md 2.4).
+#   -3        HTTP/3 gate (phase I): the rows "h3:/:64:1", "h3:/:64:10", "h3:/:64:64" and
+#             "h3:/style.css:64:10" with h2load over QUIC on 8443 (H2LOAD_H3); run with -r 3, two
+#             rounds of the h3 rows swing 15 % on the same code (CLAUDE.md).
+#   -C        response compression gate (docs/design-compression.md 10): a site with the key on
+#             (127.0.0.1:8087, TLS on 8486) asked with a browser's Accept-Encoding, "comp:/:64" (the
+#             1 KB page under min_size: identity with Vary, must be flat against the plain row),
+#             "comp:/style.css:64" (the 100 KB CSS from its brotli copy), "comp-gzip:/style.css:64"
+#             (its gzip copy, a tool taking gzip alone), "comp-plain:/style.css:64" (no header: the
+#             file's own bytes with Vary, flat), "comp-tls:/style.css:64" and with -2
+#             "comp-h2:/style.css:64:10" (the copy over TLS and HTTP/2). With -P the proxy site with
+#             the key on (127.0.0.1:8085): "proxy-comp:/json:64" (33 bytes, the decision alone),
+#             "proxy-comp:/page:64" (the upstream's 32 KB page compressed whole per request: the
+#             encoder's cost), "proxy-comp:/big:64" (100 KB, above the whole-answer limit: identity
+#             with Vary until step 6) and "proxy-comp-plain:/page:64" (no header, flat). A side whose
+#             binary lacks the key skips the rows.
 #   -r        rounds of base/new alternation (default 2)
 #   -d        wrk duration per case (default 5s)
 #   -t        wrk threads (default 4)
@@ -81,6 +96,12 @@ if [ $PROXY = 1 ]; then
   [ -f "$BENCH/proxy/ab-site.toml" ] || { echo "bench/proxy/ab-site.toml missing (the proxy site for the gate, phase D1)"; exit 1; }
   SPECS+=("proxy:/json:64" "proxy:/big:64" "proxy:/slow?ms=20:256")
   [ $ACCESS = 1 ] && SPECS+=("proxy-hdr:/json:64" "proxy-cache:/json:64")
+  # -C with -P: the proxy site with response_compression on, on 8085 (docs/design-compression.md 10),
+  # asked with a browser's header: the upstream's 33-byte JSON (under min_size: the decision alone,
+  # must be flat), its 32 KB page compressed whole per request (the encoder's cost), its 100 KB body
+  # (above the whole-answer limit: identity with Vary until step 6, must be flat), and the page
+  # without a header (the decision runs, nothing is compressed, must be flat).
+  [ $COMP = 1 ] && SPECS+=("proxy-comp:/json:64" "proxy-comp:/page:64" "proxy-comp:/big:64" "proxy-comp-plain:/page:64")
 fi
 
 if [ $H2 = 1 ]; then
@@ -295,6 +316,7 @@ if [ $COMP = 1 ]; then
   # streams, where the twin code's TLS and framing paths carry it.
   SPECS+=("comp:/:64" "comp:/style.css:64" "comp-gzip:/style.css:64" "comp-plain:/style.css:64" "comp-tls:/style.css:64")
   [ $H2 = 1 ] && SPECS+=("comp-h2:/style.css:64:10")
+  printf '\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8085"]\nroot = "%s/www"\nresponse_compression = "on"\n\n[[site.location]]\npath = "/"\nupstream = "http://127.0.0.1:9100"\n' "$BENCH" > "$BENCH/tmp/ab-comp-proxy.toml"
   printf '\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8087"]\nroot = "%s/www"\nresponse_compression = "on"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8486"]\nroot = "%s/www"\ntls = { cert = "%s/certs/cert.pem", key = "%s/certs/key.pem" }\nresponse_compression = "on"\n' "$BENCH" "$BENCH" "$BENCH" "$BENCH" > "$BENCH/tmp/ab-comp.toml"
 fi
 # The proxy gate adds a site that forwards 127.0.0.1:8093 to the upstream; a side whose
@@ -309,7 +331,7 @@ fi
 
 PID=""; SIDE_PROXY=0; SIDE_H2=0; SIDE_H3=0
 start() {  # binary
-  for port in 8080 8443 8087 8486 8088 8091 8092 8093 8094 8095 8449 8098 8099; do
+  for port in 8080 8443 8085 8087 8486 8088 8091 8092 8093 8094 8095 8449 8098 8099; do
     nc -z 127.0.0.1 "$port" 2>/dev/null && { echo "port $port is busy; stop the running server first"; exit 1; }
   done
   local cfg="$BENCH/tmp/ab-agensio.toml"
@@ -353,6 +375,7 @@ start() {  # binary
   SIDE_COMP=0
   if [ $COMP = 1 ]; then  # the compression site in the side that loads it (docs/design-compression.md 10)
     cat "$cfg" "$BENCH/tmp/ab-comp.toml" > "$BENCH/tmp/ab-side-comp.toml"
+    [ $SIDE_PROXY = 1 ] && cat "$BENCH/tmp/ab-comp-proxy.toml" >> "$BENCH/tmp/ab-side-comp.toml"
     if "$1" -t -c "$BENCH/tmp/ab-side-comp.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side-comp.toml"; SIDE_COMP=1
     else echo "  (this side has no response_compression: no comp rows)"; fi
   fi
@@ -407,6 +430,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       auth) url="http://127.0.0.1:8096$path" ;;
       comp|comp-gzip|comp-plain) [ $SIDE_COMP = 1 ] || continue; url="http://127.0.0.1:8087$path" ;;
       comp-tls) [ $SIDE_COMP = 1 ] || continue; url="https://127.0.0.1:8486$path" ;;
+      proxy-comp|proxy-comp-plain) [ $SIDE_COMP = 1 ] && [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8085$path" ;;
       comp-h2) [ $SIDE_COMP = 1 ] && [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8486$path" ;;
       h2c) [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8080$path" ;;
       h2) [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;
@@ -427,7 +451,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
     else
       hdr=(); [ "$proto" = auth ] && hdr=(-H "Authorization: Basic YW5uYTpzZWNyZXQ=")  # anna:secret
       case $proto in  # the compression rows' clients
-        comp|comp-tls) hdr=(-H "Accept-Encoding: gzip, deflate, br, zstd") ;;  # a browser's
+        comp|comp-tls|proxy-comp) hdr=(-H "Accept-Encoding: gzip, deflate, br, zstd") ;;  # a browser's
         comp-gzip) hdr=(-H "Accept-Encoding: gzip") ;;                          # a tool taking gzip alone
       esac
       wrk -t"$t" -c"$conns" -d"$DURATION" "${hdr[@]}" "$url" > "$raw" 2>&1

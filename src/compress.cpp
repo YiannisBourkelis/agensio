@@ -115,4 +115,62 @@ bool compress_whole(Encoding e, int level, std::string_view in, std::vector<char
     return false;
 }
 
+GzipContext::GzipContext() = default;
+
+GzipContext::~GzipContext() {
+#ifdef AGENSIO_HAS_ZLIB
+    if (z_) {
+        deflateEnd(static_cast<z_stream*>(z_));
+        delete static_cast<z_stream*>(z_);
+    }
+#endif
+}
+
+bool GzipContext::compress(int level, std::string_view in, std::string& out) {
+    out.clear();
+    if (in.size() > kCompressWholeMax) return false;  // one deflate call: zlib's counts are 32-bit
+#ifdef AGENSIO_HAS_ZLIB
+    level = std::clamp(level, 1, 9);
+    auto* z = static_cast<z_stream*>(z_);
+    if (!z) {
+        z = new z_stream{};
+        // gzip framing (RFC 1952): windowBits 15 + 16; memLevel 8, zlib's own.
+        if (deflateInit2(z, level, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+            delete z;
+            return false;
+        }
+        z_ = z;
+        level_ = level;
+    } else {
+        if (deflateReset(z) != Z_OK) return false;  // the stream fresh for this answer
+        if (level != level_) {
+            if (deflateParams(z, level, Z_DEFAULT_STRATEGY) != Z_OK) return false;
+            level_ = level;
+        }
+    }
+    out.resize(static_cast<std::size_t>(deflateBound(z, static_cast<uLong>(in.size()))));
+    z->next_in = reinterpret_cast<Bytef*>(const_cast<char*>(in.data()));  // NOLINT: zlib's API, not written to
+    z->avail_in = static_cast<uInt>(in.size());
+    z->next_out = reinterpret_cast<Bytef*>(out.data());
+    z->avail_out = static_cast<uInt>(out.size());
+    const int rc = deflate(z, Z_FINISH);
+    if (rc != Z_STREAM_END) {
+        out.clear();
+        deflateReset(z);
+        return false;
+    }
+    out.resize(static_cast<std::size_t>(z->total_out));
+    return true;
+#else
+    (void)level;
+    (void)in;
+    return false;
+#endif
+}
+
+GzipContext& gzip_context() {
+    thread_local GzipContext ctx;
+    return ctx;
+}
+
 }  // namespace agensio

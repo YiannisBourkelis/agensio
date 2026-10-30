@@ -2753,7 +2753,10 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     finalize_site(site);
     // response_compression: the codings this site offers, root's list in root's order (the chooser
     // takes the first of equals), built once here so routing pays one call and no lookup.
-    if (site.compression.on) site.codings = codings_of(cfg.compression.codings);
+    if (site.compression.on) {
+        site.codings = codings_of(cfg.compression.codings);
+        site.root_compression = cfg.compression;
+    }
     for (const auto& add : for_root)
         if (LocationConfig* into = find_at("/")) merge_into(*into, add);
     if (auto types = merged_mime_types(cfg.mime_types, site.mime_types)) {  // every location serves files with them

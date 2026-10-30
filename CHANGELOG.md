@@ -33,6 +33,35 @@
   install. `bench/ab.sh -C` adds the compression rows: the 1 KB page under `min_size`, the
   100 KB CSS from its brotli copy, from its gzip copy, as identity to a client sending no
   `Accept-Encoding`, over TLS, and over HTTP/2 at ten streams with `-2`.
+- **Step 3: PHP, proxied and CGI answers compressed per request, with gzip.** A site with
+  `response_compression = "on"` compresses a buffered application answer whole on the worker
+  (gzip through zlib at `levels.gzip`, 5 by default; the zlib stream kept per thread and reset
+  per answer, no allocation per answer) when it is a compressible media type, at least `min_size`
+  and at most 64 KB (a larger one, and a streamed one, wait for step 6's pieces), a status with
+  content and not a 206, without a `Content-Encoding` of its own or `Cache-Control: no-transform`
+  in the answer or the request, and not under an `off` path; a browser whose best coding is zstd
+  or brotli gets gzip until step 4. The compressed answer carries its exact `Content-Length`, the
+  application's strong ETag weakened to `W/"…"` (RFC 9110 8.8.1; a correct application still
+  answers 304 to it, and the browser's `If-None-Match` is forwarded as it came), `Accept-Ranges`
+  and `Content-MD5` dropped. `Vary: Accept-Encoding` goes on every answer that could have been
+  compressed, merged into the application's own `Vary`: compressed or not, to a client without an
+  acceptable coding, a HEAD, an answer under `min_size` or above 64 KB, or one the application
+  compressed itself, which passes through untouched; `Content-Encoding: identity` from the
+  application is dropped and its body left alone (nginx's convention). A HEAD carries the GET's
+  negotiation (the coding, `Vary`, the weak tag) and no `Content-Length`. The decision
+  (`handlers/compress_answer.hpp`) is a pure function over the answer's fields, unit-tested rule
+  by rule; `tests/compress/` holds the PHP fixtures the integration suite runs over php-fpm.
+  `bench/ab.sh -P -C` adds the proxy rows: the benchmark upstream's new 32 KB page (`/page`,
+  prose from a fixed generator, 4:1 with gzip) compressed per request, its 33-byte JSON and
+  100 KB body (identity, the decision alone) and the page to a client sending no header.
+  Measured (`bench/results/ab-20261030-032443.md`, one worker, three rounds): every row that
+  compresses nothing within noise (the static and proxy rows 0.97 to 1.03; on the site with the
+  key the 33-byte JSON 1.008, the 100 KB body above the limit 1.002, the page without a header
+  0.998), and the 32 KB page compressed per request 8.75 to 368 µs: zlib's deflate at level 5 on
+  33 KB of 3:1 prose costs 0.36 ms of the worker, the cost the design names and the reason zstd 3,
+  an eighth of it, is the default coding once step 4 brings it. For `levels.gzip`, the same
+  zlib 1.3.1 on the same page: level 1 85 µs at 2.86:1, 3 222 µs, 5 376 µs at 3.08:1, 6 554 µs,
+  9 614 µs at 3.12:1. The Laravel and WordPress beds were down; their rows come with step 4.
 ## 0.1.0-alpha.117 (2026-10-26)
 
 - **An HTTP/3 attempt refused at the connection ceiling counts once** (the alpha.116 report). A

@@ -1,4 +1,6 @@
 #include "handlers/upstream_common.hpp"
+#include "compress.hpp"
+#include "handlers/compress_answer.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -154,6 +156,21 @@ bool upgrade_location(std::string& out, std::string_view value, const SiteConfig
     return true;
 }
 
+// A Vary value names Accept-Encoding already (case-insensitive, as a member of the list).
+static bool vary_lists_accept_encoding(std::string_view v) noexcept {
+    std::size_t i = 0;
+    while (i <= v.size()) {
+        std::size_t j = v.find(',', i);
+        if (j == std::string_view::npos) j = v.size();
+        std::string_view m = v.substr(i, j - i);
+        while (!m.empty() && (m.front() == ' ' || m.front() == '\t')) m.remove_prefix(1);
+        while (!m.empty() && (m.back() == ' ' || m.back() == '\t')) m.remove_suffix(1);
+        if (Headers::iequals(m, "accept-encoding") || m == "*") return true;
+        i = j + 1;
+    }
+    return false;
+}
+
 void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<StreamBody> source, const char* log_name,
                            const LocationConfig& loc, ErrorLog* log) {
     Response& r = s.response;
@@ -195,6 +212,41 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
         response_fields::settle(*rules, seen);
     }
     r.fields_decided = true;
+    // response_compression (docs/design-compression.md 6): the fields the decision reads, gathered in
+    // one pass the loop below repeats; a site without the key pays one null test. A buffered answer
+    // that qualifies is compressed whole after the loop; its ETag is weakened and Vary merged inside it.
+    compress_answer::Answer ca;
+    ca.status = res.status;
+    ca.body_size = res.body_size;
+    ca.streamed = res.streamed;
+    ca.head = s.request.method == Method::head;
+    if (s.site_compression) {
+        for (const HeaderField& h : res.headers) {
+            if (Headers::iequals(h.name, "content-type")) ca.content_type = h.value;
+            else if (Headers::iequals(h.name, "content-encoding")) ca.content_encoding = h.value;
+            else if (Headers::iequals(h.name, "cache-control")) ca.cache_control = h.value;
+            else if (Headers::iequals(h.name, "content-range")) ca.content_range = true;
+        }
+    }
+    const compress_answer::Reason why = compress_answer::decide(s, ca);
+    // Step 3 compresses with gzip alone (zstd and brotli per request come with step 4): a client whose
+    // best coding is another one gets gzip when it accepts that too, read again from its header here,
+    // on the compressed answers only; a client taking gzip alone is the one test. A HEAD gets the
+    // GET's negotiation (docs/design-compression.md 8): the same head, with nothing to compress.
+    bool compressing = why == compress_answer::Reason::compress || why == compress_answer::Reason::head;
+    if (compressing && static_cast<Encoding>(s.coding) != Encoding::gzip) {
+        Codings gzip_only;
+        gzip_only.add(Encoding::gzip);
+        compressing = choose_encoding(s.request.accept_encoding, gzip_only) == Encoding::gzip;
+    }
+    // An answer that could have been compressed for another client gets Vary too (RFC 9110 12.5.5):
+    // one for a client without an acceptable coding, a HEAD, one the application compressed itself
+    // (PHP's zlib layer leaves Vary off the identity variant), one under min_size, one above the
+    // whole-answer limit (compressed from step 6 on).
+    const bool vary = s.site_compression && (compressing || why == compress_answer::Reason::no_accept || why == compress_answer::Reason::head ||
+                                             why == compress_answer::Reason::already_encoded || why == compress_answer::Reason::large ||
+                                             (why == compress_answer::Reason::size && ca.body_size > 0));
+    bool vary_seen = false;
     const bool rewrite = proxied && loc.proxy.rewrite_redirects;
     std::string kept;  // the application's Cache-Control directives a protected answer keeps
     r.scratch.reserve(res.head.size() + 64);
@@ -222,6 +274,23 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
             }
             if (private_cache::shared_only_field(h.name)) continue;
         }
+        if (s.site_compression) {
+            if (vary && Headers::iequals(h.name, "vary")) {  // merged into the application's one field
+                vary_seen = true;
+                r.scratch.append("Vary: ").append(h.value);
+                if (!vary_lists_accept_encoding(h.value)) r.scratch.append(", Accept-Encoding");
+                r.scratch.append("\r\n");
+                continue;
+            }
+            if (Headers::iequals(h.name, "content-encoding") && Headers::iequals(h.value, "identity")) continue;  // the application's opt-out, dropped (RFC 9110 8.4)
+            if (compressing) {
+                if (Headers::iequals(h.name, "etag") && !(h.value.size() >= 2 && h.value[0] == 'W' && h.value[1] == '/')) {
+                    r.scratch.append("ETag: W/").append(h.value).append("\r\n");  // the coded representation shares it: weak (RFC 9110 8.8.1)
+                    continue;
+                }
+                if (Headers::iequals(h.name, "accept-ranges") || Headers::iequals(h.name, "content-md5")) continue;  // of the identity bytes
+            }
+        }
         // A Location naming the origin is the site's (proxy.redirects); one naming the site over
         // http:// on a site whose plain HTTP redirects is https:// (docs/redirects.md 2.5).
         if ((rewrite || s.https_site) && Headers::iequals(h.name, "location")) {
@@ -247,6 +316,30 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
         }
     if (rules) response_fields::append_upstream(r.scratch, *rules, guarded, seen);
     if (guarded) r.scratch.append("Cache-Control: private").append(kept.empty() ? "" : ", ").append(kept).append("\r\n");
+    if (vary && !vary_seen) r.scratch.append("Vary: Accept-Encoding\r\n");
+    if (compressing && ca.head) {
+        // The coding the GET would carry, no Content-Length: the compressed length is not known from
+        // the head alone, and 0, the length of an empty encoded stream, would be a lie (RFC 9110 8.6).
+        r.scratch.append("Content-Encoding: gzip\r\n");
+        r.prebuilt_headers = r.scratch;
+        return;
+    }
+    if (compressing && !no_body_status && !res.spill.is_open()) {
+        // The whole buffered body through the worker's gzip context (docs/design-compression.md 6);
+        // the compressed bytes replace it, with their exact length. A failure, or no gain, sends the
+        // body as it came (the head has no coding line yet).
+        const auto* root = static_cast<const CompressionConfig*>(s.root_compression);
+        std::string& out = r.buffer;
+        if (gzip_context().compress(root->level_gzip, res.body, out) && out.size() < res.body.size()) {
+            r.scratch.append("Content-Encoding: gzip\r\nContent-Length: ");
+            append_number(r.scratch, out.size());
+            r.scratch.append("\r\n");
+            r.prebuilt_headers = r.scratch;
+            r.body = MemoryBody{std::string_view(r.buffer)};
+            return;
+        }
+        out.clear();
+    }
     if (res.streamed) {  // buffering off, or the temp-file cap switched it mid-response
         r.prebuilt_headers = r.scratch;  // the writer adds Content-Length or chunked framing
         if (!no_body_status) r.body = std::move(source);

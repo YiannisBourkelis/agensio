@@ -266,6 +266,18 @@ struct RedirectSet {
     bool empty() const noexcept { return rules.empty(); }
 };
 
+// [response_compression] (docs/design-compression.md 3): root's tuning, restart-only, read once at
+// start and never per request. Levels and windows are set explicitly so a library upgrade never
+// changes what agensio sends; the windows (zstd 2^19, brotli 2^18) are not keys.
+struct CompressionConfig {
+    std::vector<std::string> codings = {"zstd", "br", "gzip"};  // offered, the order decides a tie
+    int level_zstd = 3;  // 1..9
+    int level_br = 4;    // 1..6
+    int level_gzip = 5;  // 1..9
+    std::size_t min_size = 1024;
+    std::vector<std::string> types_add;  // media types beyond compressible_type, lower-case, no parameters
+};
+
 struct SiteConfig {
     std::vector<std::string> server_names;  // lower-case host names, "*" matches anything
     std::string user;   // hosting: PHP runs as this user in its own pool, logs are owned by it
@@ -316,6 +328,10 @@ struct SiteConfig {
     // The codings this site offers in root's order (Config::compression.codings), built at load
     // for the one choose_encoding call of a request's routing; empty when compression is off.
     Codings codings;
+    // Root's tuning (min_size, levels, types_add), copied in at load for the answers' decision: the
+    // dispatcher routes with the site alone, and a Config is moved into its Generation after loading,
+    // so a pointer into it would not survive; a copy per site costs a few bytes.
+    CompressionConfig root_compression;
     // response_headers_offer_declined (alpha.94, docs/headers.md 7): the offered fields (4.1) the owner
     // said the site must not send, in their canonical spelling; path_check's offer and health's
     // response_headers_suggested leave them out.
@@ -497,18 +513,6 @@ struct LogConfig {
     // `access` as a sink (Server::assign_log_sinks), -1 when off: a request no site took (a 421 on a
     // listener without a catch-all) is logged there, so the jails see an address probing by IP.
     int access_sink = -1;
-};
-
-// [response_compression] (docs/design-compression.md 3): root's tuning, restart-only, read once at
-// start and never per request. Levels and windows are set explicitly so a library upgrade never
-// changes what agensio sends; the windows (zstd 2^19, brotli 2^18) are not keys.
-struct CompressionConfig {
-    std::vector<std::string> codings = {"zstd", "br", "gzip"};  // offered, the order decides a tie
-    int level_zstd = 3;  // 1..9
-    int level_br = 4;    // 1..6
-    int level_gzip = 5;  // 1..9
-    std::size_t min_size = 1024;
-    std::vector<std::string> types_add;  // media types beyond compressible_type, lower-case, no parameters
 };
 
 struct Config {
