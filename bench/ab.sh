@@ -387,7 +387,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
   for spec in "${SPECS[@]}"; do
     proto="${spec%%:*}"; rest="${spec#*:}"; streams=""
     case $proto in
-      h2|h2c|h3) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
+      h2|h2c|h3|comp-h2) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
       *) conns="${rest##*:}"; path="${rest%:*}" ;;
     esac
     case $proto in
@@ -458,7 +458,7 @@ done
   for spec in "${SPECS[@]}"; do
     proto="${spec%%:*}"; rest="${spec#*:}"; streams=""
     case $proto in
-      h2|h2c|h3) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
+      h2|h2c|h3|comp-h2) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
       *) conns="${rest##*:}"; path="${rest%:*}" ;;
     esac
     LC_NUMERIC=C awk -v k="$proto $path $conns${streams:+x$streams}" -v label="$proto $path c=$conns${streams:+ m=$streams}" '

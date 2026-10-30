@@ -35,3 +35,21 @@ TLS Protocol: TLSv1.3
 Cipher: TLS_AES_128_GCM_SHA256
 Server Temp Key: X25519 253 bits
 Application protocol: h2
+Main benchmark duration is over for thread #3. Stopping all clients.
+Stopped all clients for thread #3
+Main benchmark duration is over for thread #1. Stopping all clients.
+Stopped all clients for thread #1
+Main benchmark duration is over for thread #2. Stopping all clients.
+Stopped all clients for thread #2
+Main benchmark duration is over for thread #0. Stopping all clients.
+Stopped all clients for thread #0
+
+finished in 5.00s, 1507704.00 req/s, 1.50GB/s
+requests: 7538520 total, 7539160 started, 7538520 done, 7538520 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 7538520 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 7.49GB (8043615752) total, 402.61MB (422167744) headers (space savings 70.05%), 6.97GB (7485750360) data
+                     min         max         mean         sd        +/- sd
+time for request:       11us      4.48ms       408us       142us    73.84%
+time for connect:     1.21ms     25.22ms      8.84ms      7.42ms    75.00%
+time to 1st byte:     2.81ms     25.77ms      9.86ms      7.11ms    79.69%
+req/s           :   23312.82    23756.34    23556.28      126.10    60.94%
