@@ -229,16 +229,10 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
         }
     }
     const compress_answer::Reason why = compress_answer::decide(s, ca);
-    // Step 3 compresses with gzip alone (zstd and brotli per request come with step 4): a client whose
-    // best coding is another one gets gzip when it accepts that too, read again from its header here,
-    // on the compressed answers only; a client taking gzip alone is the one test. A HEAD gets the
-    // GET's negotiation (docs/design-compression.md 8): the same head, with nothing to compress.
-    bool compressing = why == compress_answer::Reason::compress || why == compress_answer::Reason::head;
-    if (compressing && static_cast<Encoding>(s.coding) != Encoding::gzip) {
-        Codings gzip_only;
-        gzip_only.add(Encoding::gzip);
-        compressing = choose_encoding(s.request.accept_encoding, gzip_only) == Encoding::gzip;
-    }
+    // The coding is the client's choice among the site's, made once at routing (Stream::coding). A
+    // HEAD gets the GET's negotiation (docs/design-compression.md 8): the same head, nothing to compress.
+    const bool compressing = why == compress_answer::Reason::compress || why == compress_answer::Reason::head;
+    const Encoding coding = static_cast<Encoding>(s.coding);
     // An answer that could have been compressed for another client gets Vary too (RFC 9110 12.5.5):
     // one for a client without an acceptable coding, a HEAD, one the application compressed itself
     // (PHP's zlib layer leaves Vary off the identity variant), one under min_size, one above the
@@ -320,18 +314,21 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
     if (compressing && ca.head) {
         // The coding the GET would carry, no Content-Length: the compressed length is not known from
         // the head alone, and 0, the length of an empty encoded stream, would be a lie (RFC 9110 8.6).
-        r.scratch.append("Content-Encoding: gzip\r\n");
+        r.scratch.append("Content-Encoding: ").append(encoding_name(coding)).append("\r\n");
         r.prebuilt_headers = r.scratch;
         return;
     }
     if (compressing && !no_body_status && !res.spill.is_open()) {
-        // The whole buffered body through the worker's gzip context (docs/design-compression.md 6);
-        // the compressed bytes replace it, with their exact length. A failure, or no gain, sends the
-        // body as it came (the head has no coding line yet).
+        // The whole buffered body through the coding's encoder (docs/design-compression.md 6), padded
+        // by a length drawn per answer where the site compresses signed-in visitors' answers too
+        // (design 7); the compressed bytes replace it, with their exact length. A failure, or no
+        // gain, sends the body as it came (the head has no coding line yet).
+        const auto* site = static_cast<const SiteConfig::Compression*>(s.site_compression);
         const auto* root = static_cast<const CompressionConfig*>(s.root_compression);
         std::string& out = r.buffer;
-        if (gzip_context().compress(root->level_gzip, res.body, out) && out.size() < res.body.size()) {
-            r.scratch.append("Content-Encoding: gzip\r\nContent-Length: ");
+        const unsigned padding = site->signed_in ? padding_length() : 0;
+        if (compress_buffered(coding, compress_answer::level_for(*root, coding), padding, res.body, out) && out.size() < res.body.size()) {
+            r.scratch.append("Content-Encoding: ").append(encoding_name(coding)).append("\r\nContent-Length: ");
             append_number(r.scratch, out.size());
             r.scratch.append("\r\n");
             r.prebuilt_headers = r.scratch;

@@ -62,6 +62,38 @@
   an eighth of it, is the default coding once step 4 brings it. For `levels.gzip`, the same
   zlib 1.3.1 on the same page: level 1 85 µs at 2.86:1, 3 222 µs, 5 376 µs at 3.08:1, 6 554 µs,
   9 614 µs at 3.12:1. The Laravel and WordPress beds were down; their rows come with step 4.
+- **Step 4: zstd and brotli per request, and the padding behind `signed_in = "on"`.** A buffered
+  application answer is compressed with the coding the client chose at routing among the site's
+  (`codings`, zstd first by default: Chrome and Firefox get zstd, Safari brotli, a tool taking
+  gzip alone gzip), no longer gzip for everyone: zstd at `levels.zstd` (3) through one context
+  per thread reset per answer, brotli at `levels.br` (4) through an encoder made for the answer,
+  gzip as before. The windows are fixed in the code and never a library's default (zstd 2^19,
+  brotli 2^18, gzip 2^15; an answer smaller than the window gets a window of its own size), the
+  zstd frame carries its content size and no checksum. A HEAD names the coding the GET would
+  carry. With `signed_in = "on"` every compressed answer of the site carries a padding of a
+  length drawn per answer, up to 32 bytes with the coding's framing, where every decoder skips
+  it (gzip's FEXTRA field, RFC 1952 2.3.1.1; a zstd skippable frame, RFC 8878 3.1.2; a brotli
+  metadata meta-block, RFC 7932 9.2), so one page's length differs from request to request
+  (`docs/design-compression.md` 7: a raise of the BREACH attack's cost, not its removal; the
+  guard that leaves a signed-in visitor's answers uncompressed is step 5). The suite decodes
+  each coding, padded and not, with the reference tools and with curl's own decoders (libzstd,
+  libbrotli, zlib: the browsers' three), over HTTP/1.1 and h2c. `bench/ab.sh -P -C` adds the
+  32 KB page for a client taking brotli alone and one taking gzip alone beside the browser's row.
+  Measured (`bench/results/ab-20261030-084359.md`, one worker, three rounds, against step 3):
+  every row that compresses nothing within noise (0.97 to 1.03; the 33-byte JSON on the site
+  with the key 1.018, the 100 KB body 1.007, the page without a header 0.995); the 32 KB page
+  for a browser 365 to 62 µs per request (zstd 3 where gzip 5 was: an eighth of the encoder's
+  cost, 53 µs of the 62 for the encoder), for a client taking brotli alone 8.7 to 245 µs
+  (brotli 4, two thirds of gzip 5 and smaller output, its encoder made per answer), for gzip
+  alone 365 to 366 (unchanged). The PHP beds (`bench/results/beds-compression-20261030.md`;
+  `bench/laravel/bench.sh -e <coding>` and `bench/wordpress/.ddev/bench.sh` are the scripts):
+  Laravel's welcome page (82 KB) and WordPress's home page (70 KB) are both above the 64 KB
+  whole-answer limit, so as committed they go out identity with `Vary` until step 6 compresses
+  them in pieces, while nginx gzips Laravel's page at 658 µs; measured with the limit raised to
+  256 KB for the experiment, zstd 3 costs 117 µs on that page for 4.5:1 (gzip 5 615 µs, the same
+  zlib as nginx's; brotli 4 543 µs). `bench/compression/brotli-time.cpp` shows brotli 4 at 2.7
+  times brotli 3's cost on a whole 33 KB answer for 0.4 % fewer bytes; the design's reason for
+  4 is the flushed stream of step 6.
 ## 0.1.0-alpha.117 (2026-10-26)
 
 - **An HTTP/3 attempt refused at the connection ceiling counts once** (the alpha.116 report). A

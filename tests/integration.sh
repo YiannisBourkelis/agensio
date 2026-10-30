@@ -3504,13 +3504,14 @@ check "compression copies: a twin the build left on disk is kept over a copy; an
 check "compression copies: status counts the copies and their bytes, which fit the cache's budget, and names the codings this build has" "4 yes br,gzip,zstd" \
   "$(curl -sS --unix-socket bench/tmp/comp/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin)["compression"]; print(int(d["copies_made"]), "yes" if 0 < d["copies_bytes"] < 200*1024 else d["copies_bytes"], ",".join(sorted(d["codings_built"])))')"
 kill $CPID; wait $CPID 2>/dev/null
-# Response compression, step 3 (docs/design-compression.md 6, 8): a PHP site with the key on, on a
-# private instance over a php-fpm of its own (the suite's was stopped above, for the 502 check): a
-# buffered answer compressed whole with gzip, its ETag weakened and answering 304, Vary on it and on
-# what could have been compressed, a HEAD with the GET's negotiation, no-transform honoured both
-# ways, an answer the application compressed passed through with Vary merged, Content-Encoding:
-# identity dropped, an off path, a 206, an image, a small body and one above 64 KB left alone, a
-# client sending no Accept-Encoding given identity with Vary, the compressed page over h2c.
+# Response compression, steps 3 and 4 (docs/design-compression.md 6, 7, 8): a PHP site with the key
+# on, on a private instance over a php-fpm of its own (the suite's was stopped above, for the 502
+# check): a buffered answer compressed whole with the client's coding (zstd, brotli or gzip), its
+# ETag weakened and answering 304, Vary on it and on what could have been compressed, a HEAD with
+# the GET's negotiation, no-transform honoured both ways, an answer the application compressed
+# passed through with Vary merged, Content-Encoding: identity dropped, an off path, a 206, an image,
+# a small body and one above 64 KB left alone, a client sending no Accept-Encoding given identity
+# with Vary, the compressed page over h2c; a second site with signed_in = "on" padding its answers.
 if [ -n "$PHPFPM" ]; then
   mkdir -p bench/tmp/comp3
   cat > bench/tmp/comp3/fpm.conf <<FPMCONF
@@ -3526,7 +3527,7 @@ pm.max_children = 2
 php_admin_flag[display_errors] = off
 FPMCONF
   "$PHPFPM" -y bench/tmp/comp3/fpm.conf -F -p "$ROOT/bench/tmp/comp3" >/dev/null 2>&1 & C3FPM=$!
-  printf '[server]\nworkers = 1\nprotocols = ["h1", "h2c"]\n[log]\naccess = "off"\nerror = "%s/bench/tmp/comp3/error.log"\n[[site]]\nserver_name = ["c3.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { mode = "on", off = ["/off/"] }\n' "$ROOT" "$ROOT" "$ROOT" > bench/tmp/comp3/agensio.toml
+  printf '[server]\nworkers = 1\nprotocols = ["h1", "h2c"]\n[log]\naccess = "off"\nerror = "%s/bench/tmp/comp3/error.log"\n[[site]]\nserver_name = ["c3.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { mode = "on", off = ["/off/"] }\n[[site]]\nserver_name = ["c4.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { mode = "on", signed_in = "on" }\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" > bench/tmp/comp3/agensio.toml
   mkdir -p tests/compress/off; cp tests/compress/page.php tests/compress/off/page.php
   rm -f bench/tmp/comp3/error.log
   "$BIN" -c bench/tmp/comp3/agensio.toml > bench/tmp/comp3/server.out 2>&1 & C3PID=$!
@@ -3540,20 +3541,36 @@ FPMCONF
   f() { cut -d'|' -f"$1"; }
   c3b() { curl -sS -o "$2" -H 'Host: c3.test' "${@:3}" "http://127.0.0.1:8065$1"; }
   IDLEN=$(curl -sS -H 'Host: c3.test' http://127.0.0.1:8065/page.php | wc -c)
-  c3b /page.php bench/tmp/comp3/page.gz -H 'Accept-Encoding: gzip, deflate, br'
-  check "compression of a PHP answer: gzip for a browser, Vary, the application's ETag weakened, the compressed length, and the body decodes to the page" \
-    "200|gzip|Accept-Encoding|W/\"page-v1\" yes yes" \
-    "$(c3 /page.php -H 'Accept-Encoding: gzip, deflate, br' | f 1-4) $([ "$(gzip -dc bench/tmp/comp3/page.gz | wc -c)" = "$IDLEN" ] && echo yes) $([ "$(stat -c %s bench/tmp/comp3/page.gz)" -lt "$IDLEN" ] && echo yes)"
-  check "compression: the weak tag gets a 304 from the application; a HEAD carries the GET's negotiation (the coding, Vary, the weak tag) and no Content-Length; a client sending no Accept-Encoding gets identity with Vary" \
-    "304|- ; 200|gzip|Accept-Encoding|W/\"page-v1\"|- ; 200|-|Accept-Encoding|$IDLEN" \
+  c3b /page.php bench/tmp/comp3/page.zst -H 'Accept-Encoding: gzip, deflate, br, zstd'
+  c3b /page.php bench/tmp/comp3/page.br -H 'Accept-Encoding: gzip, deflate, br'
+  c3b /page.php bench/tmp/comp3/page.gz -H 'Accept-Encoding: gzip'
+  smaller() { for p in "$@"; do [ "$(stat -c %s "$p")" -lt "$IDLEN" ] || return 1; done; echo yes; }
+  check "compression of a PHP answer: zstd for a browser taking every coding, brotli for one without zstd, gzip for a tool, each with Vary and the application's ETag weakened, each shorter than the page and decoding to it with the reference tool" \
+    "200|zstd|Accept-Encoding|W/\"page-v1\" 200|br|Accept-Encoding|W/\"page-v1\" 200|gzip|Accept-Encoding|W/\"page-v1\" yes yes yes yes" \
+    "$(c3 /page.php -H 'Accept-Encoding: gzip, deflate, br, zstd' | f 1-4) $(c3 /page.php -H 'Accept-Encoding: gzip, deflate, br' | f 1-4) $(c3 /page.php -H 'Accept-Encoding: gzip' | f 1-4) $([ "$(zstd -dc bench/tmp/comp3/page.zst | wc -c)" = "$IDLEN" ] && echo yes) $([ "$(brotli -dc bench/tmp/comp3/page.br | wc -c)" = "$IDLEN" ] && echo yes) $([ "$(gzip -dc bench/tmp/comp3/page.gz | wc -c)" = "$IDLEN" ] && echo yes) $(smaller bench/tmp/comp3/page.zst bench/tmp/comp3/page.br bench/tmp/comp3/page.gz)"
+  check "compression: the weak tag gets a 304 from the application; a HEAD carries the GET's negotiation (the coding the GET would get, Vary, the weak tag) and no Content-Length; a client sending no Accept-Encoding gets identity with Vary" \
+    "304|- ; 200|br|Accept-Encoding|W/\"page-v1\"|- ; 200|-|Accept-Encoding|$IDLEN" \
     "$(c3 /page.php -H 'Accept-Encoding: gzip' -H 'If-None-Match: W/"page-v1"' | f 1,2) ; $(c3h /page.php -H 'Accept-Encoding: gzip, br' | f 1-5) ; $(c3 /page.php | f 1,2,3,5)"
+  # signed_in = "on" (docs/design-compression.md 7): every compressed answer padded by a length drawn
+  # per answer, where the coding's decoders skip it; six zstd fetches show at least two lengths and
+  # each decodes to the page, padded brotli and gzip decode with their tools, and curl's own decoders
+  # (libzstd, libbrotli, zlib: the browsers' three) take all of them.
+  c4() { curl -sS -o "$2" -D - -H 'Host: c4.test' "${@:3}" "http://127.0.0.1:8065$1" | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}'; }
+  lens=""; n=0
+  for i in 1 2 3 4 5 6; do lens="$lens $(c4 /page.php bench/tmp/comp3/pad$i.zst -H 'Accept-Encoding: zstd')"; [ "$(zstd -dc bench/tmp/comp3/pad$i.zst 2>/dev/null | wc -c)" = "$IDLEN" ] && n=$((n+1)); done
+  m=0
+  for i in 1 2 3; do c4 /page.php bench/tmp/comp3/pad.br -H 'Accept-Encoding: br' >/dev/null; [ "$(brotli -dc bench/tmp/comp3/pad.br 2>/dev/null | wc -c)" = "$IDLEN" ] && m=$((m+1)); c4 /page.php bench/tmp/comp3/pad.gz -H 'Accept-Encoding: gzip' >/dev/null; [ "$(gzip -dc bench/tmp/comp3/pad.gz 2>/dev/null | wc -c)" = "$IDLEN" ] && m=$((m+1)); done
+  k=0
+  for e in zstd br gzip; do [ "$(curl -sS --compressed -H 'Host: c4.test' -H "Accept-Encoding: $e" http://127.0.0.1:8065/page.php | wc -c)" = "$IDLEN" ] && k=$((k+1)); done
+  check "compression with signed_in = \"on\": six zstd answers carry at least two lengths and all decode to the page; padded brotli and gzip decode with their tools, three times each; curl's own decoders take the three padded codings" "yes 6 6 3" \
+    "$([ "$(echo "$lens" | tr ' ' '\n' | grep -c .)" = 6 ] && [ "$(echo "$lens" | tr ' ' '\n' | grep . | sort -u | wc -l)" -ge 2 ] && echo yes) $n $m $k"
   check "compression: no-transform in the answer and in the request is honoured; the application's own gzip passes through with Vary merged; Content-Encoding: identity is dropped and the body left alone" \
     "200|- ; 200|- ; 200|gzip|Cookie, Accept-Encoding ; 200|-|Accept-Encoding" \
     "$(c3 /nt.php -H 'Accept-Encoding: gzip' | f 1,2) ; $(c3 /page.php -H 'Accept-Encoding: gzip' -H 'Cache-Control: no-transform' | f 1,2) ; $(c3 /gz.php -H 'Accept-Encoding: gzip' | f 1-3) ; $(c3 /ident.php -H 'Accept-Encoding: gzip' | f 1-3)"
   check "compression: an off path, a 206, an image and a body under min_size are left alone; one above 64 KB too (step 6's), with Vary" "- - - - -|Accept-Encoding" \
     "$(c3 /off/page.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /range.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /img.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /small.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /large.php -H 'Accept-Encoding: gzip' | f 2,3)"
-  check "compression: over HTTP/2 (h2c) the compressed page carries its coding and decodes whole" "2 gzip $IDLEN" \
-    "$(curl -sS --http2-prior-knowledge -D - -o /dev/null -H 'Host: c3.test' -H 'Accept-Encoding: gzip' http://127.0.0.1:8065/page.php | tr -d '\r' | awk 'NR==1{v=$1} tolower($1)=="content-encoding:"{e=$2} END{sub(/HTTP\//, "", v); printf "%s %s", v, e}') $(curl -sS --http2-prior-knowledge --compressed -H 'Host: c3.test' http://127.0.0.1:8065/page.php | wc -c)"
+  check "compression: over HTTP/2 (h2c) the compressed page carries its coding and decodes whole" "2 zstd $IDLEN" \
+    "$(curl -sS --http2-prior-knowledge -D - -o /dev/null -H 'Host: c3.test' -H 'Accept-Encoding: zstd' http://127.0.0.1:8065/page.php | tr -d '\r' | awk 'NR==1{v=$1} tolower($1)=="content-encoding:"{e=$2} END{sub(/HTTP\//, "", v); printf "%s %s", v, e}') $(curl -sS --http2-prior-knowledge --compressed -H 'Host: c3.test' http://127.0.0.1:8065/page.php | wc -c)"
   kill $C3PID; wait $C3PID 2>/dev/null
   kill $C3FPM 2>/dev/null; wait $C3FPM 2>/dev/null
   rm -rf tests/compress/off

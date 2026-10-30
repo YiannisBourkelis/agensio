@@ -8,6 +8,10 @@
 #   -p unix uses the pool on the bind-mounted socket .ddev/run/php-fpm.sock (Linux hosts) instead
 #   of the TCP pool published through docker-proxy.
 #   AGENSIO_PHP_EXTRA=', keep_conn = true' bench/laravel/bench.sh -s agensio   # extra php = { } options
+#   -e zstd|br|gzip   response compression (docs/design-compression.md 10): wrk asks for that coding,
+#                     agensio gets response_compression = "on" with codings = [the one], nginx gzip at
+#                     level 5 for gzip and is skipped for br and zstd (its stock build has no module);
+#                     the table gains the bytes on the wire per answer, headers included.
 #
 # nginx: the host binary if there is one, else the agensio-devbox image (docs/linux-dev-setup.md)
 # on the host network with the repo mounted at the same path. Needs the bed running
@@ -17,14 +21,14 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BED="$ROOT/bench/laravel"
 PUBLIC="$BED/public"
 TMP="$ROOT/bench/tmp/laravel-bench"
-DUR=10s; CONNS=64; THREADS=4; ROUNDS=1; SERVERS="agensio nginx"; URLS=(); POOL=tcp
+DUR=10s; CONNS=64; THREADS=4; ROUNDS=1; SERVERS="agensio nginx"; URLS=(); POOL=tcp; CODING=off
 FPM_TCP=${FPM_TCP:-127.0.0.1:9000}; FPM_SOCK="$BED/.ddev/run/php-fpm.sock"  # FPM_TCP=<container ip>:9000 skips docker-proxy
 REMOTE_ROOT=/var/www/html/public; FPM_CONTAINER=ddev-agensio-laravel-web
 PORT_AGENSIO=8073; PORT_NGINX=8074
-while getopts 'd:c:t:s:u:r:p:' o; do
+while getopts 'd:c:t:s:u:r:p:e:' o; do
   case $o in
     d) DUR=$OPTARG ;; c) CONNS=$OPTARG ;; t) THREADS=$OPTARG ;; s) SERVERS=$OPTARG ;;
-    u) URLS+=("$OPTARG") ;; r) ROUNDS=$OPTARG ;; p) POOL=$OPTARG ;;
+    u) URLS+=("$OPTARG") ;; r) ROUNDS=$OPTARG ;; p) POOL=$OPTARG ;; e) CODING=$OPTARG ;;
     *) exit 2 ;;
   esac
 done
@@ -34,6 +38,10 @@ case $POOL in
   *) echo "-p tcp|unix" >&2; exit 2 ;;
 esac
 [ ${#URLS[@]} -eq 0 ] && URLS=(/ /json)
+case $CODING in off|zstd|br|gzip) ;; *) echo "-e zstd|br|gzip" >&2; exit 2 ;; esac
+WRK_HDR=(); [ $CODING = off ] || WRK_HDR=(-H "Accept-Encoding: $CODING")
+NGINX_GZIP=""  # text/html is always in gzip_types (nginx warns when it is listed)
+[ $CODING = gzip ] && NGINX_GZIP='gzip on; gzip_comp_level 5; gzip_min_length 1024; gzip_vary on; gzip_types text/plain text/css application/json application/javascript application/xml image/svg+xml;'
 export LC_NUMERIC=C
 mkdir -p "$TMP"
 
@@ -59,12 +67,14 @@ idle_timeout = 65
 [log]
 access = "off"
 error = "$TMP/agensio-error.log"
+$([ $CODING = off ] || printf '[response_compression]\ncodings = ["%s"]' "$CODING")
 [[site]]
 server_name = ["*"]
 listen = ["127.0.0.1:$PORT_AGENSIO"]
 root = "$BED"
 app = "laravel"
 php = { socket = "$FPM_AGENSIO", remote_root = "$REMOTE_ROOT", read_timeout = 60${AGENSIO_PHP_EXTRA:-} }
+$([ $CODING = off ] || echo 'response_compression = "on"')
 TOML
 
 mkdir -p "$TMP/nginx"
@@ -77,6 +87,7 @@ http {
   access_log off;
   sendfile on; tcp_nopush on; tcp_nodelay on;
   keepalive_timeout 65; keepalive_requests 1000000;
+  $NGINX_GZIP
   client_body_temp_path $TMP/nginx/body; fastcgi_temp_path $TMP/nginx/fastcgi;
   proxy_temp_path $TMP/nginx/proxy; uwsgi_temp_path $TMP/nginx/uwsgi; scgi_temp_path $TMP/nginx/scgi;
   server {
@@ -183,11 +194,11 @@ CHILDREN=$(pids_of fpm | tr ',' '\n' | grep -c . || true)
   echo "- commit: $(git -C "$ROOT" rev-parse --short HEAD)$(git -C "$ROOT" diff --quiet || echo '+dirty')"
   echo "- servers: $(for s in $SERVERS; do printf '%s; ' "$(version_of "$s")"; done)nginx via $NGINX_MODE"
   echo "- app: Laravel $LARAVELV on PHP $PHPV, php-fpm pool \`$POOL_NAME\` in $FPM_CONTAINER ($CHILDREN static children, $POOL $FPM), same pool for both servers; agensio php options: ${AGENSIO_PHP_EXTRA:-none beyond the defaults}"
-  echo "- one web-server worker each; wrk $THREADS threads, $CONNS connections, $DUR, $ROUNDS round(s); command: \`$0 $*\`"
+  echo "- one web-server worker each; wrk $THREADS threads, $CONNS connections, $DUR, $ROUNDS round(s); compression: $CODING$([ $CODING = off ] || echo " (wrk sends Accept-Encoding: $CODING; agensio response_compression = \"on\" with codings = [\"$CODING\"]; nginx gzip level 5 for gzip, skipped for the others; bytes/ans = bytes on the wire per answer, headers included)"); command: \`$0 $*\`"
   echo "- web us/req = CPU time of the web server's processes / requests; php us/req = CPU of the web container (cgroup, i.e. the php-fpm children) / requests: the application's cost, the same work for both servers"
   echo
-  echo "| server | path | conns | req/s | p50 | p99 | web us/req | php us/req | rss MB | errors |"
-  echo "|---|---|---|---|---|---|---|---|---|---|"
+  echo "| server | path | conns | req/s | p50 | p99 | web us/req | php us/req | rss MB | bytes/ans | errors |"
+  echo "|---|---|---|---|---|---|---|---|---|---|---|"
 } > "$OUT"
 
 verify() {  # same answer from both servers before measuring
@@ -200,10 +211,11 @@ verify() {  # same answer from both servers before measuring
 
 for round in $(seq 1 "$ROUNDS"); do
   for s in $SERVERS; do
+    if [ "$s" = nginx ] && [ $CODING != off ] && [ $CODING != gzip ]; then echo "nginx: no $CODING module in its stock build, skipped"; continue; fi
     start_server "$s"
     verify "$s"
     port=$(port_of "$s")
-    wrk -t"$THREADS" -c"$CONNS" -d2s "http://127.0.0.1:$port${URLS[0]}" >/dev/null 2>&1  # warm-up
+    wrk -t"$THREADS" -c"$CONNS" -d2s "${WRK_HDR[@]}" "http://127.0.0.1:$port${URLS[0]}" >/dev/null 2>&1  # warm-up
     # wrk drops its connections with their requests still queued for php-fpm; since E9 an
     # abandoned request is cancelled within a tick, the pause only lets php-fpm finish
     # the ones already running before measuring.
@@ -211,17 +223,19 @@ for round in $(seq 1 "$ROUNDS"); do
     for u in "${URLS[@]}"; do
       raw="$RAW/$s${u//\//_}-r$round.txt"
       c0=$(cpu_seconds "$s"); f0=$(cpu_seconds fpm)
-      wrk -t"$THREADS" -c"$CONNS" -d"$DUR" --latency "http://127.0.0.1:$port$u" > "$raw" 2>&1
+      wrk -t"$THREADS" -c"$CONNS" -d"$DUR" --latency "${WRK_HDR[@]}" "http://127.0.0.1:$port$u" > "$raw" 2>&1
       c1=$(cpu_seconds "$s"); f1=$(cpu_seconds fpm)
       reqs=$(awk '/requests in/ {print $1}' "$raw")
+      # "N requests in 10.00s, 4.55GB read": the bytes on the wire per answer (wrk's units are 1024-based)
+      bytes=$(awk '/requests in/ {v=$5; u=v; gsub(/[0-9.]/, "", u); gsub(/[A-Za-z]/, "", v); m=1; if (u=="KB") m=1024; else if (u=="MB") m=1048576; else if (u=="GB") m=1073741824; if ($1>0) printf "%.0f", v*m/$1; else print "n/a"}' "$raw")
       rps=$(awk '/Requests\/sec/ {print $2}' "$raw")
       p50=$(awk '$1=="50%" {print $2}' "$raw"); p99=$(awk '$1=="99%" {print $2}' "$raw")
       errs=$( (grep -E 'Socket errors|Non-2xx' "$raw" || true) | sed 's/^ *//' | paste -sd';' - ); [ -z "$errs" ] && errs="-"
       web=$(awk -v a="$c0" -v b="$c1" -v n="$reqs" 'BEGIN{ if (n>0) printf "%.1f", (b-a)*1e6/n; else print "n/a" }')
       php=$(awk -v a="$f0" -v b="$f1" -v n="$reqs" 'BEGIN{ if (n>0) printf "%.0f", (b-a)*1e6/n; else print "n/a" }')
       rss=$(rss_mb "$s")
-      echo "$s $u c=$CONNS: $rps req/s p50=$p50 p99=$p99 web=${web}us/req php=${php}us/req rss=${rss}MB $errs"
-      echo "| $s | $u | $CONNS | $rps | $p50 | $p99 | $web | $php | $rss | $errs |" >> "$OUT"
+      echo "$s $u c=$CONNS: $rps req/s p50=$p50 p99=$p99 web=${web}us/req php=${php}us/req rss=${rss}MB bytes/ans=$bytes $errs"
+      echo "| $s | $u | $CONNS | $rps | $p50 | $p99 | $web | $php | $rss | $bytes | $errs |" >> "$OUT"
       sleep 2  # same drain between cases
     done
     stop_server "$s"

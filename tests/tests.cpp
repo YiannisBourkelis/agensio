@@ -656,7 +656,7 @@ static void test_compress_answer() {
         GzipContext& g = gzip_context();
         std::string out1, out2;
         const std::string b1(50000, 'a'), b2 = "second body, short but repeated repeated repeated repeated repeated repeated";
-        CHECK(g.compress(5, b1, out1) && out1.size() < 1000 && g.compress(5, b2, out2) && out2.size() < b2.size());
+        CHECK(g.compress(5, 0, b1, out1) && out1.size() < 1000 && g.compress(5, 0, b2, out2) && out2.size() < b2.size());
         for (const auto& [in, out] : {std::pair{b1, out1}, std::pair{b2, out2}}) {
             const std::string dir = std::string(AGENSIO_SOURCE_DIR) + "/bench/tmp";
             std::filesystem::create_directories(dir);
@@ -672,8 +672,78 @@ static void test_compress_answer() {
             std::filesystem::remove(path);
             std::filesystem::remove(path + ".out");
         }
-        CHECK(g.compress(9, b2, out2) && g.compress(1, b2, out1));  // a level change between answers
+        CHECK(g.compress(9, 0, b2, out2) && g.compress(1, 0, b2, out1));  // a level change between answers
     }
+}
+
+// The encoders behind answers compressed per request (docs/design-compression.md 6, 7): each coding
+// through compress_buffered decodes back with the reference tool, padded or not; a padded answer is
+// longer by at most 32 bytes and decodes to the same bytes; the per-thread contexts take a level
+// change and an empty answer; the padding sits where the design says (gzip's extra field, zstd's
+// skippable frame); padding_length stays within its bound and reaches both ends.
+static void test_compress_buffered() {
+    std::string page;
+    for (int i = 0; i < 1200; ++i) page += "<p>paragraph " + std::to_string(i * 7919 % 977) + " of the page, with words that repeat</p>\n";
+    const std::string dir = std::string(AGENSIO_SOURCE_DIR) + "/bench/tmp";
+    std::filesystem::create_directories(dir);
+    const auto decodes = [&](Encoding e, const std::string& bytes, const std::string& want) {
+        const std::string path = dir + "/compress-buffered." + std::string(encoding_name(e));
+        {
+            std::ofstream f(path, std::ios::binary);
+            f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        }
+        const char* tool = e == Encoding::br ? "brotli -dc" : e == Encoding::gzip ? "gzip -dc" : "zstd -dc";
+        const int rc = std::system((std::string(tool) + " " + path + " > " + path + ".out 2>/dev/null").c_str());
+        std::string got;
+        if (std::ifstream f(path + ".out", std::ios::binary); rc == 0 && f) got.assign(std::istreambuf_iterator<char>(f), {});
+        std::filesystem::remove(path);
+        std::filesystem::remove(path + ".out");
+        if (rc != 0) {
+            std::printf("note: %s not available, the buffered %s answer is not decoded\n", tool, encoding_name(e).data());
+            return true;
+        }
+        if (got != want) std::printf("buffered %s: %zu bytes back, %zu in\n", encoding_name(e).data(), got.size(), want.size());
+        return got == want;
+    };
+    for (const Encoding e : {Encoding::zstd, Encoding::br, Encoding::gzip}) {
+        std::string plain, padded, one, again, empty;
+        if (!coding_built(e)) {
+            CHECK(!compress_buffered(e, 3, 0, page, plain) && plain.empty());
+            continue;
+        }
+        const int level = e == Encoding::zstd ? 3 : e == Encoding::br ? 4 : 5;
+        CHECK(compress_buffered(e, level, 0, page, plain) && plain.size() < page.size() / 3);
+        CHECK(decodes(e, plain, page));
+        CHECK(compress_buffered(e, level, kPaddingMax, page, padded) && padded.size() > plain.size() && padded.size() <= plain.size() + 32);
+        CHECK(decodes(e, padded, page));
+        CHECK(compress_buffered(e, level, 1, page, one) && one.size() > plain.size() && one.size() < padded.size() && decodes(e, one, page));
+        CHECK(compress_buffered(e, 1, 0, page, again) && decodes(e, again, page));  // a level change on the kept context
+        CHECK(compress_buffered(e, level, 0, "", empty) && decodes(e, empty, ""));
+    }
+    if (coding_built(Encoding::gzip)) {  // FLG.FEXTRA set, XLEN the subfield's 4 bytes plus the padding; none without
+        std::string g;
+        const auto byte = [&](std::size_t i) { return static_cast<unsigned>(static_cast<unsigned char>(g[i])); };
+        CHECK(compress_buffered(Encoding::gzip, 5, 7, "hello hello hello hello", g) && g.size() > 12 && (byte(3) & 4u) != 0 && byte(10) == 4 + 7 && byte(11) == 0 &&
+              g[12] == 'a' && g[13] == 'g');
+        CHECK(compress_buffered(Encoding::gzip, 5, 0, "hello hello hello hello", g) && (byte(3) & 4u) == 0);
+    }
+    if (coding_built(Encoding::zstd)) {  // the skippable frame's magic and length, then the data frame's magic
+        std::string z;
+        const auto byte = [&](std::size_t i) { return static_cast<unsigned>(static_cast<unsigned char>(z[i])); };
+        CHECK(compress_buffered(Encoding::zstd, 3, 5, "hello hello hello hello", z) && z.size() > 14 && byte(0) == 0x50 && byte(3) == 0x18 && byte(4) == 5 &&
+              byte(5) == 0 && byte(13) == 0x28);
+        CHECK(compress_buffered(Encoding::zstd, 3, 0, "hello hello hello hello", z) && byte(0) == 0x28);
+    }
+    unsigned lo = kPaddingMax, hi = 0;
+    for (int i = 0; i < 2000; ++i) {
+        const unsigned n = padding_length();
+        lo = std::min(lo, n);
+        hi = std::max(hi, n);
+    }
+    CHECK(lo == 0 && hi == kPaddingMax);  // 25 values, 2000 draws: an end missing has odds of 1e-35
+    const CompressionConfig root;
+    CHECK(compress_answer::level_for(root, Encoding::zstd) == 3 && compress_answer::level_for(root, Encoding::br) == 4 &&
+          compress_answer::level_for(root, Encoding::gzip) == 5 && compress_answer::level_for(root, Encoding::identity) == 0);
 }
 
 static void test_compress_whole() {
@@ -12877,6 +12947,7 @@ int main() {
     test_compressible_type();
     test_compress_whole();
     test_compress_answer();
+    test_compress_buffered();
     test_precompressed();
     test_chunked();
     test_core_types();

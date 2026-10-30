@@ -55,6 +55,17 @@ inline std::string_view reason_name(Reason r) noexcept {
 // compressed as the writer pulls it, in pieces of this size, from step 6 on.
 inline constexpr std::uint64_t kWholeMax = 64 * 1024;
 
+// Root's level for the coding (levels = { zstd, br, gzip }).
+inline int level_for(const CompressionConfig& root, Encoding e) noexcept {
+    switch (e) {
+        case Encoding::zstd: return root.level_zstd;
+        case Encoding::br: return root.level_br;
+        case Encoding::gzip: return root.level_gzip;
+        case Encoding::identity: break;
+    }
+    return 0;
+}
+
 // The fields the decision reads, as the head loop gathered them (empty when absent).
 struct Answer {
     int status = 200;

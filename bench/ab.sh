@@ -65,8 +65,10 @@
 #             file's own bytes with Vary, flat), "comp-tls:/style.css:64" and with -2
 #             "comp-h2:/style.css:64:10" (the copy over TLS and HTTP/2). With -P the proxy site with
 #             the key on (127.0.0.1:8085): "proxy-comp:/json:64" (33 bytes, the decision alone),
-#             "proxy-comp:/page:64" (the upstream's 32 KB page compressed whole per request: the
-#             encoder's cost), "proxy-comp:/big:64" (100 KB, above the whole-answer limit: identity
+#             "proxy-comp:/page:64" (the upstream's 32 KB page compressed whole per request with the
+#             browser's coding, zstd by default: the encoder's cost), "proxy-comp-br:/page:64" and
+#             "proxy-comp-gzip:/page:64" (the page for a client taking brotli alone, gzip alone),
+#             "proxy-comp:/big:64" (100 KB, above the whole-answer limit: identity
 #             with Vary until step 6) and "proxy-comp-plain:/page:64" (no header, flat). A side whose
 #             binary lacks the key skips the rows.
 #   -r        rounds of base/new alternation (default 2)
@@ -101,7 +103,7 @@ if [ $PROXY = 1 ]; then
   # must be flat), its 32 KB page compressed whole per request (the encoder's cost), its 100 KB body
   # (above the whole-answer limit: identity with Vary until step 6, must be flat), and the page
   # without a header (the decision runs, nothing is compressed, must be flat).
-  [ $COMP = 1 ] && SPECS+=("proxy-comp:/json:64" "proxy-comp:/page:64" "proxy-comp:/big:64" "proxy-comp-plain:/page:64")
+  [ $COMP = 1 ] && SPECS+=("proxy-comp:/json:64" "proxy-comp:/page:64" "proxy-comp-br:/page:64" "proxy-comp-gzip:/page:64" "proxy-comp:/big:64" "proxy-comp-plain:/page:64")
 fi
 
 if [ $H2 = 1 ]; then
@@ -430,7 +432,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       auth) url="http://127.0.0.1:8096$path" ;;
       comp|comp-gzip|comp-plain) [ $SIDE_COMP = 1 ] || continue; url="http://127.0.0.1:8087$path" ;;
       comp-tls) [ $SIDE_COMP = 1 ] || continue; url="https://127.0.0.1:8486$path" ;;
-      proxy-comp|proxy-comp-plain) [ $SIDE_COMP = 1 ] && [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8085$path" ;;
+      proxy-comp|proxy-comp-br|proxy-comp-gzip|proxy-comp-plain) [ $SIDE_COMP = 1 ] && [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8085$path" ;;
       comp-h2) [ $SIDE_COMP = 1 ] && [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8486$path" ;;
       h2c) [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8080$path" ;;
       h2) [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;
@@ -452,7 +454,8 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       hdr=(); [ "$proto" = auth ] && hdr=(-H "Authorization: Basic YW5uYTpzZWNyZXQ=")  # anna:secret
       case $proto in  # the compression rows' clients
         comp|comp-tls|proxy-comp) hdr=(-H "Accept-Encoding: gzip, deflate, br, zstd") ;;  # a browser's
-        comp-gzip) hdr=(-H "Accept-Encoding: gzip") ;;                          # a tool taking gzip alone
+        comp-gzip|proxy-comp-gzip) hdr=(-H "Accept-Encoding: gzip") ;;          # a tool taking gzip alone
+        proxy-comp-br) hdr=(-H "Accept-Encoding: br") ;;                        # a CDN asking the origin for brotli
       esac
       wrk -t"$t" -c"$conns" -d"$DURATION" "${hdr[@]}" "$url" > "$raw" 2>&1
       n=$(awk '/requests in/{print $1}' "$raw"); rps=$(awk '/^Requests\/sec/{print $2}' "$raw")
