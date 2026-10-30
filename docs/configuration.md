@@ -4066,7 +4066,7 @@ Root's table tunes what every site shares; it is read at start, so a change need
 ```toml
 [response_compression]
 codings   = ["zstd", "br", "gzip"]          # offered; the order decides when the browser accepts several equally
-levels    = { zstd = 3, br = 4, gzip = 5 }  # for answers compressed per request
+levels    = { zstd = 3, br = 3, gzip = 5 }  # for answers compressed per request
 min_size  = 1024                            # bytes; smaller answers go uncompressed
 types_add = ["application/vnd.api+json"]    # media types beyond the built-in list
 ```
@@ -4076,8 +4076,13 @@ do (`gzip, deflate, br, zstd`). zstd first is the default because it costs a qua
 CPU for 1 to 8 % more bytes on HTML and 83 % of browsers take it; brotli serves the rest. A site
 behind Cloudflare, CloudFront or Fastly does better with `["br", "zstd", "gzip"]`: those ask the
 origin for brotli and pass it on to visitors, and ignore an origin's zstd. The levels are for
-answers compressed per request (measured: zstd 3 within 2 % of gzip 6's size at eight times its
-speed, brotli 4 at twice); the copies of cached files are made once at brotli 11 and gzip 9,
+answers compressed per request (measured on real pages, `bench/results/compression-levels-20261030.md`:
+zstd 3 within 2 % of gzip 6's size at eight times its speed; brotli 3 within 2 % of zstd 3's bytes
+at a third of its speed, brotli 4 five to seven per cent smaller on HTML at 1.5 to 1.8 times
+brotli 3's cost; gzip 5 gzip 6's size at 0.6 of its cost, gzip 1 seven to seventeen per cent larger
+at half of gzip 5's). A buffered answer up to 256 KB is compressed whole on the worker (a CMS home
+page is 70 to 82 KB; at 256 KB zstd 3 holds the worker 0.35 ms, gzip 5 2 ms); a larger one goes out
+uncompressed until the streamed path compresses it in pieces. The copies of cached files are made once at brotli 11 and gzip 9,
 which is not a setting, and the encoders' windows are fixed for the memory each stream takes. A
 coding the build lacks (`libzstd`, `libbrotli` missing at build time) is refused by `agensio -t`,
 naming the package.

@@ -6,7 +6,7 @@
 set -euo pipefail
 export LC_NUMERIC=C
 BIN=$1; CODING=$2; DUR=${3:-10s}; CONNS=${4:-64}; THREADS=4
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)  # bench/wordpress/.ddev/bench.sh: three levels up is the repository
 TMP=$ROOT/bench/tmp/wp-bench; mkdir -p "$TMP"
 PORT=8072; HOST="wp.agensio.ddev.site:$PORT"; CONTAINER=ddev-agensio-wordpress-web
 nc -z 127.0.0.1 9002 || { echo "pool 9002 down" >&2; exit 1; }

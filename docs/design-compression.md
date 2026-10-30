@@ -6,7 +6,9 @@ within noise, the upstream's 32 KB page 8.75 to 368 µs per request: gzip 5 on 3
 0.36 ms of the worker, which is why zstd 3 is the default once step 4 brings it); step 4, zstd and brotli
 per request with the fixed windows and the padding of `signed_in = "on"` (2026-10-30,
 `ab-20261030-084359.md`: the same page for a browser 365 to 62 µs with zstd 3, 245 µs for a client
-taking brotli alone, gzip unchanged, every other row flat). Built on the research of
+taking brotli alone, gzip unchanged, every other row flat); the per-request defaults re-measured on
+real pages the same day (`compression-levels-20261030.md`, decision 8: the whole-answer limit 256 KB,
+brotli 3; `ab-20261030-150021.md`: the page for brotli alone 299 to 115 µs, the rest flat). Built on the research of
 2026-10-26, `reports/Web server response compression.md`, and its notes under
 `research_notes/Web server response compression/` (nine servers, the CDNs, the RFCs, BREACH, the
 cost of each encoder measured on this box, what applications do, what administrators ask).
@@ -117,7 +119,7 @@ the rule of `no-request-cost-for-rare-keys`):
 ```toml
 [response_compression]
 codings   = ["zstd", "br", "gzip"]          # offered; the order decides when the browser accepts several equally
-levels    = { zstd = 3, br = 4, gzip = 5 }  # for answers compressed per request (zstd 1-9, br 1-6, gzip 1-9)
+levels    = { zstd = 3, br = 3, gzip = 5 }  # for answers compressed per request (zstd 1-9, br 1-6, gzip 1-9)
 min_size  = 1024                            # bytes; smaller answers go uncompressed
 types_add = ["application/vnd.api+json"]    # media types beyond the built-in list
 ```
@@ -199,10 +201,14 @@ built, in `apply_upstream_result` and the error-page path, by a `Compressor` the
   visitor not signed in (section 7), the budget not exhausted. The coding is the request's
   `choose_encoding` result, computed once at routing when the site has `mode = "on"` and kept on
   the `Stream` (a site without the key never computes it: the one test on the request path).
-- **A buffered answer up to 64 KB** (most HTML and JSON) is compressed whole into the worker's
-  reused output buffer, by a context the worker reuses (zlib and zstd reset; brotli allocates
-  its encoder per answer, inside the measured times), and goes out with an exact
-  `Content-Length`. Cost: 25 µs for a 35 KB page with zstd 3, 104 µs with brotli 4.
+- **A buffered answer up to 256 KB** (HTML and JSON; a CMS home page is 70 to 82 KB) is
+  compressed whole into the worker's reused output buffer, by a context the worker reuses (zlib
+  and zstd reset; brotli allocates its encoder per answer, inside the measured times), and goes
+  out with an exact `Content-Length`. The limit bounds the time one answer holds the worker: at
+  256 KB about 0.35 ms with zstd 3, 1.4 ms with brotli 4, 2.1 ms with gzip 5
+  (`bench/results/compression-levels-20261030.md`; 64 KB until that measurement, which left
+  the CMS pages out). Cost on the WordPress home page (70 KB): 54 µs with zstd 3, 191 µs with
+  brotli 3, 399 µs with gzip 5.
 - **A larger buffered answer, a spilled body or a stream** is compressed as the writer pulls it:
   a `CompressedBody` wraps the source as a `StreamBody`, compressing each 64 KB piece as it is
   asked for, so HTTP/2 and HTTP/3 backpressure holds and a slow client holds one piece and one
@@ -212,8 +218,10 @@ built, in `apply_upstream_result` and the error-page path, by a `Compressor` the
   hop and no pool.
 - **Flushes:** an upstream read that empties the socket, a FastCGI record boundary and the end of
   a chunk each end with the encoder flushed (`ZSTD_e_flush`, `BROTLI_OPERATION_FLUSH`,
-  `Z_SYNC_FLUSH`), so what the application flushed reaches the client. brotli below quality 4
-  loses up to 24 % when flushed per 16 KB (measured), which is why the dynamic default is 4.
+  `Z_SYNC_FLUSH`), so what the application flushed reaches the client. brotli 1 loses 7 to 42 %
+  when flushed per 16 KB (its one-pass mode); from quality 2 up a flush costs 0 to 4 %, as it
+  does gzip 5 and zstd 3 (`bench/results/compression-levels-20261030.md`), so the dynamic
+  default is 3 (the note first said 4, from the research's measurement of quality 1 alone).
 - **Streams:** `text/event-stream` is not compressed unless `event_streams = true`; when it is,
   the head goes out at once and each event is flushed. An answer with `X-Accel-Buffering: no`
   or `Incremental: ?1` has its head sent before the minimum-size decision. Separately and
@@ -431,6 +439,12 @@ All taken by the owner on 2026-10-30:
    trigger, and the MCP text maps its finding to the key.
 7. The default order `zstd, br, gzip`; the agent asks whether the site is behind a proxy and
    advises brotli first behind Cloudflare, CloudFront or Fastly.
+8. After step 4, on the measurement of real pages (`bench/results/compression-levels-20261030.md`,
+   2026-10-30): the whole-answer limit 256 KB, so a CMS home page (70 to 82 KB) is compressed
+   whole at once rather than from step 6 on, the worker held at most 2 ms by a gzip answer at the
+   limit and 0.35 ms by a zstd one; brotli 3 by default, since quality 4's reason (the flushed
+   loss below it) was quality 1's alone and 4 buys 5 to 7 % fewer bytes for 1.5 to 1.8 times the
+   CPU; gzip stays 5 (gzip 6's bytes at 0.6 of its cost, for the few clients that take gzip alone).
 
 ## 13. Sources
 

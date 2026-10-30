@@ -4178,7 +4178,7 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
             level("zstd", 1, 9, cc.level_zstd);
             level("br", 1, 6, cc.level_br);
             level("gzip", 1, 9, cc.level_gzip);
-        } else if (rc->contains("levels")) fail("response_compression.levels must be a table { zstd = 3, br = 4, gzip = 5 }");
+        } else if (rc->contains("levels")) fail("response_compression.levels must be a table { zstd = 3, br = 3, gzip = 5 }");
         cc.min_size = size_node((*rc)["min_size"], cc.min_size, "response_compression.min_size");
         if (cc.min_size > 1024 * 1024) fail("response_compression.min_size must be at most 1MB");
         if (rc->contains("types_add")) {

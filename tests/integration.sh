@@ -3510,8 +3510,9 @@ kill $CPID; wait $CPID 2>/dev/null
 # ETag weakened and answering 304, Vary on it and on what could have been compressed, a HEAD with
 # the GET's negotiation, no-transform honoured both ways, an answer the application compressed
 # passed through with Vary merged, Content-Encoding: identity dropped, an off path, a 206, an image,
-# a small body and one above 64 KB left alone, a client sending no Accept-Encoding given identity
-# with Vary, the compressed page over h2c; a second site with signed_in = "on" padding its answers.
+# a small body and one above 256 KB left alone while a page of a CMS home page's size (112 KB) is
+# compressed whole, a client sending no Accept-Encoding given identity with Vary, the compressed
+# page over h2c; a second site with signed_in = "on" padding its answers.
 if [ -n "$PHPFPM" ]; then
   mkdir -p bench/tmp/comp3
   cat > bench/tmp/comp3/fpm.conf <<FPMCONF
@@ -3567,8 +3568,14 @@ FPMCONF
   check "compression: no-transform in the answer and in the request is honoured; the application's own gzip passes through with Vary merged; Content-Encoding: identity is dropped and the body left alone" \
     "200|- ; 200|- ; 200|gzip|Cookie, Accept-Encoding ; 200|-|Accept-Encoding" \
     "$(c3 /nt.php -H 'Accept-Encoding: gzip' | f 1,2) ; $(c3 /page.php -H 'Accept-Encoding: gzip' -H 'Cache-Control: no-transform' | f 1,2) ; $(c3 /gz.php -H 'Accept-Encoding: gzip' | f 1-3) ; $(c3 /ident.php -H 'Accept-Encoding: gzip' | f 1-3)"
-  check "compression: an off path, a 206, an image and a body under min_size are left alone; one above 64 KB too (step 6's), with Vary" "- - - - -|Accept-Encoding" \
-    "$(c3 /off/page.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /range.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /img.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /small.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /large.php -H 'Accept-Encoding: gzip' | f 2,3)"
+  check "compression: an off path, a 206, an image and a body under min_size are left alone; one above 256 KB too (step 6's), with Vary" "- - - - -|Accept-Encoding" \
+    "$(c3 /off/page.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /range.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /img.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /small.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /huge.php -H 'Accept-Encoding: gzip' | f 2,3)"
+  # The whole-answer limit is 256 KB (compress_answer::kWholeMax; 64 KB until the measurement of
+  # bench/results/compression-levels-20261030.md): a page of a CMS home page's size is compressed whole.
+  LGLEN=$(curl -sS -H 'Host: c3.test' http://127.0.0.1:8065/large.php | wc -c)
+  c3b /large.php bench/tmp/comp3/large.zst -H 'Accept-Encoding: zstd'
+  check "compression: a 112 KB page, a CMS home page's size, is compressed whole and decodes to itself" "200|zstd|Accept-Encoding between yes" \
+    "$(c3 /large.php -H 'Accept-Encoding: zstd' | f 1-3) $([ "$LGLEN" -gt 65536 ] && [ "$LGLEN" -lt 262144 ] && echo between) $([ "$(zstd -dc bench/tmp/comp3/large.zst 2>/dev/null | wc -c)" = "$LGLEN" ] && echo yes)"
   check "compression: over HTTP/2 (h2c) the compressed page carries its coding and decodes whole" "2 zstd $IDLEN" \
     "$(curl -sS --http2-prior-knowledge -D - -o /dev/null -H 'Host: c3.test' -H 'Accept-Encoding: zstd' http://127.0.0.1:8065/page.php | tr -d '\r' | awk 'NR==1{v=$1} tolower($1)=="content-encoding:"{e=$2} END{sub(/HTTP\//, "", v); printf "%s %s", v, e}') $(curl -sS --http2-prior-knowledge --compressed -H 'Host: c3.test' http://127.0.0.1:8065/page.php | wc -c)"
   kill $C3PID; wait $C3PID 2>/dev/null

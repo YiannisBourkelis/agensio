@@ -147,7 +147,8 @@ void StaticHandler::serve_entry(Stream& s, EntryPtr e) {
                 e = std::move(twin);
                 break;
             }
-            case Encoding::identity: break;
+            case Encoding::identity:
+            case Encoding::zstd: break;  // the twin chooser offers brotli and gzip only (step 2: no zstd copy)
         }
     }
     Response& r = s.response;

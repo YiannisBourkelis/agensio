@@ -68,8 +68,10 @@
 #             "proxy-comp:/page:64" (the upstream's 32 KB page compressed whole per request with the
 #             browser's coding, zstd by default: the encoder's cost), "proxy-comp-br:/page:64" and
 #             "proxy-comp-gzip:/page:64" (the page for a client taking brotli alone, gzip alone),
-#             "proxy-comp:/big:64" (100 KB, above the whole-answer limit: identity
-#             with Vary until step 6) and "proxy-comp-plain:/page:64" (no header, flat). A side whose
+#             "proxy-comp:/big:64" (100 KB of one repeated byte, under the 256 KB whole-answer
+#             limit since the measurement of compression-levels-20261030.md: compressed whole to a
+#             few hundred bytes, cheaper than sending it; identity with Vary while the limit was
+#             64 KB) and "proxy-comp-plain:/page:64" (no header, flat). A side whose
 #             binary lacks the key skips the rows.
 #   -r        rounds of base/new alternation (default 2)
 #   -d        wrk duration per case (default 5s)

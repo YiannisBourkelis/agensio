@@ -94,6 +94,37 @@
   zlib as nginx's; brotli 4 543 µs). `bench/compression/brotli-time.cpp` shows brotli 4 at 2.7
   times brotli 3's cost on a whole 33 KB answer for 0.4 % fewer bytes; the design's reason for
   4 is the flushed stream of step 6.
+- **The per-request defaults, measured on real pages: the whole-answer limit 256 KB, brotli 3.**
+  `bench/compression/flush-levels.cpp` runs each encoder level the way the answer path does, whole
+  and flushed per 16 KB, on the WordPress and Laravel pages of the beds and on the research corpus
+  (`bench/results/compression-levels-20261030.md`). The whole-answer limit
+  (`compress_answer::kWholeMax`) is 256 KB: a CMS home page (WordPress 70 KB, Laravel's welcome
+  page 82 KB) is compressed whole at once rather than from step 6 on; the limit bounds the time one
+  answer holds the worker, at 256 KB about 0.35 ms with zstd 3 (what Chrome and Firefox get),
+  1.4 ms with brotli and 2.1 ms with gzip 5 (the body is in memory already: buffering spills at
+  1 MB, so memory was never the constraint). `levels.br` defaults to 3: the design chose 4 for the
+  flushed-stream loss it had measured below 4, which is quality 1's alone (7 to 42 %; from quality
+  2 up a flush costs 0 to 4 %, like gzip 5 and zstd 3), while 4 buys 5 to 7 % fewer bytes on HTML
+  for 1.5 to 1.8 times brotli 3's CPU (the WordPress page 191 to 337 µs); brotli 3 is within 2 % of
+  zstd 3's bytes, so Safari's visitors get what Chrome's get. The synthetic 32 KB page of the
+  benchmark upstream had put both comparisons wrong (0.4 % for 2.7 times; gzip 5 at 4.4 times
+  gzip 1 for 7 %): on real HTML gzip 5 is twice gzip 1's cost for 7 to 17 % fewer bytes, and it
+  stays the default for the few clients that take gzip alone. The suite's block compresses a
+  112 KB page whole and leaves a 340 KB one alone; the reference row, the guide and the design
+  note carry the numbers. A/B against step 4 (`bench/results/ab-20261030-150021.md`, one worker,
+  three rounds): every row that compresses nothing within noise (0.96 to 1.04); the 32 KB page
+  for a client taking brotli alone 299 to 115 µs per request (brotli 3 where 4 was), the
+  browser's page unchanged at 61 µs (zstd 3), gzip alone unchanged; the 100 KB JSON body of one
+  repeated byte, above the old limit and under the new, 18.4 to 15.3 µs, since compressed whole
+  to a few hundred bytes it costs less than sending it. The beds with the new defaults
+  (`compression-levels-20261030.md`, last section): Laravel's welcome page through agensio
+  49 µs identity, 147 with zstd 3 (18.4 KB on the wire, 4.5:1), 385 with brotli 3; WordPress's
+  home page 163 identity, 336 zstd 3 (13.7 KB, 5.2:1), 534 brotli 3 (805 with brotli 4 in the
+  morning's experiment); nginx gzips the Laravel page at 658 µs. Each encoder costs the server
+  1.4 to 3 times what the program measures in a hot loop (the worker meets the page and the
+  tables cold), the next thing to profile on this path. `bench/wordpress/.ddev/bench.sh`'s
+  repository root was one directory short; `bench/ab.sh`'s row comment says what the 100 KB
+  body measures now. The static handler's twin switch names zstd (a warning since step 1).
 ## 0.1.0-alpha.117 (2026-10-26)
 
 - **An HTTP/3 attempt refused at the connection ceiling counts once** (the alpha.116 report). A

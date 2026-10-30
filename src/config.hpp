@@ -272,7 +272,7 @@ struct RedirectSet {
 struct CompressionConfig {
     std::vector<std::string> codings = {"zstd", "br", "gzip"};  // offered, the order decides a tie
     int level_zstd = 3;  // 1..9
-    int level_br = 4;    // 1..6
+    int level_br = 3;    // 1..6; 3 since bench/results/compression-levels-20261030.md (4 before)
     int level_gzip = 5;  // 1..9
     std::size_t min_size = 1024;
     std::vector<std::string> types_add;  // media types beyond compressible_type, lower-case, no parameters

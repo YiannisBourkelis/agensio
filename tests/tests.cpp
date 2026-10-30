@@ -581,6 +581,9 @@ static void test_compress_answer() {
     CHECK(decide(s, a) == Reason::size);
     a.body_size = 1024;
     CHECK(decide(s, a) == Reason::compress);
+    // 256 KB (docs/configuration.md 20): a CMS home page (70 to 82 KB) compressed whole, and at the limit
+    // a gzip-5 answer holds the worker about 2 ms, a zstd one 0.35 (bench/results/compression-levels-20261030.md).
+    CHECK(kWholeMax == 256 * 1024);
     a.body_size = kWholeMax;
     CHECK(decide(s, a) == Reason::compress);
     a.body_size = kWholeMax + 1;
@@ -742,7 +745,10 @@ static void test_compress_buffered() {
     }
     CHECK(lo == 0 && hi == kPaddingMax);  // 25 values, 2000 draws: an end missing has odds of 1e-35
     const CompressionConfig root;
-    CHECK(compress_answer::level_for(root, Encoding::zstd) == 3 && compress_answer::level_for(root, Encoding::br) == 4 &&
+    // The defaults of docs/configuration.md 20: brotli 3 since bench/results/compression-levels-20261030.md
+    // (quality 4 buys 5 to 7 % fewer bytes on HTML for 1.5 to 1.8 times the CPU, and the flushed-stream
+    // loss the design feared below 4 is quality 1's alone).
+    CHECK(compress_answer::level_for(root, Encoding::zstd) == 3 && compress_answer::level_for(root, Encoding::br) == 3 &&
           compress_answer::level_for(root, Encoding::gzip) == 5 && compress_answer::level_for(root, Encoding::identity) == 0);
 }
 

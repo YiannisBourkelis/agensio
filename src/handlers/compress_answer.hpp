@@ -51,9 +51,12 @@ inline std::string_view reason_name(Reason r) noexcept {
 }
 
 // The most a worker compresses in one go (docs/design-compression.md 6): a buffered answer up to this
-// is compressed whole between two reads of the loop, about 0.5 ms with gzip 5; a larger one is
-// compressed as the writer pulls it, in pieces of this size, from step 6 on.
-inline constexpr std::uint64_t kWholeMax = 64 * 1024;
+// is compressed whole between two reads of the loop, so the limit bounds the time one answer holds
+// the worker: at 256 KB about 0.35 ms with zstd 3 (what Chrome and Firefox get), 1.4 ms with brotli 4,
+// 2.1 ms with gzip 5 (bench/results/compression-levels-20261030.md). 256 KB covers a CMS home page
+// (WordPress 70 KB, Laravel's welcome page 82 KB), which the 64 KB of steps 3 and 4 left out; a
+// larger answer is compressed as the writer pulls it, in 64 KB pieces, from step 6 on.
+inline constexpr std::uint64_t kWholeMax = 256 * 1024;
 
 // Root's level for the coding (levels = { zstd, br, gzip }).
 inline int level_for(const CompressionConfig& root, Encoding e) noexcept {
