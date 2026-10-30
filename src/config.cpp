@@ -1,4 +1,5 @@
 #include "config.hpp"
+#include "compress.hpp"
 #include "mime.hpp"
 
 #include "control/reference.hpp"
@@ -4142,6 +4143,9 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
     if (const auto* rc = root["response_compression"].as_table()) {
         check_keys(*rc, {"[response_compression]"}, {}, "response_compression");
         CompressionConfig& cc = cfg.compression;
+        // A list the administrator wrote names what the build must have; the default list below
+        // drops a coding this binary cannot produce, so a build without libbrotli offers zstd and
+        // gzip without a word (docs/design-compression.md 3).
         if (rc->contains("codings")) {
             cc.codings = string_list((*rc)["codings"], "response_compression.codings");
             if (cc.codings.empty() || cc.codings.size() > 3) fail("response_compression.codings lists one to three of \"zstd\", \"br\", \"gzip\"");
@@ -4150,6 +4154,12 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
                 if (c != "zstd" && c != "br" && c != "gzip") fail("response_compression.codings: \"" + c + "\" is not a coding agensio offers (zstd, br, gzip)");
                 for (std::size_t j = 0; j < i; ++j)
                     if (cc.codings[j] == c) fail("response_compression.codings names \"" + c + "\" twice");
+                // A coding this binary cannot produce (built without its library): refused here, naming
+                // the package, rather than offered and never sent (docs/design-compression.md 3).
+                const Encoding e = c == "zstd" ? Encoding::zstd : c == "br" ? Encoding::br : Encoding::gzip;
+                if (!coding_built(e))
+                    fail("response_compression.codings names \"" + c + "\", which this agensio was built without; install " + std::string(coding_package(e)) +
+                         " and rebuild, or leave it out of the list");
             }
         }
         if (const auto* lv = (*rc)["levels"].as_table()) {
@@ -4180,6 +4190,12 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
             }
         }
     } else if (root.contains("response_compression")) fail("[response_compression] must be a table (docs/configuration.md 20)");
+    if (!root["response_compression"].as_table() || !root["response_compression"].as_table()->contains("codings")) {
+        std::vector<std::string> built;
+        for (const std::string& c : cfg.compression.codings)
+            if (coding_built(c == "zstd" ? Encoding::zstd : c == "br" ? Encoding::br : Encoding::gzip)) built.push_back(c);
+        cfg.compression.codings = std::move(built);
+    }
     // Resolved once [addresses] is known (its sets may be named here, 2026-10-13).
     cfg.trusted_proxies_text = string_list(server["trusted_proxies"], "server.trusted_proxies");
     cfg.user = account_name(server["user"], "server.user");

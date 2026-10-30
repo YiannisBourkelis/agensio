@@ -19,6 +19,7 @@
 #include <fnmatch.h>
 
 #include "cache.hpp"
+#include "compress.hpp"
 #include "http1/chunked.hpp"
 #include "config.hpp"
 #include "control/php.hpp"
@@ -554,6 +555,70 @@ static void test_encoding() {
 
 // The compressible column (docs/design-compression.md 4): text and the structured types, matched on
 // the media type without parameters (nginx's gzip_types trap), never what is compressed already.
+// The one-shot encoders behind the copies of cached files (docs/design-compression.md 5), each
+// decoded back by the reference tool, and the cache's charge for a copy attached after the fill.
+static void test_compress_whole() {
+    const std::string text(200000, 'a');
+    std::string varied;
+    for (int i = 0; i < 20000; ++i) varied += "line " + std::to_string(i * 7919 % 1000) + " of the sample\n";
+    for (const Encoding e : {Encoding::gzip, Encoding::br, Encoding::zstd}) {
+        if (!coding_built(e)) {
+            std::vector<char> out;
+            CHECK(!compress_whole(e, 5, text, out) && out.empty());
+            continue;
+        }
+        CHECK(!coding_package(e).empty());
+        for (const std::string& in : {text, varied, std::string()}) {
+            std::vector<char> out;
+            CHECK(compress_whole(e, e == Encoding::br ? 11 : e == Encoding::gzip ? 9 : 3, in, out));
+            if (in.empty()) continue;
+            CHECK(out.size() < in.size() / 4);  // text compresses well
+            // Decoded by the reference tool: the bytes are the coding every client reads.
+            const std::string dir = std::string(AGENSIO_SOURCE_DIR) + "/bench/tmp";
+            const std::string path = dir + "/compress-test." + std::string(encoding_name(e));
+            std::filesystem::create_directories(dir);
+            {
+                std::ofstream f(path, std::ios::binary);
+                f.write(out.data(), static_cast<std::streamsize>(out.size()));
+            }
+            const char* tool = e == Encoding::br ? "brotli -dc" : e == Encoding::gzip ? "gzip -dc" : "zstd -dc";
+            const std::string decoded = path + ".out";
+            const int rc = std::system((std::string(tool) + " " + path + " > " + decoded + " 2>/dev/null").c_str());
+            std::string got;
+            if (std::ifstream f(decoded, std::ios::binary); rc == 0 && f) got.assign(std::istreambuf_iterator<char>(f), {});
+            if (rc != 0) std::printf("note: %s not available, the %s copy is not decoded\n", tool, encoding_name(e).data());
+            else if (got != in) std::printf("decode mismatch for %s: %zu bytes back, %zu in\n", encoding_name(e).data(), got.size(), in.size());
+            CHECK(rc != 0 || got == in);
+            std::filesystem::remove(path);
+            std::filesystem::remove(decoded);
+        }
+    }
+    // A copy attached after the fill: charged and attached together, counted by bytes_of with the
+    // file, never evicting the file itself, refused on an entry gone or beyond the budget.
+    const auto copy_of = [](std::size_t n) {
+        auto c = std::make_shared<CacheEntry>();
+        c->data.assign(n, 'c');
+        c->made = true;
+        return c;
+    };
+    FileCache cache(1 << 20, 1000, 0.5, 8);
+    auto a = std::make_shared<CacheEntry>();
+    a->data.assign(400, 'x');
+    const CacheKeyView ka{1, "/a"};
+    CHECK(cache.insert(ka, a).get() == a.get());
+    CHECK(cache.attach(*a, copy_of(500), true) && a->br && a->br->data.size() == 500 && bytes_of(*a) == 900);
+    CHECK(!cache.attach(*a, copy_of(200), false));  // 1100 > 1000 with nothing but a itself to evict
+    CHECK(!cache.attach(*a, copy_of(10), true));    // a br is there already
+    auto b = std::make_shared<CacheEntry>();
+    b->data.assign(50, 'y');
+    const CacheKeyView kb{1, "/b"};
+    CHECK(cache.insert(kb, b).get() == b.get());  // 950 held
+    CHECK(cache.attach(*b, copy_of(40), false) && b->gzip);  // 990
+    cache.erase(ka, a.get());                                 // refunds 900: 90 held
+    CHECK(!cache.attach(*a, copy_of(1), false));              // evicted: nothing attached
+    CHECK(cache.attach(*b, copy_of(900), true) && bytes_of(*b) == 990 && !cache.attach(*b, copy_of(2000), true));
+}
+
 static void test_compressible_type() {
     for (const char* yes : {"text/html", "text/html; charset=utf-8", "Text/HTML;charset=UTF-8", "text/css", "text/plain", "text/javascript",
                             "application/javascript", "application/x-javascript", "application/json", "application/json; charset=utf-8",
@@ -12691,6 +12756,7 @@ int main() {
 #endif
     test_encoding();
     test_compressible_type();
+    test_compress_whole();
     test_precompressed();
     test_chunked();
     test_core_types();

@@ -1,4 +1,5 @@
 #include "server.hpp"
+#include "compress.hpp"
 
 #ifdef AGENSIO_HAS_QUIC
 #include "http3/connection.hpp"
@@ -95,6 +96,14 @@ Server::Server(Config cfg)
     // A few threads for [[site.auth]]'s slow hashes, whatever the workers do: at most four,
     // a quarter of the machine's threads, never none.
     auth_verifier_ = std::make_unique<auth::Verifier>(std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u));
+    // The copies of cached files (docs/design-compression.md 5), only when a site asks: a host with
+    // every site at the default pays no thread.
+    for (const SiteConfig& site : cfg_.sites)
+        if (site.compression.on) {
+            copy_maker_ = std::make_unique<CopyMaker>(cache_);
+            handler_.set_copy_maker(copy_maker_.get());
+            break;
+        }
     dispatcher_.set_verifier(auth_verifier_.get());
 #endif
     open_logs();
@@ -1123,6 +1132,20 @@ json::Value Server::status() {
         if (first != tp{})
             d.set("first_s_ago", std::chrono::duration<double>(now - first).count()).set("last_s_ago", std::chrono::duration<double>(now - last).count());
         v.set("tls_handshakes_refused", static_cast<double>(total)).set("tls_handshakes_refused_detail", std::move(d));
+    }
+    // response_compression (docs/design-compression.md 9): the copies of cached files made once, and
+    // what the build offers; the per-request counters come with the encoders.
+    {
+        json::Value c = json::Value::object();
+        json::Value codings = json::Value::array();
+        for (const Encoding e : {Encoding::zstd, Encoding::br, Encoding::gzip})
+            if (coding_built(e)) codings.push(std::string(encoding_name(e)));
+        c.set("codings_built", std::move(codings));
+        const CopyMaker::Counts k = copy_maker_ ? copy_maker_->counts() : CopyMaker::Counts{};
+        c.set("copies_made", static_cast<double>(k.made)).set("copies_bytes", static_cast<double>(k.bytes))
+            .set("copies_queue_full", static_cast<double>(k.queue_full)).set("copies_budget_refused", static_cast<double>(k.budget_refused))
+            .set("copies_failed", static_cast<double>(k.failed));
+        v.set("compression", std::move(c));
     }
     // [[site.auth]]: the slow hashes the pool has run (one per login, none per request after it).
 #ifdef AGENSIO_HAS_AUTH

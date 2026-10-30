@@ -65,6 +65,13 @@ struct CacheEntry {
     std::string_view coding_headers;
     std::string_view content_encoding;  // "br" / "gzip" on a twin or a file stored compressed (static text), empty otherwise
     bool vary = false;                  // Vary: Accept-Encoding (an entry with twins, and its twins)
+    // A copy made by agensio at fill (docs/design-compression.md 5), in memory only, no file behind
+    // it: the revalidation of the twins skips it (it lives and dies with this entry, which the
+    // file's own mtime check drops), and its ETag carries the coding so it never collides with a
+    // twin's. Set on the copy; `copies_asked` on the file once the maker has it queued, so a hit
+    // never queues it twice.
+    bool made = false;
+    bool copies_asked = false;
     bool has_variants() const noexcept { return br != nullptr || gzip != nullptr; }
 
     std::atomic<std::int64_t> last_access{0};     // seconds since epoch
@@ -131,6 +138,14 @@ public:
     // Returns the entry or nullptr.
     EntryPtr find(const CacheKeyView& key);
 
+    // A copy attached to an entry already in the map (the copy maker's), as its `br` or `gzip`:
+    // charged to the byte budget and attached under the one lock, so the budget and bytes_of never
+    // disagree, evicting other entries as insert does, never the file itself. False, nothing
+    // charged or attached, when the copy would not fit beside its file or the entry has been
+    // evicted meanwhile. The store is released: a worker's acquire of the pointer sees the copy
+    // whole. Off the request path.
+    bool attach(CacheEntry& entry, EntryPtr copy, bool br);
+
     // Inserts entry unless an entry for the key already exists (then that one is
     // returned). Evicts least recently used entries first if needed, bytes and open
     // descriptors being separate budgets. Returns the canonical entry for the key, or
@@ -146,7 +161,8 @@ public:
     std::size_t entry_count();
 
 private:
-    void evict_locked(std::size_t needed_bytes, std::size_t needed_files);
+    // `keep`: an entry never evicted (the file a copy is being charged to).
+    void evict_locked(std::size_t needed_bytes, std::size_t needed_files, const CacheEntry* keep = nullptr);
 
     const std::size_t max_file_size_;
     const std::size_t max_total_size_;

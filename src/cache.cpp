@@ -37,6 +37,19 @@ EntryPtr FileCache::insert(const CacheKeyView& key, EntryPtr entry) {
     return entry;
 }
 
+bool FileCache::attach(CacheEntry& entry, EntryPtr copy, bool br) {
+    const std::size_t bytes = copy ? copy->data.size() : 0;
+    if (bytes == 0 || bytes > max_total_size_) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (entry.stale.load(std::memory_order_acquire)) return false;  // evicted or invalidated while the copy was made
+    if ((br ? entry.br : entry.gzip) != nullptr) return false;       // a twin or a copy is there already
+    if (total_.load(std::memory_order_relaxed) + bytes > max_total_size_) evict_locked(bytes, 0, &entry);
+    if (total_.load(std::memory_order_relaxed) + bytes > max_total_size_) return false;  // only the file itself was left to evict
+    total_.fetch_add(bytes, std::memory_order_relaxed);
+    std::atomic_store_explicit(br ? &entry.br : &entry.gzip, std::move(copy), std::memory_order_release);
+    return true;
+}
+
 void FileCache::erase(const CacheKeyView& key, const CacheEntry* expected) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = map_.find(key);
@@ -56,7 +69,7 @@ std::size_t FileCache::entry_count() {
 // descriptors plus evict_fraction_ of each budget that is under pressure, oldest access
 // first. An entry is only evicted if it contributes to a budget still being freed, so
 // byte pressure never drops descriptor entries and vice versa.
-void FileCache::evict_locked(std::size_t needed_bytes, std::size_t needed_files) {
+void FileCache::evict_locked(std::size_t needed_bytes, std::size_t needed_files, const CacheEntry* keep) {
     struct Candidate {
         CacheMap::iterator it;
         std::int64_t last_access;
@@ -78,6 +91,7 @@ void FileCache::evict_locked(std::size_t needed_bytes, std::size_t needed_files)
         const bool bytes_ok = !want_bytes || (total + needed_bytes <= max_total_size_ && total <= target_bytes);
         const bool files_ok = !want_files || (open + needed_files <= max_open_files_ && open <= target_files);
         if (bytes_ok && files_ok) break;
+        if (c.it->second.get() == keep) continue;  // a copy never evicts its own file
         const std::size_t cb = bytes_of(*c.it->second);
         const std::size_t cf = files_of(*c.it->second);
         if (!((!bytes_ok && cb > 0) || (!files_ok && cf > 0))) continue;

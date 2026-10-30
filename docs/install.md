@@ -238,7 +238,11 @@ rollback.
    ```
 
    Dependencies for a source build: a C++20 compiler (GCC 12+, Clang 16+), CMake 3.20+,
-   Ninja, Asio headers (`libasio-dev`), OpenSSL 3 (`libssl-dev`) and zlib (`zlib1g-dev`).
+   Ninja, Asio headers (`libasio-dev`), OpenSSL 3 (`libssl-dev`), zlib (`zlib1g-dev`), and for
+   response compression zstd and brotli (`libzstd-dev`, `libbrotli-dev`, found through
+   `pkg-config`; Fedora `libzstd-devel` and `brotli-devel`, Arch `zstd` and `brotli`). A build
+   without one of the two offers the other codings and refuses a configuration naming the
+   missing one.
 
 2. **Service user and directories** (the packages do this in their post-install step):
 

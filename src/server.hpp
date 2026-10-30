@@ -27,6 +27,7 @@
 #include "handlers/cgi.hpp"
 #include "handlers/proxy.hpp"
 #include "handlers/static.hpp"
+#include "services/copy_maker.hpp"
 #include "control/handler.hpp"
 #include "control/roles.hpp"
 #include "services/acme.hpp"
@@ -376,6 +377,9 @@ private:
     ErrorLog error_log_;
     bool access_logging_ = false;
     FileCache cache_;
+    // The copies of cached files made once (docs/design-compression.md 5): made when any site of
+    // the boot configuration has response_compression on; one thread, stopped with the server.
+    std::unique_ptr<CopyMaker> copy_maker_;
     StaticHandler handler_;
     FcgiHandler fcgi_handler_;
     ProxyHandler proxy_handler_;

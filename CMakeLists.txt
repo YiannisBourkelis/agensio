@@ -130,12 +130,45 @@ if(NOT ZLIB_FOUND)
   message(WARNING "zlib not found; site-install handles only plain .tar archives")
 endif()
 
+# ---------------------------------------------------------------- zstd and brotli (optional: response compression)
+# The codings 83 % and 97 % of browsers take (docs/design-compression.md): the copies of cached
+# files made once, and (later steps) answers compressed per request. Each optional at build time
+# like zlib; a build without one offers the other codings, and a configuration naming the missing
+# one is refused at -t with the package to install (libzstd-dev, libbrotli-dev).
+option(AGENSIO_ZSTD "Offer the zstd content coding (libzstd)" ON)
+option(AGENSIO_BROTLI "Offer the brotli content coding (libbrotli)" ON)
+find_package(PkgConfig QUIET)
+set(AGENSIO_HAS_ZSTD OFF)
+set(AGENSIO_HAS_BROTLI OFF)
+if(PKG_CONFIG_FOUND)
+  if(AGENSIO_ZSTD)
+    pkg_check_modules(ZSTD IMPORTED_TARGET libzstd)
+    if(ZSTD_FOUND)
+      set(AGENSIO_HAS_ZSTD ON)
+    endif()
+  endif()
+  if(AGENSIO_BROTLI)
+    pkg_check_modules(BROTLIENC IMPORTED_TARGET libbrotlienc)
+    if(BROTLIENC_FOUND)
+      set(AGENSIO_HAS_BROTLI ON)
+    endif()
+  endif()
+endif()
+if(NOT AGENSIO_HAS_ZSTD)
+  message(STATUS "libzstd not found; response compression offers no zstd (apt install libzstd-dev)")
+endif()
+if(NOT AGENSIO_HAS_BROTLI)
+  message(STATUS "libbrotli not found; response compression offers no brotli (apt install libbrotli-dev)")
+endif()
+
 # ---------------------------------------------------------------- core library
 # The list is shared with agensio_core_fuzz (the connection fuzzer's instrumented copy, below).
 set(AGENSIO_CORE_SOURCES
   src/config.cpp
   src/http_date.cpp
   src/mime.cpp
+  src/compress.cpp
+  src/services/copy_maker.cpp
   src/file.cpp
   src/path.cpp
   src/http1/parser.cpp
@@ -195,12 +228,20 @@ target_compile_definitions(agensio_core PUBLIC
   $<$<BOOL:${AGENSIO_HTTPARENA}>:AGENSIO_HTTPARENA=1>
   $<$<BOOL:${AGENSIO_INTEROP}>:AGENSIO_INTEROP=1>
   $<$<BOOL:${AGENSIO_HAS_ZLIB}>:AGENSIO_HAS_ZLIB=1>
+  $<$<BOOL:${AGENSIO_HAS_ZSTD}>:AGENSIO_HAS_ZSTD=1>
+  $<$<BOOL:${AGENSIO_HAS_BROTLI}>:AGENSIO_HAS_BROTLI=1>
   $<$<BOOL:${AGENSIO_HAS_AUTH}>:AGENSIO_HAS_AUTH=1>)
 if(AGENSIO_HAS_TLS)
   target_link_libraries(agensio_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 endif()
 if(AGENSIO_HAS_ZLIB)
   target_link_libraries(agensio_core PUBLIC ZLIB::ZLIB)
+endif()
+if(AGENSIO_HAS_ZSTD)
+  target_link_libraries(agensio_core PUBLIC PkgConfig::ZSTD)
+endif()
+if(AGENSIO_HAS_BROTLI)
+  target_link_libraries(agensio_core PUBLIC PkgConfig::BROTLIENC)
 endif()
 if(AGENSIO_HAS_AUTH)
   target_include_directories(agensio_core PUBLIC ${XCRYPT_INCLUDE_DIR})

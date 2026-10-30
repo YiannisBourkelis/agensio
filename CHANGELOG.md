@@ -12,6 +12,27 @@
   A site with the key on has its client's coding chosen once at routing (`Stream::coding`); a
   site without it pays one flag test. No answer is compressed yet: the encoders come with the
   next steps.
+- **Step 2: the copies of cached files, made once.** A site with `response_compression = "on"`
+  gets brotli 11 and gzip 9 copies of each compressible file it caches (text, JavaScript, JSON,
+  XML, SVG, fonts not compressed already, wasm; at least `min_size`, at most 8 MB; a file with a
+  `.br` or `.gz` beside it keeps the build's and gets no copy), made on one background thread
+  and never on a worker, kept in memory only beside the file as its twins are, counted in
+  `cache.max_size` with it, never written to the site's directory (an application's integrity
+  check never sees them). Each copy has a strong ETag of its own (the file's with `-br` or
+  `-gzip`), so it answers 304 and ranges as a twin does; the file and its copies carry
+  `Vary: Accept-Encoding`. libzstd and libbrotli join zlib as optional build dependencies, found
+  through pkg-config; `server_status` names the codings the build has and counts the copies,
+  their bytes, and the ones the queue or the budget refused. The devbox image carries both
+  libraries and the `zstd` and `brotli` tools.
+- **zstd and brotli are built into every package.** The release workflow's builds, the `.deb`
+  (through `shlibdeps`), the `.rpm` (`libzstd`, `brotli`) and the Arch package (`zstd`, `brotli`)
+  carry both; the build-from-source line names `libzstd-dev` and `libbrotli-dev`. A build
+  configured without one (`-DAGENSIO_BROTLI=OFF`, `-DAGENSIO_ZSTD=OFF`, or the library missing)
+  offers the other codings: the default `codings` drops what the build lacks, and a list the
+  administrator wrote that names the missing one is refused by `agensio -t` with the package to
+  install. `bench/ab.sh -C` adds the compression rows: the 1 KB page under `min_size`, the
+  100 KB CSS from its brotli copy, from its gzip copy, as identity to a client sending no
+  `Accept-Encoding`, over TLS, and over HTTP/2 at ten streams with `-2`.
 ## 0.1.0-alpha.117 (2026-10-26)
 
 - **An HTTP/3 attempt refused at the connection ceiling counts once** (the alpha.116 report). A

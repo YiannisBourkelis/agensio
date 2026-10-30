@@ -125,9 +125,19 @@ inline bool refused_request(const SiteConfig& site, const LocationConfig& owner,
     return !owner.deny_suffixes.empty() && refused_suffix(path, owner.deny_suffixes);
 }
 
+class CopyMaker;
+
 class StaticHandler {
 public:
     StaticHandler(const Config& cfg, FileCache& cache);
+
+    // The copies of cached files made once (docs/design-compression.md 5), for a site with
+    // response_compression on: set by the server when any site has it; null, no copy is asked.
+    void set_copy_maker(CopyMaker* maker) noexcept { copies_ = maker; }
+    // A copy's metadata and prebuilt blocks from its file's entry: the file's type, dates and
+    // tag with the coding appended ("...-br"), the coding's headers and Vary, Accept-Ranges as a
+    // twin has. Called on the copy maker's thread with the copy's bytes in place.
+    static void fill_copy(CacheEntry& copy, const CacheEntry& file, const FileInfo& fi, Encoding coding);
 
     enum class Outcome { done, redirect };  // redirect: ws.path holds the try_files target
 
@@ -168,6 +178,11 @@ private:
     void load_variants(CacheEntry& parent, const FileInfo& fi, const LocationConfig& loc, WorkerState& ws,
                        std::time_t now);
     bool twins_unchanged(const CacheEntry& e, WorkerState& ws);
+    // Whether a file just cached gets copies (docs/design-compression.md 5): the site has the key on,
+    // the type is compressible, the size within [min_size, the maker's cap], no twin on disk, no
+    // stored coding, settled.
+    bool copies_wanted(const CacheEntry& e, const WorkerState& ws, const ServedType& mi, bool settled) const noexcept;
+    CopyMaker* copies_ = nullptr;
     void serve_file(Stream& s, File&& f, const FileInfo& fi, const ServedType& type);
     void redirect_slash(Stream& s, WorkerState& ws);
     static bool not_modified(const Request& req, std::string_view etag, std::string_view last_modified) noexcept;

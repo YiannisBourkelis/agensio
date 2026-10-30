@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libasio-dev libssl-dev libcrypt-dev zlib1g-dev clang-18 libclang-rt-18-dev
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libasio-dev libssl-dev libcrypt-dev zlib1g-dev libzstd-dev libbrotli-dev pkg-config clang-18 libclang-rt-18-dev
       - name: every fuzzer
         run: CXX=clang++-18 scripts/fuzz-all.sh -t "${{ github.event.inputs.seconds || '300' }}" -j 4 -o fuzz-out
       - name: findings
@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libasio-dev libssl-dev zlib1g-dev curl netcat-openbsd
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libasio-dev libssl-dev zlib1g-dev libzstd-dev libbrotli-dev pkg-config curl netcat-openbsd
       - name: build with ASan and UBSan
         run: cmake -S . -B build-san -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DAGENSIO_SANITIZE=address,undefined && cmake --build build-san
       - name: unit tests

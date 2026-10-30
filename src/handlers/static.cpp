@@ -1,4 +1,5 @@
 #include "handlers/static.hpp"
+#include "services/copy_maker.hpp"
 
 #include "http2/hpack.hpp"
 #include "http3/qpack.hpp"
@@ -281,6 +282,7 @@ bool StaticHandler::twins_unchanged(const CacheEntry& e, WorkerState& ws) {
     };
     const Twin twins[] = {{".br", e.br.get()}, {".gz", e.gzip.get()}};
     for (const Twin& t : twins) {
+        if (t.cached && t.cached->made) continue;  // a copy agensio made: no file to stat; it goes with the entry
         ws.fs_path.assign(e.file_path).append(t.suffix);
         FileInfo fi;
         const bool usable = stat_path(ws.fs_path.c_str(), fi) && fi.is_regular && fi.size > 0 && fi.mtime >= e.mtime &&
@@ -289,6 +291,55 @@ bool StaticHandler::twins_unchanged(const CacheEntry& e, WorkerState& ws) {
         if (t.cached && (t.cached->mtime != fi.mtime || t.cached->size != fi.size)) return false;
     }
     return true;
+}
+
+bool StaticHandler::copies_wanted(const CacheEntry& e, const WorkerState& ws, const ServedType& mi, bool settled) const noexcept {
+    // ws.site is the SiteConfig the dispatcher routed to, kept untyped for the access log.
+    const auto* site = static_cast<const SiteConfig*>(ws.site);
+    if (!copies_ || !settled || !site || !site->compression.on) return false;
+    if (e.descriptor_only || e.has_variants() || !mi.encoding.empty()) return false;
+    if (e.data.size() < cfg_.compression.min_size || e.data.size() > (8u << 20)) return false;
+    return compressible_type(mi.type);
+}
+
+void StaticHandler::fill_copy(CacheEntry& copy, const CacheEntry& file, const FileInfo& fi, Encoding coding) {
+    static constexpr std::string_view kBr = "Content-Encoding: br\r\nVary: Accept-Encoding\r\n";
+    static constexpr std::string_view kGzip = "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n";
+    copy.file_path = file.file_path;
+    copy.content_type = file.content_type;
+    copy.mtime = fi.mtime;
+    copy.size = fi.size;
+    copy.vary = true;
+    copy.coding_headers = coding == Encoding::br ? kBr : kGzip;
+    copy.content_encoding = coding == Encoding::br ? std::string_view("br") : std::string_view("gzip");
+    // The file's tag with the coding: distinct from the file's and from a twin's (whose tag is its
+    // own mtime and size), stable for the entry's life, so strong (RFC 9110 8.8.3.3).
+    copy.etag = file.etag;
+    copy.etag.pop_back();  // the closing quote
+    copy.etag.append(coding == Encoding::br ? "-br\"" : "-gzip\"");
+    copy.last_modified = file.last_modified;
+    copy.headers.reserve(224);
+    copy.headers.append("Content-Type: ").append(copy.content_type).append("\r\nContent-Length: ");
+    append_number(copy.headers, fi.size);
+    copy.headers.append("\r\nLast-Modified: ")
+        .append(copy.last_modified)
+        .append("\r\nETag: ")
+        .append(copy.etag)
+        .append("\r\n")
+        .append(copy.coding_headers)
+        .append("Accept-Ranges: bytes\r\n\r\n");
+    std::string length;
+    append_number(length, fi.size);
+    copy.h2_block.reserve(96);
+    hpack::append_field(copy.h2_block, "content-length", length);
+    hpack::append_field(copy.h2_block, "last-modified", copy.last_modified);
+    hpack::append_field(copy.h2_block, "etag", copy.etag);
+    hpack::append_field(copy.h2_block, "accept-ranges", "bytes");
+    copy.h3_block.reserve(96);
+    qpack::append_field(copy.h3_block, "content-length", length);
+    qpack::append_field(copy.h3_block, "last-modified", copy.last_modified);
+    qpack::append_field(copy.h3_block, "etag", copy.etag);
+    qpack::append_field(copy.h3_block, "accept-ranges", "bytes");
 }
 
 // The type and coding of the file at ws.fs_path, served at ws.path (a directory's index by its own
@@ -610,11 +661,16 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         const ServedType mi = type_of(loc, ws);
         entry->content_type = mi.type;
         if (settled && cfg_.cache_precompressed && mi.encoding.empty()) load_variants(*entry, fi, loc, ws, now);
-        fill_entry(*entry, fi, ws.fs_path, mi.type, stored_coding(mi.encoding), entry->has_variants(), now);
+        // A file that gets copies (docs/design-compression.md 5) is a negotiable resource from now,
+        // so its own answers carry Vary too (RFC 9110 12.5.5), whether or not a copy exists yet.
+        const bool copies = copies_wanted(*entry, ws, mi, settled);
+        fill_entry(*entry, fi, ws.fs_path, mi.type, stored_coding(mi.encoding), entry->has_variants() || copies, now);
 
         EntryPtr canonical = settled ? cache_.insert(key, entry) : nullptr;
-        if (canonical) ws.local.insert(key, canonical);
-        else canonical = std::move(entry);  // cache full for this size class, or not settled: serve once, uncached
+        if (canonical) {
+            ws.local.insert(key, canonical);
+            if (copies && canonical.get() == entry.get() && copies_->ask(canonical)) canonical->copies_asked = true;
+        } else canonical = std::move(entry);  // cache full for this size class, or not settled: serve once, uncached
         response_fields::served_file(s, ws.fs_path);
         serve_entry(s, std::move(canonical));
         s.response.unsettled_file = !settled;

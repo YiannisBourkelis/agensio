@@ -1,6 +1,6 @@
 # Design: response compression (phase E2, the on-the-fly part)
 
-Status: proposed 2026-10-30; its seven decisions taken by the owner the same day (section 12); nothing built yet. Built on the research of
+Status: proposed 2026-10-30; its seven decisions taken by the owner the same day (section 12). Built so far (section 11): step 1, the keys and the chooser (2026-10-30); step 2, the copies of cached files made once, with libzstd and libbrotli as optional dependencies (2026-10-30: a site without the key flat on every row, the 100 KB CSS served from its brotli copy at 0.42 of the identity row's CPU, `ab-20261030-011627.md`). Built on the research of
 2026-10-26, `reports/Web server response compression.md`, and its notes under
 `research_notes/Web server response compression/` (nine servers, the CDNs, the RFCs, BREACH, the
 cost of each encoder measured on this box, what applications do, what administrators ask).

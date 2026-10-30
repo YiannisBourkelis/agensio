@@ -16,7 +16,7 @@ jobs:
       # fetched by CMake (asio-1-38-2) because no libasio-dev is installed.
       - uses: lukka/get-cmake@latest
       - name: dependencies
-        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-12 libssl-dev zlib1g-dev rpm dpkg-dev file
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-12 libssl-dev zlib1g-dev libzstd-dev libbrotli-dev pkg-config rpm dpkg-dev file
       - name: configure and build
         env:
           CC: gcc-12
@@ -72,7 +72,7 @@ jobs:
       - name: dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates git cmake ninja-build g++ libssl-dev zlib1g-dev libcrypt-dev dpkg-dev file gh openssl
+          apt-get install -y --no-install-recommends ca-certificates git cmake ninja-build g++ libssl-dev zlib1g-dev libzstd-dev libbrotli-dev pkg-config libcrypt-dev dpkg-dev file gh openssl
       - uses: actions/checkout@v4
       - name: configure and build
         # asio is fetched by CMake (asio-1-38-2): Debian 13's libasio-dev is older than the project needs.

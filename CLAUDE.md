@@ -117,6 +117,8 @@ plugin's filters, with a README mapping each to `src/control/protection.*` and
 | toml++ 3.4.0 | Config parsing | vendored single header in `third_party/tomlplusplus` (MIT) |
 | zlib | gzip and deflate for the archive extractor behind `site-install` (`.tar.gz`, `.zip`); on every system already | optional at build time (`find_package(ZLIB)`); without it only plain `.tar` installs |
 | libxcrypt (LGPL-2.1+) | password checks for `[[site.auth]]` (`crypt_rn`: yescrypt, bcrypt, sha-crypt); the system's libcrypt on Debian, Ubuntu, Fedora and RHEL, linked dynamically | optional at build time (`crypt_rn` in `crypt.h`, with OpenSSL); without it authentication is compiled out and a configuration that asks for it is refused |
+| libzstd (BSD-3) | the zstd content coding of `response_compression`, what 83 % of browsers take at an eighth of gzip's CPU (`docs/design-compression.md`); Debian and Ubuntu's `libzstd-dev` | optional at build time (pkg-config `libzstd`); without it the coding is not offered and a configuration naming it is refused with the package |
+| libbrotli (MIT) | the brotli content coding of `response_compression`, what 97 % of browsers take; the copies of cached files made once at quality 11; `libbrotli-dev` | optional at build time (pkg-config `libbrotlienc`); without it the coding is not offered and a configuration naming it is refused with the package |
 
 ## Planned layout
 
@@ -144,6 +146,7 @@ cmake --build build
 ./build/agensio -t -c config/agensio.toml  # config check only
 cmake -S . -B build -DAGENSIO_HTTPARENA=ON  # adds the HttpArena benchmark handler (handler = "httparena"); never in a release
 cmake -S . -B build-notls -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TLS=OFF   # without OpenSSL: no TLS, no passwords
+cmake -S . -B build-nobr -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_BROTLI=OFF  # without libbrotli (or -DAGENSIO_ZSTD=OFF): that coding not offered, a configuration naming it refused
 cmake -S . -B build-noauth -G Ninja -DCMAKE_BUILD_TYPE=Release -DXCRYPT_LIBRARY=/nonexistent  # as without libxcrypt: no passwords
 (cd build && cpack -G DEB)                 # the .deb (packaging/, tests/package.sh runs it in the root devbox)
 cmake -S . -B build -DAGENSIO_DEB_SUFFIX=deb13  # the release's Debian 13 .deb (version +deb13; HTTP/3 needs OpenSSL >= 3.5.1)

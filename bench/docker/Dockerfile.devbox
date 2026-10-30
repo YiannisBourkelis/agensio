@@ -7,7 +7,7 @@
 FROM debian:trixie AS base
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y build-essential g++ cmake ninja-build git ca-certificates libssl-dev \
-      curl netcat-openbsd openssl python3 procps wrk nginx clang libclang-rt-dev perl php-fpm php-cli zlib1g-dev \
+      curl netcat-openbsd openssl python3 procps wrk nginx clang libclang-rt-dev perl php-fpm php-cli zlib1g-dev libzstd-dev libbrotli-dev zstd brotli \
       nghttp2-client libnghttp2-dev python3-h2 pkg-config autoconf automake libtool libev-dev \
       libc-ares-dev libevent-dev libjansson-dev libsystemd-dev libjemalloc-dev \
     && rm -rf /var/lib/apt/lists/*

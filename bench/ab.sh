@@ -68,11 +68,11 @@ BENCH="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$BENCH")"
 [ $# -ge 1 ] || { sed -n '2,16p' "$0"; exit 2; }
 BASE_REF="$1"; shift
-ROUNDS=2; DURATION=5s; THREADS=4; WORKERS=1; SPECS=(); PROXY=0; H2=0; H3=0; ACCESS=0
-while getopts "r:d:t:w:u:P23A" opt; do
+ROUNDS=2; DURATION=5s; THREADS=4; WORKERS=1; SPECS=(); PROXY=0; H2=0; H3=0; ACCESS=0; COMP=0
+while getopts "r:d:t:w:u:P23AC" opt; do
   case $opt in
     r) ROUNDS=$OPTARG ;; d) DURATION=$OPTARG ;; t) THREADS=$OPTARG ;; w) WORKERS=$OPTARG ;;
-    u) SPECS+=("$OPTARG") ;; P) PROXY=1 ;; 2) H2=1 ;; 3) H3=1 ;; A) ACCESS=1 ;; *) exit 2 ;;
+    u) SPECS+=("$OPTARG") ;; P) PROXY=1 ;; 2) H2=1 ;; 3) H3=1 ;; A) ACCESS=1 ;; C) COMP=1 ;; *) exit 2 ;;
   esac
 done
 [ ${#SPECS[@]} -eq 0 ] && SPECS=("http:/:64" "http:/style.css:64" "https:/:64" "https:/style.css:64" "http:/big.bin:16" "https:/big.bin:16")
@@ -282,6 +282,21 @@ AUTH_SITES
       done; } >> "$BENCH/tmp/$f"
   done
 fi
+if [ $COMP = 1 ]; then
+  # -C, response compression (docs/design-compression.md 10): a site with the key on, on 8087, asked
+  # with a browser's Accept-Encoding: the 1 KB page is under min_size (identity, must be flat
+  # against the plain row) and the 100 KB CSS gets its brotli copy, made once at the first fill
+  # (must equal a row served from a disk twin). A side whose binary lacks the key does not load
+  # the site and skips the rows, as -P skips proxy rows on a base that cannot proxy.
+  # The rows: the 1 KB page under min_size (identity, Vary, flat against the plain row); the
+  # 100 KB CSS from its brotli copy, from its gzip copy (a client taking gzip alone), and as
+  # identity to a client sending no Accept-Encoding (curl's and most tools' case: the file's own
+  # bytes with Vary, flat against the plain row); the brotli copy over TLS and over HTTP/2 at ten
+  # streams, where the twin code's TLS and framing paths carry it.
+  SPECS+=("comp:/:64" "comp:/style.css:64" "comp-gzip:/style.css:64" "comp-plain:/style.css:64" "comp-tls:/style.css:64")
+  [ $H2 = 1 ] && SPECS+=("comp-h2:/style.css:64:10")
+  printf '\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8087"]\nroot = "%s/www"\nresponse_compression = "on"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8486"]\nroot = "%s/www"\ntls = { cert = "%s/certs/cert.pem", key = "%s/certs/key.pem" }\nresponse_compression = "on"\n' "$BENCH" "$BENCH" "$BENCH" "$BENCH" > "$BENCH/tmp/ab-comp.toml"
+fi
 # The proxy gate adds a site that forwards 127.0.0.1:8093 to the upstream; a side whose
 # binary cannot load it (a base before D1) gets the static-only config and no proxy rows.
 UP_PID=""
@@ -294,7 +309,7 @@ fi
 
 PID=""; SIDE_PROXY=0; SIDE_H2=0; SIDE_H3=0
 start() {  # binary
-  for port in 8080 8443 8088 8091 8092 8093 8094 8095 8449 8098 8099; do
+  for port in 8080 8443 8087 8486 8088 8091 8092 8093 8094 8095 8449 8098 8099; do
     nc -z 127.0.0.1 "$port" 2>/dev/null && { echo "port $port is busy; stop the running server first"; exit 1; }
   done
   local cfg="$BENCH/tmp/ab-agensio.toml"
@@ -334,6 +349,12 @@ start() {  # binary
         if "$1" -t -c "$BENCH/tmp/ab-side-pcache.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side-pcache.toml"; echo "  (proxy-cache row: ${f#ab-pcache-})"; break; fi
       done
     fi
+  fi
+  SIDE_COMP=0
+  if [ $COMP = 1 ]; then  # the compression site in the side that loads it (docs/design-compression.md 10)
+    cat "$cfg" "$BENCH/tmp/ab-comp.toml" > "$BENCH/tmp/ab-side-comp.toml"
+    if "$1" -t -c "$BENCH/tmp/ab-side-comp.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side-comp.toml"; SIDE_COMP=1
+    else echo "  (this side has no response_compression: no comp rows)"; fi
   fi
   (cd "$BENCH" && exec "$1" -c "$cfg") >>"$RAW/server.log" 2>&1 &
   PID=$!
@@ -384,6 +405,9 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       proxy-hdr) [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8091$path" ;;
       proxy-cache) [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8089$path" ;;
       auth) url="http://127.0.0.1:8096$path" ;;
+      comp|comp-gzip|comp-plain) [ $SIDE_COMP = 1 ] || continue; url="http://127.0.0.1:8087$path" ;;
+      comp-tls) [ $SIDE_COMP = 1 ] || continue; url="https://127.0.0.1:8486$path" ;;
+      comp-h2) [ $SIDE_COMP = 1 ] && [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8486$path" ;;
       h2c) [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8080$path" ;;
       h2) [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;
       h3) [ $SIDE_H3 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;
@@ -397,10 +421,15 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       $H2LOAD_H3 --alpn-list=h3 -D "${DURATION%s}" -c"$conns" -m"$streams" -t"$t" "$url" > "$raw" 2>&1 || true
       n=$(awk '/^requests:/{print $6}' "$raw"); rps=$(awk '/^finished in/{print $4}' "$raw")
     elif [ -n "$streams" ]; then
-      h2load -D "${DURATION%s}" -c"$conns" -m"$streams" -t"$t" "$url" > "$raw" 2>&1 || true
+      hdr=(); [ "$proto" = comp-h2 ] && hdr=(-H "accept-encoding: gzip, deflate, br, zstd")
+      h2load -D "${DURATION%s}" -c"$conns" -m"$streams" -t"$t" "${hdr[@]}" "$url" > "$raw" 2>&1 || true
       n=$(awk '/^requests:/{print $6}' "$raw"); rps=$(awk '/^finished in/{print $4}' "$raw")  # "N done", "X req/s"
     else
       hdr=(); [ "$proto" = auth ] && hdr=(-H "Authorization: Basic YW5uYTpzZWNyZXQ=")  # anna:secret
+      case $proto in  # the compression rows' clients
+        comp|comp-tls) hdr=(-H "Accept-Encoding: gzip, deflate, br, zstd") ;;  # a browser's
+        comp-gzip) hdr=(-H "Accept-Encoding: gzip") ;;                          # a tool taking gzip alone
+      esac
       wrk -t"$t" -c"$conns" -d"$DURATION" "${hdr[@]}" "$url" > "$raw" 2>&1
       n=$(awk '/requests in/{print $1}' "$raw"); rps=$(awk '/^Requests\/sec/{print $2}' "$raw")
     fi
