@@ -142,6 +142,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [Different protocols for one site](examples/protocols.md#different-protocols-for-one-site): a site's own `protocols`, and why it needs an address of its own.
 - [Workers and connection limits on a small VPS](examples/protocols.md#workers-and-connection-limits-on-a-small-vps): `workers`, `max_connections`, `idle_timeout`, and what a refused client gets.
 - [Request size and time limits](examples/protocols.md#request-size-and-time-limits): `max_header_size`, `max_body_size` per site, `body_timeout`; 431 and 413.
+- [Compress a site's answers for the browsers that take it](examples/protocols.md#compress-a-sites-answers-for-the-browsers-that-take-it): `response_compression = "on"`, the `off` paths and `session_cookies`, `upstream = "offload"`, brotli first behind a CDN, and the `curl` check.
 - [The file cache for a site with many large files](examples/protocols.md#the-file-cache-for-a-site-with-many-large-files): `[cache]` sizes, open descriptors, revalidation.
 - [Reload without dropping a connection](examples/protocols.md#reload-without-dropping-a-connection): what a reload applies and what needs a restart.
 

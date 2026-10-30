@@ -523,6 +523,52 @@ static void test_encoding() {
         if (got != c.want) std::printf("choose_encoding(\"%s\", %d, %d) = %d, want %d\n", c.accept, c.br, c.gz, static_cast<int>(got), static_cast<int>(c.want));
         CHECK(got == c.want);
     }
+    // The general chooser (docs/design-compression.md 4): any set offered, root's order on a tie,
+    // zstd known, nothing acceptable or no header is identity, identity;q=0 alone still identity.
+    const auto offer = [](std::initializer_list<E> order) {
+        Codings c;
+        std::size_t n = 0;
+        for (const E e : order) {
+            c.add(e);
+            c.order[n++] = e;
+        }
+        for (; n < c.order.size(); ++n) c.order[n] = E::identity;
+        return c;
+    };
+    const Codings all = offer({E::zstd, E::br, E::gzip}), br_first = offer({E::br, E::zstd, E::gzip}), gz_only = offer({E::gzip});
+    CHECK(choose_encoding("gzip, deflate, br, zstd", all) == E::zstd);     // Chrome and Firefox: equal q, the order decides
+    CHECK(choose_encoding("gzip, deflate, br, zstd", br_first) == E::br);  // behind Cloudflare: br first
+    CHECK(choose_encoding("gzip, deflate, br", all) == E::br);             // Safari before 26.3
+    CHECK(choose_encoding("gzip, deflate", all) == E::gzip);               // Node fetch
+    CHECK(choose_encoding("gzip, deflate, br, zstd", gz_only) == E::gzip);  // a build without zstd and brotli
+    CHECK(choose_encoding("zstd;q=0.5, br;q=0.9, gzip", all) == E::gzip);  // q decides before the order
+    CHECK(choose_encoding("zstd;q=0, br;q=0, gzip;q=0", all) == E::identity);
+    CHECK(choose_encoding("identity", all) == E::identity);
+    CHECK(choose_encoding("identity;q=0", all) == E::identity);  // nothing else acceptable: identity, never 406
+    CHECK(choose_encoding("*", all) == E::zstd);                 // * is every coding not named: the order decides
+    CHECK(choose_encoding("*;q=0.5, gzip", all) == E::gzip);
+    CHECK(choose_encoding("", all) == E::identity && choose_encoding("gzip", Codings{}) == E::identity);
+    CHECK(choose_encoding("ZSTD", all) == E::zstd && choose_encoding("x-gzip", all) == E::gzip);
+    CHECK(encoding_name(E::zstd) == "zstd" && encoding_name(E::br) == "br" && encoding_name(E::gzip) == "gzip" && encoding_name(E::identity) == "identity");
+}
+
+// The compressible column (docs/design-compression.md 4): text and the structured types, matched on
+// the media type without parameters (nginx's gzip_types trap), never what is compressed already.
+static void test_compressible_type() {
+    for (const char* yes : {"text/html", "text/html; charset=utf-8", "Text/HTML;charset=UTF-8", "text/css", "text/plain", "text/javascript",
+                            "application/javascript", "application/x-javascript", "application/json", "application/json; charset=utf-8",
+                            "application/ld+json", "application/vnd.api+json", "application/xml", "application/rss+xml", "application/xhtml+xml",
+                            "application/wasm", "application/manifest+json", "image/svg+xml", "image/x-icon", "font/ttf", "font/otf",
+                            "application/vnd.ms-fontobject", "text/csv", "text/markdown"})
+        if (!compressible_type(yes)) std::printf("compressible_type(\"%s\") false, want true\n", yes);
+    for (const char* no : {"text/event-stream", "image/png", "image/jpeg", "image/webp", "image/avif", "video/mp4", "audio/mpeg", "application/zip",
+                           "application/gzip", "application/octet-stream", "application/pdf", "font/woff", "font/woff2", "", "html", "/x", "text/"})
+        if (compressible_type(no)) std::printf("compressible_type(\"%s\") true, want false\n", no);
+    CHECK(compressible_type("text/html; charset=utf-8") && compressible_type("application/json;charset=utf-8") && !compressible_type("font/woff2") &&
+          !compressible_type("text/event-stream") && !compressible_type("application/octet-stream"));
+    CHECK(mime_info("/a/style.css").compressible && mime_info("/a/app.js").compressible && mime_info("/a/data.json").compressible &&
+          !mime_info("/a/photo.jpg").compressible && !mime_info("/a/font.woff2").compressible && mime_info("/a/logo.svg").compressible &&
+          mime_info("/a/logo.svgz").compressible && mime_info("/a/logo.svgz").encoding == "gzip");  // svgz: a compressible type stored gzip already (D6): nothing to do
 }
 
 // The static handler with twins on disk: the chosen representation, its headers and
@@ -4204,11 +4250,23 @@ static void test_control_commands() {
             {"cache.max_open_files", [](Config& c) { c.cache_max_open_files += 1; }},
             {"cache.precompressed", [](Config& c) { c.cache_precompressed = !c.cache_precompressed; }},
             {"control.provision", [](Config& c) { c.control.provision = !c.control.provision; }},
+            // [response_compression] (docs/design-compression.md 3): a level names its own row and the
+            // table's levels row, so those two are allowed to come together below.
+            {"[response_compression] codings", [](Config& c) { c.compression.codings = {"gzip"}; }},
+            {"levels = {} zstd", [](Config& c) { c.compression.level_zstd += 1; }},
+            {"levels = {} br", [](Config& c) { c.compression.level_br += 1; }},
+            {"levels = {} gzip", [](Config& c) { c.compression.level_gzip += 1; }},
+            {"[response_compression] min_size", [](Config& c) { c.compression.min_size *= 2; }},
+            {"[response_compression] types_add", [](Config& c) { c.compression.types_add = {"application/x-thing"}; }},
         };
         for (const auto& [key, change] : restart_only) {
             Config one = cfg;
             change(one);
-            const auto named = restart_needed(one, cfg);
+            auto named = restart_needed(one, cfg);
+            if (key.starts_with("levels = {} ")) {  // a level also names the levels table's row
+                CHECK(named.size() == 2 && named[0] == "[response_compression] levels");
+                named.erase(named.begin());
+            }
             if (named != std::vector<std::string>{key}) {
                 std::string got;
                 for (const auto& n : named) got += " " + n;
@@ -4222,7 +4280,7 @@ static void test_control_commands() {
         CHECK(restart_needed(moved, with_control) == std::vector<std::string>{"control.socket"});
         // The reference's restart rows are exactly these keys: a new restart-only key gets its
         // line in restart_needed and here, or this fails.
-        std::set<std::string> covered = {"workers", "control.socket"};
+        std::set<std::string> covered = {"workers", "control.socket", "[response_compression] levels"};
         for (const auto& [key, change] : restart_only) covered.insert(key);
         for (const auto& d : control::key_defs()) {
             if (std::string_view(d.applies) != "restart") continue;
@@ -12632,6 +12690,7 @@ int main() {
     test_httparena();
 #endif
     test_encoding();
+    test_compressible_type();
     test_precompressed();
     test_chunked();
     test_core_types();

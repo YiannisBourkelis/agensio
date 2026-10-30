@@ -1359,6 +1359,17 @@ std::vector<std::string> restart_needed(const Config& fresh, const Config& runni
     kept(fresh.control.enabled != running.control.enabled, "control");
     kept(fresh.control.enabled && running.control.enabled && fresh.control.socket != running.control.socket, "control.socket");
     kept(fresh.control.provision != running.control.provision, "control.provision");
+    // [response_compression] (docs/design-compression.md 3): read once at start, the encoders set
+    // up from it; the site key applies on reload, these do not.
+    kept(fresh.compression.codings != running.compression.codings, "[response_compression] codings");
+    kept(fresh.compression.level_zstd != running.compression.level_zstd || fresh.compression.level_br != running.compression.level_br ||
+             fresh.compression.level_gzip != running.compression.level_gzip,
+         "[response_compression] levels");
+    kept(fresh.compression.level_zstd != running.compression.level_zstd, "levels = {} zstd");
+    kept(fresh.compression.level_br != running.compression.level_br, "levels = {} br");
+    kept(fresh.compression.level_gzip != running.compression.level_gzip, "levels = {} gzip");
+    kept(fresh.compression.min_size != running.compression.min_size, "[response_compression] min_size");
+    kept(fresh.compression.types_add != running.compression.types_add, "[response_compression] types_add");
     // Not the task keys (runtimes, task_limits, task_network): the helper reads them from
     // root's file for every task, and the server from the configuration it runs, so a
     // reload changes them (2026-09-27 Writebook report: a new Ruby cost every site a restart).

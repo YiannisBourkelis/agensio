@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-alpha.118
+
+- **Response compression, step 1 of `docs/design-compression.md`: the keys and the chooser.** The
+  site key `response_compression` (`"on"` | `"off"`, off by default, or the table with `mode`,
+  `off` paths, `signed_in`, `session_cookies`, `upstream`, `event_streams`) and root's
+  `[response_compression]` (`codings`, `levels`, `min_size`, `types_add`) load, are refused with
+  the reason when wrong, have their reference rows (`docs/configuration.md` 20, `docs/keys.md`)
+  and a cookbook recipe. `choose_encoding` knows zstd and takes the configured order on a tie;
+  the MIME table carries a `compressible` column, judged on the media type without parameters.
+  A site with the key on has its client's coding chosen once at routing (`Stream::coding`); a
+  site without it pays one flag test. No answer is compressed yet: the encoders come with the
+  next steps.
 ## 0.1.0-alpha.117 (2026-10-26)
 
 - **An HTTP/3 attempt refused at the connection ceiling counts once** (the alpha.116 report). A

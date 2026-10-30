@@ -105,6 +105,7 @@ section of `docs/configuration.md` that explains the key.
 
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
+| `response_compression` | table: codings, levels, min_size, types_add | {} (the defaults below) | Root's tuning of response compression, shared by every site that turns it on (docs/design-compression.md 3): the codings offered and their order on a tie, the levels of answers compressed per request, the minimum size, and media types beyond the built-in list; each of its keys applies at a restart. | reload | file | 20 |
 | `addresses` | table of address lists | {} | Named address sets: [addresses] office = ["203.0.113.7", "2001:db8:5::/64"], named "@office" in the sites' access rules, so one edit reaches every site that names it. Addresses and ranges only, at most 64 a set. | reload | file | 19 |
 ## `[cache]`
 
@@ -207,6 +208,36 @@ section of `docs/configuration.md` that explains the key.
 | `proxy` | table | (none) | Defaults for the site's proxy locations (host, forwarded, headers, hide, redirects, tls, timeouts). | reload | site file | 12 |
 | `upstream` | URL or list | (none) | app = proxy, rails, redmine, django, wagtail or node: where the application listens; a list balances round-robin with passive health. | reload | site-create (upstream) | 4b |
 | `response_headers` | array of tables | none | [[site.response_headers]] rules: fields the site sets, defaults or removes by path, on every answer it gives (files, PHP, a proxied application, its own error pages and redirects); per field the most specific rule naming it decides. | reload | site-create (response_headers) | 14c |
+| `response_compression` | "on" \| "off" \| { mode, off, signed_in, session_cookies, upstream, event_streams } | "off" | Whether the site's answers are compressed for browsers that take it (zstd, brotli, gzip): the cached files' copies made once in memory, and PHP, proxied, CGI answers and agensio's own pages compressed per request; off by default so no CPU is spent unless the site asks. The string form is the switch; the table form adds the fields below. Already-compressed answers pass through, a 206 is never compressed, Vary: Accept-Encoding goes on every answer that could have been, HEAD gets the GET's fields (docs/design-compression.md). | reload | site file | 20 |
+## `response_compression = {}`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `mode` | enum: on \| off | (required) | The site's switch, as the string form. | reload | site file | 20 |
+| `off` | list of URL paths | [] | Path prefixes never compressed, whoever asks: an account or checkout page that reflects input beside a token (BREACH), an API an odd client reads. At most 32, "/"-rooted. | reload | site file | 20 |
+| `signed_in` | enum: on \| off | off | Whether a signed-in visitor's answers are compressed: one with the application's login cookie (the preset's, plus session_cookies), a browser-replayed Authorization (Basic, Digest), a [[site.auth]] password or a [[site.access]] address rule. Off is the BREACH guard: a compressed page that holds a secret beside reflected input leaks the secret to an attacker who can make the visitor's browser request it. On is the user's decision in person, for a framework that masks its tokens (Django, Rails) and pages that reflect no input; it adds up to 32 bytes of random padding per answer. | reload | site file | 20 |
+| `session_cookies` | list of cookie names | (the preset's own) | Cookies that mark a visitor signed in, beside the preset's (wordpress_logged_in_*, laravel_session, SESS*, ...). A trailing * matches a prefix. At most 16. | reload | site file | 20 |
+| `upstream` | enum: pass \| offload | pass | pass forwards the browser's Accept-Encoding to the application, which may compress itself (Next.js, Ghost, Grafana, PHP's zlib.output_compression), in which case agensio passes its answer through. offload keeps Accept-Encoding from the application, so agensio compresses every answer and the signed_in guard applies; the way to zstd or brotli for a gzip-only application, and the only way the guard can protect a PHP site whose zlib.output_compression is on. | reload | site file | 20 |
+| `event_streams` | bool | false | Compress text/event-stream answers too, each event flushed; off by default, since a long-lived stream holds a compressor for its whole life and signed-in event streams are where secrets and reflected input meet. | reload | site file | 20 |
+## `[response_compression]`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `codings` | list | ["zstd", "br", "gzip"] | The codings agensio offers, in the order that decides when a browser takes several equally (q-values decide first). zstd first costs a quarter of brotli's CPU for 1 to 8 % more bytes on HTML and serves 83 % of browsers, brotli the rest; behind Cloudflare, CloudFront or Fastly put br first: they ask the origin for brotli and pass it to visitors, and ignore an origin's zstd. A coding the build lacks is refused at -t, naming the package. | restart | file | 20 |
+| `levels` | { zstd, br, gzip } | { zstd = 3, br = 4, gzip = 5 } | The encoder levels for answers compressed per request: zstd 1 to 9, br 1 to 6, gzip 1 to 9. Measured on this project's box: zstd 3 matches gzip 6's size within 2 % at eight times its speed, br 4 matches it at twice. The copies of cached files are made once at brotli 11 and gzip 9 and are not settable. Windows are fixed (zstd 2^19, brotli 2^18) for the memory per stream. | restart | file | 20 |
+| `min_size` | size | 1KB | Answers smaller than this are not compressed; for a streamed answer judged after its first read, so a 100-byte JSON is left alone whatever its framing. | restart | file | 20 |
+| `types_add` | list of media types | [] | Media types compressed beyond the built-in list (text/* but event streams, JavaScript, JSON and +json, XML and +xml, XHTML, SVG, ICO, wasm, TTF/OTF/EOT, web manifests). Matched on the type without parameters, so application/json covers application/json; charset=utf-8. Images, audio, video, archives and WOFF are never compressed. At most 32. | restart | file | 20 |
+## `levels = {}`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `zstd` | int | 3 | zstd level for per-request answers, 1 to 9. | restart | file | 20 |
+| `br` | int | 4 | brotli quality for per-request answers, 1 to 6. | restart | file | 20 |
+| `gzip` | int | 5 | gzip level for per-request answers, 1 to 9. | restart | file | 20 |
+## `[[site]]`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
 | `response_headers_baseline` | bool | (on with app, off without) | The preset's security baseline (docs/headers.md 4), only what cannot break a working page: Referrer-Policy: strict-origin-when-cross-origin where an answer has none, X-Content-Type-Options: nosniff on the files and error pages agensio serves (never an application's answer, where a script of the wrong type would stop), X-Powered-By removed, and on a static site Cache-Control: no-cache on its HTML. A [[site.response_headers]] rule naming one of these fields decides instead. false turns it off; true gives a site without app the static site's. | reload | site-create (response_headers_baseline) | 14c |
 | `response_headers_offer_declined` | list of field names: X-Frame-Options, Content-Security-Policy, Permissions-Policy, X-Content-Type-Options | none | The fields the baseline leaves to the owner (docs/headers.md 4.1) that the owner decided the site must not send, so path_check's response_headers_offer and health's response_headers_suggested stop naming them: X-Frame-Options when other sites embed its pages, a Content-Security-Policy the application cannot live with. It sends and removes nothing; HSTS is declined with hsts = "application" or "none". | reload | site-create (response_headers_offer_declined) | 14c |
 | `location` | array of tables | (preset-dependent) | [[site.location]] blocks; a hand-written one replaces the preset's at its path, except one that sets only add_headers, which adds its fields to the preset's. | reload | site file | 6 |

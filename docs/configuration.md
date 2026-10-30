@@ -4001,3 +4001,90 @@ same name warns that it exists.
 The reference rows (`agensio ctl reference`, `docs/keys.md`) give every key; `docs/auth.md` is
 the whole feature in one place, with its edge cases.
 
+
+## 20. Response compression: `response_compression`
+
+Off by default: agensio spends no CPU on compression unless a site asks. One key turns it on for
+a site, and the defaults behind it are right for a WordPress, Laravel, Drupal, Rails or Node site:
+
+```toml
+[[site]]
+server_name = ["shop.example"]
+app = "wordpress"
+response_compression = "on"
+```
+
+With it on, the site's answers go out compressed to a browser that takes it, whatever produced
+them: cached static files (copies made once, in memory, counted in `cache.max_size` with the
+file; a `.br` or `.gz` the site's build left beside a file is served as before and gets no copy),
+PHP, proxied and CGI answers, and agensio's own error pages, compressed as they are sent. The
+coding is the browser's choice among those agensio offers (`Accept-Encoding`, with its q-values):
+zstd, brotli and gzip are built in, so there is no module to add, and a browser that lacks one
+gets the next. What is compressed is decided by the media type (text of every kind, JavaScript,
+JSON, XML, SVG, fonts that are not compressed already, wasm; never images, video, audio or
+archives), judged without the type's parameters, so `application/json; charset=utf-8` is JSON;
+answers under 1 KB are left alone; a 206 is never compressed; `Vary: Accept-Encoding` goes on
+every answer that could have been compressed; an answer the application compressed itself passes
+through untouched; `Cache-Control: no-transform` from the application is honoured.
+
+The table form adds what a site may need; every field is optional:
+
+```toml
+response_compression = { mode = "on",
+                         off = ["/my-account/", "/checkout/"],   # paths never compressed
+                         signed_in = "off",                      # signed-in visitors' pages uncompressed (default)
+                         session_cookies = ["shop_sid"],         # the site's own login cookies, beside the preset's
+                         upstream = "pass",                      # "offload": agensio compresses instead of the application
+                         event_streams = false }                 # server-sent events uncompressed (default)
+```
+
+`signed_in = "off"`, the default, is the guard against BREACH: a compressed page that holds a
+secret (a CSRF token, an account number) beside something the attacker got reflected into it
+leaks the secret, byte by byte, to an attacker who can make the visitor's browser request the
+page over and over, which needs the visitor's own login. Static files and anonymous pages hold no
+secret of that kind, so they are safe to compress; a signed-in visitor's pages are where the
+three conditions can meet. A visitor is signed in when the request carries the application's
+login cookie (the preset knows WordPress's `wordpress_logged_in_*`, Laravel's `laravel_session`,
+Drupal's `SESS*`; `session_cookies` adds a site's own), a password the browser sends on its own
+(Basic, Digest), a `[[site.auth]]` password, or an address rule of `[[site.access]]`. `signed_in =
+"on"` compresses those pages too; it is the user's own decision, taken for a framework that masks
+its tokens per answer (Django, Rails) and pages that reflect no input, and it adds up to 32
+random bytes to each compressed answer. `off` names the paths that stay uncompressed whatever the
+visitor: the account and checkout pages of a shop. The application can always opt an answer out
+with `Cache-Control: no-transform`.
+
+`upstream = "offload"` keeps the browser's `Accept-Encoding` from the application, so an
+application that would compress itself (Next.js, Ghost, Grafana, a PHP site with
+`zlib.output_compression` on) sends plain answers and agensio compresses them: the way a
+gzip-only application's visitors get zstd or brotli, and the only way the `signed_in` guard can
+protect a PHP site whose own zlib layer would compress its logged-in pages first. `event_streams =
+true` compresses `text/event-stream` answers too, each event flushed as it comes; off by default,
+since a stream holds its compressor for its whole life.
+
+Root's table tunes what every site shares; it is read at start, so a change needs a restart:
+
+```toml
+[response_compression]
+codings   = ["zstd", "br", "gzip"]          # offered; the order decides when the browser accepts several equally
+levels    = { zstd = 3, br = 4, gzip = 5 }  # for answers compressed per request
+min_size  = 1024                            # bytes; smaller answers go uncompressed
+types_add = ["application/vnd.api+json"]    # media types beyond the built-in list
+```
+
+The order matters only when a browser takes several codings equally, which Chrome and Firefox
+do (`gzip, deflate, br, zstd`). zstd first is the default because it costs a quarter of brotli's
+CPU for 1 to 8 % more bytes on HTML and 83 % of browsers take it; brotli serves the rest. A site
+behind Cloudflare, CloudFront or Fastly does better with `["br", "zstd", "gzip"]`: those ask the
+origin for brotli and pass it on to visitors, and ignore an origin's zstd. The levels are for
+answers compressed per request (measured: zstd 3 within 2 % of gzip 6's size at eight times its
+speed, brotli 4 at twice); the copies of cached files are made once at brotli 11 and gzip 9,
+which is not a setting, and the encoders' windows are fixed for the memory each stream takes. A
+coding the build lacks (`libzstd`, `libbrotli` missing at build time) is refused by `agensio -t`,
+naming the package.
+
+To see what a path gets and why: `agensio ctl path-check shop.example / --accept-encoding 'gzip,
+br' --visitor signed_in` names the coding, or the one reason none applies (the type, the size,
+the status, a signed-in visitor, an answer already compressed, `no-transform`, an `off` path, the
+mode, the budget). From outside, `curl -sS -o /dev/null -D - -H 'Accept-Encoding: zstd, br, gzip'
+https://shop.example/` shows `Content-Encoding` and `Vary`. The design, with the research behind
+every default, is `docs/design-compression.md`.

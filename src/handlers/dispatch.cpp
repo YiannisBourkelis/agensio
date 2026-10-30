@@ -1,4 +1,5 @@
 #include "handlers/dispatch.hpp"
+#include "handlers/encoding.hpp"
 
 #include <cstdio>
 #include <ctime>
@@ -640,6 +641,11 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
     // carries them, the error pages and redirects below included; a plain one never does (RFC 6797 7.2).
     // hsts = "none" points here too, with no line: an application's own field is removed (4.2).
     if ((s.conn.tls || s.conn.forwarded_https) && !site->tls_fields.empty()) s.fields = &site->tls_fields;
+    // response_compression (docs/design-compression.md 6): the coding this client takes among those the
+    // site offers, decided once here for every answer that follows; a site with the key off pays this
+    // one test and nothing else. No Accept-Encoding, or none acceptable, is identity.
+    if (site->compression.on && !s.request.accept_encoding.empty())
+        s.coding = static_cast<std::uint8_t>(choose_encoding(s.request.accept_encoding, site->codings));
     // http = "redirect" (docs/redirects.md 2): plain HTTP, or a request a trusted proxy did not mark
     // https, goes to HTTPS; certificate validation gets the site's files there and nothing else
     // (its validation location, below). canonical (3): another of the site's names goes to the

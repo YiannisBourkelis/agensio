@@ -31,6 +31,17 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         const Encoding e = choose_encoding(value, br, gzip);
         assert(e == Encoding::identity || (e == Encoding::br && br) || (e == Encoding::gzip && gzip));
     }
+    // The general chooser (docs/design-compression.md 4): never a coding not offered, whatever the
+    // header and the order; nothing offered is identity.
+    for (unsigned mask = 0; mask < 8; ++mask) {
+        Codings c;
+        c.mask = static_cast<std::uint8_t>(mask);
+        c.order = {Encoding::zstd, Encoding::br, Encoding::gzip};
+        if (size & 1) c.order = {Encoding::br, Encoding::zstd, Encoding::gzip};
+        const Encoding e = choose_encoding(value, c);
+        assert(e == Encoding::identity || c.has(e));
+        if (mask == 0) assert(e == Encoding::identity);
+    }
     const int q = encoding_detail::parse_q(value);
     assert(q >= 0 && q <= 1000);
 

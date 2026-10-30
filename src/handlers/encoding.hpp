@@ -3,13 +3,37 @@
 // called only when the entry holds a twin, so a request for a file without one pays nothing.
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
 
 namespace agensio {
 
-enum class Encoding : std::uint8_t { identity, gzip, br };
+enum class Encoding : std::uint8_t { identity, gzip, br, zstd };
+
+// The coding's name as Content-Encoding spells it.
+inline std::string_view encoding_name(Encoding e) noexcept {
+    switch (e) {
+        case Encoding::gzip: return "gzip";
+        case Encoding::br: return "br";
+        case Encoding::zstd: return "zstd";
+        case Encoding::identity: break;
+    }
+    return "identity";
+}
+
+// The codings a server may offer, each a bit, and the order that decides a tie between the ones
+// a client takes equally (root's [response_compression] codings, zstd first by default: the
+// cheapest encoder for the 83 % of browsers that take it, docs/design-compression.md 4).
+struct Codings {
+    std::uint8_t mask = 0;                                                            // bit (Encoding - 1)
+    std::array<Encoding, 3> order = {Encoding::zstd, Encoding::br, Encoding::gzip};  // first wins a tie
+    constexpr bool has(Encoding e) const noexcept { return e != Encoding::identity && (mask & (1u << (static_cast<unsigned>(e) - 1))) != 0; }
+    constexpr void add(Encoding e) noexcept {
+        if (e != Encoding::identity) mask = static_cast<std::uint8_t>(mask | (1u << (static_cast<unsigned>(e) - 1)));
+    }
+};
 
 // The coding a file is stored with, from the type table's encoding column (mime_info: "gzip" for
 // .svgz), identity for every other file.
@@ -62,12 +86,16 @@ inline int parse_q(std::string_view params) noexcept {
 
 }  // namespace encoding_detail
 
-// have_br / have_gzip: which twins the entry holds. A coding named with q=0 is refused, "*"
-// stands for the codings not named, the highest q wins and br takes a tie (the smaller
-// body); nothing acceptable, or no header at all, means the file as stored.
-inline Encoding choose_encoding(std::string_view accept, bool have_br, bool have_gzip) noexcept {
+// The coding to send among those offered (RFC 9110 12.5.3): a coding named with q=0 is refused,
+// "*" stands for the codings not named, the highest q wins, and `offered.order` decides a tie;
+// nothing acceptable, or no header at all, means identity (the file as stored, the answer as the
+// application sent it). "identity;q=0" with nothing else acceptable is answered identity too, as
+// every server does (the RFC allows 406; no client sends it in earnest). One pass over the header,
+// no allocation.
+inline Encoding choose_encoding(std::string_view accept, Codings offered) noexcept {
     using namespace encoding_detail;
-    int q_br = -1, q_gzip = -1, q_star = -1;
+    int q[4] = {-1, -1, -1, -1};  // by Encoding; q[identity] unused
+    int q_star = -1;
     std::size_t i = 0;
     while (i <= accept.size()) {
         std::size_t j = accept.find(',', i);
@@ -77,15 +105,32 @@ inline Encoding choose_encoding(std::string_view accept, bool have_br, bool have
         if (item.empty()) continue;
         const std::size_t semi = item.find(';');
         const std::string_view token = trim_ws(item.substr(0, semi == std::string_view::npos ? item.size() : semi));
-        const int q = semi == std::string_view::npos ? 1000 : parse_q(item.substr(semi + 1));
-        if (token == "*") q_star = q;
-        else if (token_is(token, "br")) q_br = q;
-        else if (token_is(token, "gzip") || token_is(token, "x-gzip")) q_gzip = q;
+        const int w = semi == std::string_view::npos ? 1000 : parse_q(item.substr(semi + 1));
+        if (token == "*") q_star = w;
+        else if (token_is(token, "br")) q[static_cast<unsigned>(Encoding::br)] = w;
+        else if (token_is(token, "gzip") || token_is(token, "x-gzip")) q[static_cast<unsigned>(Encoding::gzip)] = w;
+        else if (token_is(token, "zstd")) q[static_cast<unsigned>(Encoding::zstd)] = w;
     }
-    const int br = have_br ? (q_br >= 0 ? q_br : q_star) : -1;
-    const int gz = have_gzip ? (q_gzip >= 0 ? q_gzip : q_star) : -1;
-    if (br <= 0 && gz <= 0) return Encoding::identity;
-    return br >= gz ? Encoding::br : Encoding::gzip;
+    Encoding best = Encoding::identity;
+    int best_q = 0;
+    for (const Encoding e : offered.order) {  // in order: the first of equals wins
+        if (!offered.has(e)) continue;
+        const int qe = q[static_cast<unsigned>(e)] >= 0 ? q[static_cast<unsigned>(e)] : q_star;
+        if (qe > best_q) {
+            best = e;
+            best_q = qe;
+        }
+    }
+    return best;
+}
+
+// The twins a cached file holds (name.br, name.gz beside it): br takes a tie, the smaller body.
+inline Encoding choose_encoding(std::string_view accept, bool have_br, bool have_gzip) noexcept {
+    Codings c;
+    c.order = {Encoding::br, Encoding::gzip, Encoding::zstd};
+    if (have_br) c.add(Encoding::br);
+    if (have_gzip) c.add(Encoding::gzip);
+    return choose_encoding(accept, c);
 }
 
 }  // namespace agensio

@@ -134,7 +134,32 @@ MimeInfo mime_info(std::string_view path) noexcept {
     auto it = std::lower_bound(kSorted.entries.begin(), kSorted.entries.end(), key,
                                [](const Entry& e, std::string_view k) { return std::string_view(e.ext) < k; });
     if (it == kSorted.entries.end() || std::string_view(it->ext) != key) return kDefault;
-    return {it->type, it->encoding};
+    return {it->type, it->encoding, compressible_type(it->type)};
+}
+
+bool compressible_type(std::string_view content_type) noexcept {
+    // The media type alone, lower-cased on the fly: "Application/JSON; charset=UTF-8" is application/json.
+    std::string_view t = content_type;
+    if (const auto semi = t.find(';'); semi != std::string_view::npos) t = t.substr(0, semi);
+    while (!t.empty() && (t.back() == ' ' || t.back() == '\t')) t.remove_suffix(1);
+    while (!t.empty() && (t.front() == ' ' || t.front() == '\t')) t.remove_prefix(1);
+    if (t.size() > 127) return false;
+    char lower[128];
+    for (std::size_t i = 0; i < t.size(); ++i) lower[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(t[i])));
+    t = std::string_view(lower, t.size());
+    const auto ends = [&](std::string_view suffix) { return t.size() >= suffix.size() && t.substr(t.size() - suffix.size()) == suffix; };
+    if (t.starts_with("text/")) return t.size() > 5 && t != "text/event-stream";
+    if (t.starts_with("application/")) {
+        const std::string_view sub = t.substr(12);
+        if (sub == "javascript" || sub == "x-javascript" || sub == "ecmascript" || sub == "json" || sub == "xml" || sub == "xhtml+xml" ||
+            sub == "wasm" || sub == "manifest+json" || sub == "ld+json" || sub == "rss+xml" || sub == "atom+xml" || sub == "vnd.ms-fontobject" ||
+            sub == "x-font-ttf" || sub == "x-font-opentype" || sub == "font-sfnt")
+            return true;
+        return ends("+json") || ends("+xml");
+    }
+    if (t == "image/svg+xml" || t == "image/x-icon" || t == "image/vnd.microsoft.icon") return true;
+    if (t == "font/ttf" || t == "font/otf" || t == "font/collection") return true;  // woff and woff2 are compressed already
+    return false;
 }
 
 std::string_view mime_for_path(std::string_view path) noexcept { return mime_info(path).type; }

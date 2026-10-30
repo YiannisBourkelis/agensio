@@ -100,6 +100,11 @@ struct Stream {
     // The node's sets for the file agensio serves, when a rule names its ending (endings, 2.1): set
     // when the static handler answers with a file, never for an application's answer.
     const EndingSets* header_ending = nullptr;
+    // response_compression (docs/design-compression.md 6): the coding the client takes among those the
+    // site offers, chosen once at routing for a site with the key on, 0 (identity) otherwise and for a
+    // site without it, which pays the one flag test. The value is Encoding of handlers/encoding.hpp,
+    // kept as a byte so this header stays free of the handlers'.
+    std::uint8_t coding = 0;
 
     void reset() {
         request.reset();
@@ -109,6 +114,7 @@ struct Stream {
         https_site = nullptr;
         header_node = nullptr;
         header_ending = nullptr;
+        coding = 0;
     }
 };
 

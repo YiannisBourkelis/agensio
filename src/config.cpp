@@ -2372,6 +2372,71 @@ void note_cache_over_fallback(SiteConfig& site) {
     }
 }
 
+// Root's codings list as the chooser's set and order; a slot not offered is identity, which has()
+// never matches.
+Codings codings_of(const std::vector<std::string>& names) {
+    Codings c;
+    std::size_t n = 0;
+    for (const std::string& name : names) {
+        const Encoding e = name == "zstd" ? Encoding::zstd : name == "br" ? Encoding::br : Encoding::gzip;
+        c.add(e);
+        c.order[n++] = e;
+    }
+    for (; n < c.order.size(); ++n) c.order[n] = Encoding::identity;
+    return c;
+}
+
+// response_compression (docs/design-compression.md 3): the string form "on" | "off", or the table
+// with mode and its optional fields. A path in `off` is "/"-rooted and plain (the login_paths
+// rule); a cookie name is a token, "*" at the end a prefix. Nothing here reads a library: whether
+// the build has a coding is the root table's business.
+void parse_response_compression(const toml::table& t, SiteConfig& site, const std::string& where) {
+    if (!t.contains("response_compression")) return;
+    const std::string w = where + ".response_compression";
+    SiteConfig::Compression& c = site.compression;
+    const auto mode_of = [](const std::string& v, const std::string& at) {
+        if (v == "on") return true;
+        if (v == "off") return false;
+        fail(at + " must be \"on\" or \"off\" (docs/configuration.md 20)");
+    };
+    if (const auto v = t["response_compression"].value<std::string>()) {
+        c.on = mode_of(*v, w);
+        return;
+    }
+    const auto* tt = t["response_compression"].as_table();
+    if (!tt) fail(w + " must be \"on\", \"off\" or a table { mode = \"on\", ... } (docs/configuration.md 20)");
+    check_keys(*tt, {"response_compression = {}"}, {}, w);
+    if (const auto v = (*tt)["mode"].value<std::string>()) c.on = mode_of(*v, w + ".mode");
+    else if (tt->contains("mode")) fail(w + ".mode must be \"on\" or \"off\"");
+    else fail(w + " needs mode = \"on\" or \"off\"");
+    if (const auto v = (*tt)["signed_in"].value<std::string>()) c.signed_in = mode_of(*v, w + ".signed_in");
+    else if (tt->contains("signed_in")) fail(w + ".signed_in must be \"on\" or \"off\"");
+    if (const auto v = (*tt)["upstream"].value<std::string>()) {
+        if (*v != "pass" && *v != "offload")
+            fail(w + ".upstream must be \"pass\" (the application may compress itself) or \"offload\" (agensio compresses: the browser's Accept-Encoding is not forwarded)");
+        c.offload = *v == "offload";
+    } else if (tt->contains("upstream")) fail(w + ".upstream must be \"pass\" or \"offload\"");
+    if (const auto v = (*tt)["event_streams"].value<bool>()) c.event_streams = *v;
+    else if (tt->contains("event_streams")) fail(w + ".event_streams must be true or false");
+    if (tt->contains("off")) {
+        c.off_paths = string_list((*tt)["off"], (w + ".off").c_str());
+        if (c.off_paths.size() > 32) fail(w + ".off: at most 32 paths");
+        for (const std::string& p : c.off_paths)
+            if (const std::string why = check_login_path(p); !why.empty()) fail(w + ".off: " + why);
+    }
+    if (tt->contains("session_cookies")) {
+        c.session_cookies = string_list((*tt)["session_cookies"], (w + ".session_cookies").c_str());
+        if (c.session_cookies.size() > 16) fail(w + ".session_cookies: at most 16 names");
+        for (const std::string& n : c.session_cookies) {
+            if (n.empty() || n.size() > 64) fail(w + ".session_cookies: a name is 1 to 64 characters");
+            for (const char ch : n)
+                if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-' || ch == '.' || ch == '*'))
+                    fail(w + ".session_cookies: \"" + n + "\" is not a cookie name (letters, digits, _ - . and a trailing *)");
+            if (const auto star = n.find('*'); star != std::string::npos && star != n.size() - 1) fail(w + ".session_cookies: \"" + n + "\": * only at the end");
+        }
+    }
+}
+
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where, std::vector<RootAdditions>* root_adds = nullptr) {
     check_keys(t, {"[[site]]"}, {"auth", "access", "redirect", "response_headers"}, where);
     SiteConfig site;
@@ -2619,6 +2684,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
             if (std::find(d.begin(), d.end(), name) == d.end()) d.push_back(name);
         }
     }
+    parse_response_compression(t, site, where);
     if (t.contains("response_headers_baseline")) {
         const auto on = t["response_headers_baseline"].value<bool>();
         if (!on) fail(where + ".response_headers_baseline must be true or false (the preset's security baseline, docs/headers.md 4)");
@@ -2684,6 +2750,9 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         }
     }
     finalize_site(site);
+    // response_compression: the codings this site offers, root's list in root's order (the chooser
+    // takes the first of equals), built once here so routing pays one call and no lookup.
+    if (site.compression.on) site.codings = codings_of(cfg.compression.codings);
     for (const auto& add : for_root)
         if (LocationConfig* into = find_at("/")) merge_into(*into, add);
     if (auto types = merged_mime_types(cfg.mime_types, site.mime_types)) {  // every location serves files with them
@@ -4069,6 +4138,48 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
         if (auto a = (*h)["alt_svc"].value<bool>()) cfg.http3.alt_svc = *a;
         else if ((*h)["alt_svc"]) fail("server.http3.alt_svc must be true or false");
     }
+    // [response_compression] (docs/design-compression.md 3): root's tuning, restart-only.
+    if (const auto* rc = root["response_compression"].as_table()) {
+        check_keys(*rc, {"[response_compression]"}, {}, "response_compression");
+        CompressionConfig& cc = cfg.compression;
+        if (rc->contains("codings")) {
+            cc.codings = string_list((*rc)["codings"], "response_compression.codings");
+            if (cc.codings.empty() || cc.codings.size() > 3) fail("response_compression.codings lists one to three of \"zstd\", \"br\", \"gzip\"");
+            for (std::size_t i = 0; i < cc.codings.size(); ++i) {
+                const std::string& c = cc.codings[i];
+                if (c != "zstd" && c != "br" && c != "gzip") fail("response_compression.codings: \"" + c + "\" is not a coding agensio offers (zstd, br, gzip)");
+                for (std::size_t j = 0; j < i; ++j)
+                    if (cc.codings[j] == c) fail("response_compression.codings names \"" + c + "\" twice");
+            }
+        }
+        if (const auto* lv = (*rc)["levels"].as_table()) {
+            check_keys(*lv, {"levels = {}"}, {}, "response_compression.levels");
+            const auto level = [&](const char* name, int lo, int hi, int& out) {
+                if (const auto n = (*lv)[name].value<std::int64_t>()) {
+                    if (*n < lo || *n > hi)
+                        fail("response_compression.levels." + std::string(name) + " must be " + std::to_string(lo) + " to " + std::to_string(hi) +
+                             " (higher levels belong to the copies made once, not to answers compressed per request)");
+                    out = static_cast<int>(*n);
+                } else if (lv->contains(name)) fail("response_compression.levels." + std::string(name) + " must be an integer");
+            };
+            level("zstd", 1, 9, cc.level_zstd);
+            level("br", 1, 6, cc.level_br);
+            level("gzip", 1, 9, cc.level_gzip);
+        } else if (rc->contains("levels")) fail("response_compression.levels must be a table { zstd = 3, br = 4, gzip = 5 }");
+        cc.min_size = size_node((*rc)["min_size"], cc.min_size, "response_compression.min_size");
+        if (cc.min_size > 1024 * 1024) fail("response_compression.min_size must be at most 1MB");
+        if (rc->contains("types_add")) {
+            cc.types_add = string_list((*rc)["types_add"], "response_compression.types_add");
+            if (cc.types_add.size() > 32) fail("response_compression.types_add: at most 32 types");
+            for (std::string& ty : cc.types_add) {
+                ty = to_lower(ty);
+                const auto slash = ty.find('/');
+                if (ty.empty() || ty.size() > 127 || slash == std::string::npos || slash == 0 || slash == ty.size() - 1 || ty.find(';') != std::string::npos ||
+                    ty.find(' ') != std::string::npos)
+                    fail("response_compression.types_add: \"" + ty + "\" is not a media type (type/subtype, no parameters)");
+            }
+        }
+    } else if (root.contains("response_compression")) fail("[response_compression] must be a table (docs/configuration.md 20)");
     // Resolved once [addresses] is known (its sets may be named here, 2026-10-13).
     cfg.trusted_proxies_text = string_list(server["trusted_proxies"], "server.trusted_proxies");
     cfg.user = account_name(server["user"], "server.user");
@@ -4896,7 +5007,7 @@ SiteConfig control_site() {
     loc.methods = kStaticMethods | method_bit(Method::post) | method_bit(Method::put);
     loc.allow = "GET, HEAD, POST, PUT, OPTIONS";
     site.locations.push_back(std::move(loc));
-    finalize_site(site);
+    finalize_site(site);  // the control site never compresses: its answers are the administrator's own
     return site;
 }
 

@@ -389,6 +389,75 @@ The answer lists what was reloaded: agensio, and the site's PHP pool with php-fp
 
 **Reference:** [Hosting: one user per site](../configuration.md#11-hosting-one-user-per-site) (the site's limit and its pool), [HTTP/2](../configuration.md#16-http2), [keys](../keys.md).
 
+## Compress a site's answers for the browsers that take it
+
+Off by default: agensio spends no CPU on compression unless a site asks. One key turns it on,
+and the defaults are right for a WordPress, Laravel, Drupal, Rails or Node site: zstd, brotli
+and gzip are built in (no module to add), the browser's `Accept-Encoding` chooses among them,
+text, JavaScript, JSON, XML, SVG and fonts are compressed and images, video and archives never
+are, answers under 1 KB are left alone, and a visitor who is signed in gets uncompressed pages
+unless the user decides otherwise (the guard against BREACH, `docs/configuration.md` 20).
+
+```toml
+[[site]]
+server_name = ["shop.example"]
+listen = ["0.0.0.0:443"]
+app = "wordpress"
+root = "/var/www/shop.example"
+php = { socket = "unix:/run/php/php8.4-fpm.sock" }
+tls = { cert = "/etc/letsencrypt/live/shop.example/fullchain.pem", key = "/etc/letsencrypt/live/shop.example/privkey.pem" }
+response_compression = "on"
+```
+
+A shop keeps its account and checkout pages out, and names the cookie its plugin sets at login:
+
+```toml
+[[site]]
+server_name = ["store.example"]
+listen = ["0.0.0.0:443"]
+app = "wordpress"
+root = "/var/www/store.example"
+php = { socket = "unix:/run/php/php8.4-fpm.sock" }
+tls = { cert = "/etc/letsencrypt/live/store.example/fullchain.pem", key = "/etc/letsencrypt/live/store.example/privkey.pem" }
+response_compression = { mode = "on", off = ["/my-account/", "/checkout/"], session_cookies = ["store_sid"] }
+```
+
+An application that compresses its own answers (Next.js, Ghost, Grafana) is passed through as it
+is; `upstream = "offload"` has agensio compress instead, so its visitors get zstd or brotli
+where the application sends gzip only:
+
+```toml
+[[site]]
+server_name = ["app.example"]
+listen = ["0.0.0.0:443"]
+app = "proxy"
+upstream = "http://127.0.0.1:3000"
+tls = { cert = "/etc/letsencrypt/live/app.example/fullchain.pem", key = "/etc/letsencrypt/live/app.example/privkey.pem" }
+response_compression = { mode = "on", upstream = "offload" }
+```
+
+Root's table tunes what every site shares, and needs a restart; most hosts never set it. Behind
+Cloudflare, CloudFront or Fastly, put brotli first: they ask the origin for brotli and pass it on
+to visitors, and ignore an origin's zstd.
+
+```toml
+[response_compression]
+codings = ["br", "zstd", "gzip"]
+```
+
+**Check it.** `Content-Encoding` names the coding the browser got, `Vary: Accept-Encoding` is
+on every answer that could have been compressed, and the body decodes to what the application
+sent:
+
+```sh
+curl -sS -o /dev/null -D - -H 'Accept-Encoding: zstd, br, gzip' https://shop.example/ | grep -i '^content-encoding\|^vary'
+curl -sS --compressed https://shop.example/ | head -c 200
+```
+
+**MCP:** `site_update` takes the same fields; `signed_in = "on"` needs the user's confirmation in
+person, as the design says; `path_check` names the coding a path gets, or the one reason none
+applies (steps 5 and 7 of `docs/design-compression.md` 11; until then the TOML above).
+
 ## The file cache for a site with many large files
 
 **When:** a site serves many files of a few MB (photo galleries, documentation with large images)

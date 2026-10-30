@@ -20,6 +20,7 @@
 #include "core/request.hpp"
 #include "core/response_rules.hpp"
 #include "core/site_fields.hpp"
+#include "handlers/encoding.hpp"
 #include "net/cidr.hpp"
 #include "services/json.hpp"
 #include "upstream/options.hpp"
@@ -297,6 +298,24 @@ struct SiteConfig {
     // response_headers_baseline (alpha.94, docs/headers.md 4): the preset's baseline, rules marked `baseline`
     // in response_headers below every written one; unset: on for a site with app, off without.
     std::optional<bool> response_headers_baseline;
+    // response_compression (docs/design-compression.md 3): off by default, no CPU unless the site asks.
+    // `on` covers the cached files' copies made once and the answers compressed per request; `off`
+    // paths are never compressed; signed_in says whether a signed-in visitor's answers are (the
+    // BREACH guard, section 7: "off" unless the user decided); session_cookies mark a visitor
+    // signed in beside the preset's; upstream = "offload" keeps Accept-Encoding from the application;
+    // event_streams compresses text/event-stream. Read at routing only when `on`: a site without the
+    // key pays nothing (the one test is `compression.on`).
+    struct Compression {
+        bool on = false;
+        bool signed_in = false;
+        bool offload = false;
+        bool event_streams = false;
+        std::vector<std::string> off_paths;        // "/"-rooted prefixes, at most 32
+        std::vector<std::string> session_cookies;  // names, at most 16
+    } compression;
+    // The codings this site offers in root's order (Config::compression.codings), built at load
+    // for the one choose_encoding call of a request's routing; empty when compression is off.
+    Codings codings;
     // response_headers_offer_declined (alpha.94, docs/headers.md 7): the offered fields (4.1) the owner
     // said the site must not send, in their canonical spelling; path_check's offer and health's
     // response_headers_suggested leave them out.
@@ -480,6 +499,18 @@ struct LogConfig {
     int access_sink = -1;
 };
 
+// [response_compression] (docs/design-compression.md 3): root's tuning, restart-only, read once at
+// start and never per request. Levels and windows are set explicitly so a library upgrade never
+// changes what agensio sends; the windows (zstd 2^19, brotli 2^18) are not keys.
+struct CompressionConfig {
+    std::vector<std::string> codings = {"zstd", "br", "gzip"};  // offered, the order decides a tie
+    int level_zstd = 3;  // 1..9
+    int level_br = 4;    // 1..6
+    int level_gzip = 5;  // 1..9
+    std::size_t min_size = 1024;
+    std::vector<std::string> types_add;  // media types beyond compressible_type, lower-case, no parameters
+};
+
 struct Config {
     // [server]
     unsigned workers = 0;  // 0 = hardware threads
@@ -498,6 +529,7 @@ struct Config {
     std::size_t sendfile_max_chunk =
         1024 * 1024;  // bytes per sendfile() call; one huge call holds the socket lock and the loop
     std::string server_header = "agensio";
+    CompressionConfig compression;  // [response_compression], docs/design-compression.md 3
     // HTTP/2 (phase G, docs/design-http2.md): what TLS listeners offer through ALPN, in order
     // of preference ("h2", "h1"), and whether plain listeners accept prior-knowledge HTTP/2
     // ("h2c" in the list; off by default: browsers never use it). Caddy's spelling; the
