@@ -645,10 +645,9 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
     // response_compression (docs/design-compression.md 6): the coding this client takes among those the
     // site offers, decided once here for every answer that follows; a site with the key off pays this
     // one test and nothing else. No Accept-Encoding, or none acceptable, is identity.
-    if (site->compression.on) {
+    if (site->compression.enabled) {
         if (!s.request.accept_encoding.empty()) s.coding = static_cast<std::uint8_t>(choose_encoding(s.request.accept_encoding, site->codings));
         s.site_compression = &site->compression;
-        s.root_compression = &site->root_compression;
     }
     // http = "redirect" (docs/redirects.md 2): plain HTTP, or a request a trusted proxy did not mark
     // https, goes to HTTPS; certificate validation gets the site's files there and nothing else

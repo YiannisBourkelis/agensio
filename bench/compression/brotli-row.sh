@@ -24,18 +24,24 @@ access = "off"
 server_name = ["*"]
 listen = ["127.0.0.1:8085"]
 root = "$ROOT/bench/www"
-response_compression = "on"
+response_compression = @ON@
 [[site.location]]
 path = "/"
 upstream = "http://127.0.0.1:9100"
 TOML
 "$ROOT/build/agensio_upstream" -p 9100 -w 1 > "$T/upstream.log" 2>&1 & UP=$!
 sleep 0.3
+# The switch as each binary spells it: true since 2026-10-31, "on" in the binaries before.
+conf_for() {
+  sed 's/@ON@/true/' "$T/agensio.toml" > "$T/agensio-side.toml"
+  "$1" -t -c "$T/agensio-side.toml" > /dev/null 2>&1 || sed 's/@ON@/"on"/' "$T/agensio.toml" > "$T/agensio-side.toml"
+  echo "$T/agensio-side.toml"
+}
 cpu() { awk -v tck="$(getconf CLK_TCK)" '{ printf "%.3f", ($14+$15)/tck }' "/proc/$1/stat"; }
 flt() { awk '{ print $10 }' "/proc/$1/stat"; }
 for round in 1 2; do
   for BIN in "$@"; do
-    "$BIN" -c "$T/agensio.toml" > "$T/server.log" 2>&1 & PID=$!
+    "$BIN" -c "$(conf_for "$BIN")" > "$T/server.log" 2>&1 & PID=$!
     for _ in $(seq 1 50); do nc -z 127.0.0.1 8085 2>/dev/null && break; sleep 0.1; done
     curl -sS -o /dev/null -H "Accept-Encoding: $HDR" "http://127.0.0.1:8085$URL"
     wrk -t4 -c64 -d2s -H "Accept-Encoding: $HDR" "http://127.0.0.1:8085$URL" > /dev/null 2>&1

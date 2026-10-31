@@ -15,6 +15,7 @@
 #include "core/private_cache.hpp"
 #include "core/redirect.hpp"
 #include "core/strings.hpp"
+#include "handlers/compress_answer.hpp"
 #include "http_date.hpp"
 #include "mime.hpp"
 #include "path.hpp"
@@ -237,6 +238,15 @@ void StaticHandler::fill_entry(CacheEntry& entry, const FileInfo& fi, std::strin
     entry.last_validated.store(now, std::memory_order_relaxed);
 }
 
+// Whether a twin of this coding is loaded for the site: always for a site that does not compress
+// (cache.precompressed alone decides, as before response compression), and for one that does only
+// when the codings an administrator wrote offer it, so the entry holds what the site sends and the
+// hit path tests nothing. The default list leaves out what the build cannot produce, not what the
+// site's build put on disk.
+static bool offered(const SiteConfig* site, Encoding coding) noexcept {
+    return !site || !site->compression.enabled || !site->compression.codings_written || site->codings.has(coding);
+}
+
 // The pre-compressed twins of the file just loaded, name.br and name.gz beside it (Vite,
 // webpack, the brotli and gzip tools write them at build time; nginx's gzip_static and
 // brotli_static serve them): a twin at least as new as the file is loaded like the file,
@@ -251,7 +261,9 @@ void StaticHandler::load_variants(CacheEntry& parent, const FileInfo& fi, const 
     };
     static constexpr Twin kTwins[] = {{".br", Encoding::br}, {".gz", Encoding::gzip}};
     const std::size_t base = ws.fs_path.size();
+    const auto* site = static_cast<const SiteConfig*>(ws.site);
     for (const Twin& t : kTwins) {
+        if (!offered(site, t.coding)) continue;  // a site that compresses serves the codings it offers alone
         ws.fs_path.resize(base);
         ws.fs_path.append(t.suffix);
         File f = File::open(ws.fs_path.c_str());
@@ -280,10 +292,13 @@ bool StaticHandler::twins_unchanged(const CacheEntry& e, WorkerState& ws) {
     struct Twin {
         const char* suffix;
         const CacheEntry* cached;
+        Encoding coding;
     };
-    const Twin twins[] = {{".br", e.br.get()}, {".gz", e.gzip.get()}};
+    const Twin twins[] = {{".br", e.br.get(), Encoding::br}, {".gz", e.gzip.get(), Encoding::gzip}};
+    const auto* site = static_cast<const SiteConfig*>(ws.site);
     for (const Twin& t : twins) {
         if (t.cached && t.cached->made) continue;  // a copy agensio made: no file to stat; it goes with the entry
+        if (!offered(site, t.coding)) continue;    // a twin of a coding the site does not offer was never loaded
         ws.fs_path.assign(e.file_path).append(t.suffix);
         FileInfo fi;
         const bool usable = stat_path(ws.fs_path.c_str(), fi) && fi.is_regular && fi.size > 0 && fi.mtime >= e.mtime &&
@@ -294,13 +309,22 @@ bool StaticHandler::twins_unchanged(const CacheEntry& e, WorkerState& ws) {
     return true;
 }
 
-bool StaticHandler::copies_wanted(const CacheEntry& e, const WorkerState& ws, const ServedType& mi, bool settled) const noexcept {
-    // ws.site is the SiteConfig the dispatcher routed to, kept untyped for the access log.
+Codings StaticHandler::copies_wanted(const CacheEntry& e, const WorkerState& ws, const ServedType& mi, bool settled) const noexcept {
+    // ws.site is the SiteConfig the dispatcher routed to, kept untyped for the access log. The copies
+    // are the site's brotli and gzip, the codings it offers: an entry is keyed by its location, which a
+    // reload replaces, so an entry never outlives the codings it was made for and the hit path tests
+    // nothing (zstd has no copy: brotli 11 is smaller and every browser taking zstd takes brotli).
     const auto* site = static_cast<const SiteConfig*>(ws.site);
-    if (!copies_ || !settled || !site || !site->compression.on) return false;
-    if (e.descriptor_only || e.has_variants() || !mi.encoding.empty()) return false;
-    if (e.data.size() < cfg_.compression.min_size || e.data.size() > (8u << 20)) return false;
-    return compressible_type(mi.type);
+    Codings make;
+    make.mask = 0;
+    if (!copies_ || !settled || !site || !site->compression.enabled) return make;
+    if (e.descriptor_only || e.has_variants() || !mi.encoding.empty()) return make;
+    const CompressionConfig& c = site->compression;
+    if (e.data.size() < c.min_size || e.data.size() > (8u << 20)) return make;
+    if (!compressible_type(mi.type) && !compress_answer::added_type(mi.type, c.extra_types)) return make;
+    if (site->codings.has(Encoding::br)) make.add(Encoding::br);
+    if (site->codings.has(Encoding::gzip)) make.add(Encoding::gzip);
+    return make;
 }
 
 void StaticHandler::fill_copy(CacheEntry& copy, const CacheEntry& file, const FileInfo& fi, Encoding coding) {
@@ -664,13 +688,13 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         if (settled && cfg_.cache_precompressed && mi.encoding.empty()) load_variants(*entry, fi, loc, ws, now);
         // A file that gets copies (docs/design-compression.md 5) is a negotiable resource from now,
         // so its own answers carry Vary too (RFC 9110 12.5.5), whether or not a copy exists yet.
-        const bool copies = copies_wanted(*entry, ws, mi, settled);
-        fill_entry(*entry, fi, ws.fs_path, mi.type, stored_coding(mi.encoding), entry->has_variants() || copies, now);
+        const Codings copies = copies_wanted(*entry, ws, mi, settled);
+        fill_entry(*entry, fi, ws.fs_path, mi.type, stored_coding(mi.encoding), entry->has_variants() || copies.mask != 0, now);
 
         EntryPtr canonical = settled ? cache_.insert(key, entry) : nullptr;
         if (canonical) {
             ws.local.insert(key, canonical);
-            if (copies && canonical.get() == entry.get() && copies_->ask(canonical)) canonical->copies_asked = true;
+            if (copies.mask != 0 && canonical.get() == entry.get() && copies_->ask(canonical, copies)) canonical->copies_asked = true;
         } else canonical = std::move(entry);  // cache full for this size class, or not settled: serve once, uncached
         response_fields::served_file(s, ws.fs_path);
         serve_entry(s, std::move(canonical));

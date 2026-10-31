@@ -181,7 +181,8 @@ private:
     // Whether a file just cached gets copies (docs/design-compression.md 5): the site has the key on,
     // the type is compressible, the size within [min_size, the maker's cap], no twin on disk, no
     // stored coding, settled.
-    bool copies_wanted(const CacheEntry& e, const WorkerState& ws, const ServedType& mi, bool settled) const noexcept;
+    // The copies of a cached file to make for the site (its brotli and gzip), none when it gets none.
+    Codings copies_wanted(const CacheEntry& e, const WorkerState& ws, const ServedType& mi, bool settled) const noexcept;
     CopyMaker* copies_ = nullptr;
     void serve_file(Stream& s, File&& f, const FileInfo& fi, const ServedType& type);
     void redirect_slash(Stream& s, WorkerState& ws);

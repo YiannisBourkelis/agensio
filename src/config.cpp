@@ -2387,43 +2387,110 @@ Codings codings_of(const std::vector<std::string>& names) {
     return c;
 }
 
-// response_compression (docs/design-compression.md 3): the string form "on" | "off", or the table
-// with mode and its optional fields. A path in `off` is "/"-rooted and plain (the login_paths
-// rule). Nothing here reads a library: whether the build has a coding is the root table's business.
-void parse_response_compression(const toml::table& t, SiteConfig& site, const std::string& where) {
+// The fields of a response_compression table (docs/design-compression.md 3), the main file's
+// [response_compression] or a site's, parsed over `c`: the defaults for the main file, the main
+// file's values for a site. A site's codings replaces the list (its order is the point), its
+// extra_types adds to the main file's; exclude_paths is a site's alone, "/"-rooted and plain (the
+// login_paths rule). A coding the administrator names must be in the build (refused naming the
+// package); the main file's default list is trimmed to the build by the caller. On a site, every
+// field named sets its bit of `own`, so -t --explain tells the site's values from the server's.
+void parse_compression_fields(const toml::table& tt, CompressionConfig& c, const std::string& w, bool site) {
+    const auto mine = [&](CompressionConfig::Field f) {
+        if (site) c.own = static_cast<std::uint16_t>(c.own | f);
+    };
+    const auto flag = [&](const char* name, bool& out, CompressionConfig::Field f) {
+        if (const auto v = tt[name].value<bool>()) {
+            out = *v;
+            mine(f);
+        } else if (tt.contains(name)) fail(w + "." + name + " must be true or false");
+    };
+    flag("enabled", c.enabled, CompressionConfig::f_enabled);
+    flag("compress_signed_in", c.compress_signed_in, CompressionConfig::f_signed_in);
+    flag("compress_event_streams", c.compress_event_streams, CompressionConfig::f_event_streams);
+    flag("offload", c.offload, CompressionConfig::f_offload);
+    if (tt.contains("codings")) {
+        std::vector<std::string> list = string_list(tt["codings"], (w + ".codings").c_str());
+        if (list.empty() || list.size() > 3) fail(w + ".codings lists one to three of \"zstd\", \"br\", \"gzip\"");
+        for (std::size_t i = 0; i < list.size(); ++i) {
+            const std::string& name = list[i];
+            if (name != "zstd" && name != "br" && name != "gzip") fail(w + ".codings: \"" + name + "\" is not a coding agensio offers (zstd, br, gzip)");
+            for (std::size_t j = 0; j < i; ++j)
+                if (list[j] == name) fail(w + ".codings names \"" + name + "\" twice");
+            // A coding this binary cannot produce (built without its library): refused here, naming
+            // the package, rather than offered and never sent (docs/design-compression.md 3).
+            const Encoding e = name == "zstd" ? Encoding::zstd : name == "br" ? Encoding::br : Encoding::gzip;
+            if (!coding_built(e))
+                fail(w + ".codings names \"" + name + "\", which this agensio was built without; install " + std::string(coding_package(e)) +
+                     " and rebuild, or leave it out of the list");
+        }
+        c.codings = std::move(list);
+        c.codings_written = true;
+        mine(CompressionConfig::f_codings);
+    }
+    if (const auto* lv = tt["levels"].as_table()) {
+        check_keys(*lv, {"levels = {}"}, {}, w + ".levels");
+        const auto level = [&](const char* name, int lo, int hi, int& out) {
+            if (const auto n = (*lv)[name].value<std::int64_t>()) {
+                if (*n < lo || *n > hi)
+                    fail(w + ".levels." + std::string(name) + " must be " + std::to_string(lo) + " to " + std::to_string(hi) +
+                         " (higher levels belong to the copies made once, not to answers compressed per request)");
+                out = static_cast<int>(*n);
+            } else if (lv->contains(name)) fail(w + ".levels." + std::string(name) + " must be an integer");
+        };
+        level("zstd", 1, 9, c.level_zstd);
+        level("br", 1, 6, c.level_br);
+        level("gzip", 1, 9, c.level_gzip);
+        mine(CompressionConfig::f_levels);
+    } else if (tt.contains("levels")) fail(w + ".levels must be a table { zstd = 3, br = 3, gzip = 5 }");
+    if (tt.contains("min_size")) {
+        c.min_size = size_node(tt["min_size"], c.min_size, (w + ".min_size").c_str());
+        if (c.min_size > 1024 * 1024) fail(w + ".min_size must be at most 1MB");
+        mine(CompressionConfig::f_min_size);
+    }
+    if (tt.contains("extra_types")) {
+        std::vector<std::string> types = string_list(tt["extra_types"], (w + ".extra_types").c_str());
+        if (types.size() > 32) fail(w + ".extra_types: at most 32 types");
+        for (std::string& ty : types) {
+            ty = to_lower(ty);
+            const auto slash = ty.find('/');
+            if (ty.empty() || ty.size() > 127 || slash == std::string::npos || slash == 0 || slash == ty.size() - 1 || ty.find(';') != std::string::npos ||
+                ty.find(' ') != std::string::npos)
+                fail(w + ".extra_types: \"" + ty + "\" is not a media type (type/subtype, no parameters)");
+        }
+        if (!site) c.extra_types = std::move(types);
+        else
+            for (std::string& ty : types)  // added to the main file's, each once
+                if (std::find(c.extra_types.begin(), c.extra_types.end(), ty) == c.extra_types.end()) c.extra_types.push_back(std::move(ty));
+        mine(CompressionConfig::f_extra_types);
+    }
+    if (tt.contains("exclude_paths")) {
+        if (!site)
+            fail(w + ".exclude_paths: paths belong to one site; write exclude_paths in that site's response_compression (docs/configuration.md 20)");
+        c.exclude_paths = string_list(tt["exclude_paths"], (w + ".exclude_paths").c_str());
+        if (c.exclude_paths.size() > 32) fail(w + ".exclude_paths: at most 32 paths");
+        for (const std::string& p : c.exclude_paths)
+            if (const std::string why = check_login_path(p); !why.empty()) fail(w + ".exclude_paths: " + why);
+        mine(CompressionConfig::f_exclude_paths);
+    }
+}
+
+// A site's response_compression (docs/design-compression.md 3): true or false (the site's enabled
+// alone), or a table naming any field of the main file's [response_compression] plus exclude_paths.
+// What the site leaves out comes from the main file; a site without the key follows it whole.
+void parse_response_compression(const toml::table& t, SiteConfig& site, const CompressionConfig& server, const std::string& where) {
+    site.compression = server;
+    site.compression.own = 0;
     if (!t.contains("response_compression")) return;
     const std::string w = where + ".response_compression";
-    SiteConfig::Compression& c = site.compression;
-    const auto mode_of = [](const std::string& v, const std::string& at) {
-        if (v == "on") return true;
-        if (v == "off") return false;
-        fail(at + " must be \"on\" or \"off\" (docs/configuration.md 20)");
-    };
-    if (const auto v = t["response_compression"].value<std::string>()) {
-        c.on = mode_of(*v, w);
+    if (const auto v = t["response_compression"].value<bool>()) {
+        site.compression.enabled = *v;
+        site.compression.own = CompressionConfig::f_enabled;
         return;
     }
     const auto* tt = t["response_compression"].as_table();
-    if (!tt) fail(w + " must be \"on\", \"off\" or a table { mode = \"on\", ... } (docs/configuration.md 20)");
+    if (!tt) fail(w + " must be true, false or a table { enabled = true, ... } (docs/configuration.md 20)");
     check_keys(*tt, {"response_compression = {}"}, {}, w);
-    if (const auto v = (*tt)["mode"].value<std::string>()) c.on = mode_of(*v, w + ".mode");
-    else if (tt->contains("mode")) fail(w + ".mode must be \"on\" or \"off\"");
-    else fail(w + " needs mode = \"on\" or \"off\"");
-    if (const auto v = (*tt)["signed_in"].value<std::string>()) c.signed_in = mode_of(*v, w + ".signed_in");
-    else if (tt->contains("signed_in")) fail(w + ".signed_in must be \"on\" or \"off\"");
-    if (const auto v = (*tt)["upstream"].value<std::string>()) {
-        if (*v != "pass" && *v != "offload")
-            fail(w + ".upstream must be \"pass\" (the application may compress itself) or \"offload\" (agensio compresses: the browser's Accept-Encoding is not forwarded)");
-        c.offload = *v == "offload";
-    } else if (tt->contains("upstream")) fail(w + ".upstream must be \"pass\" or \"offload\"");
-    if (const auto v = (*tt)["event_streams"].value<bool>()) c.event_streams = *v;
-    else if (tt->contains("event_streams")) fail(w + ".event_streams must be true or false");
-    if (tt->contains("off")) {
-        c.off_paths = string_list((*tt)["off"], (w + ".off").c_str());
-        if (c.off_paths.size() > 32) fail(w + ".off: at most 32 paths");
-        for (const std::string& p : c.off_paths)
-            if (const std::string why = check_login_path(p); !why.empty()) fail(w + ".off: " + why);
-    }
+    parse_compression_fields(*tt, site.compression, w, true);
 }
 
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where, std::vector<RootAdditions>* root_adds = nullptr) {
@@ -2673,7 +2740,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
             if (std::find(d.begin(), d.end(), name) == d.end()) d.push_back(name);
         }
     }
-    parse_response_compression(t, site, where);
+    parse_response_compression(t, site, cfg.compression, where);
     if (t.contains("response_headers_baseline")) {
         const auto on = t["response_headers_baseline"].value<bool>();
         if (!on) fail(where + ".response_headers_baseline must be true or false (the preset's security baseline, docs/headers.md 4)");
@@ -2739,12 +2806,10 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         }
     }
     finalize_site(site);
-    // response_compression: the codings this site offers, root's list in root's order (the chooser
-    // takes the first of equals), built once here so routing pays one call and no lookup.
-    if (site.compression.on) {
-        site.codings = codings_of(cfg.compression.codings);
-        site.root_compression = cfg.compression;
-    }
+    // response_compression: the codings this site offers in its order (the chooser takes the first of
+    // equals), built once here so routing pays one call and no lookup, and the copies of its cached
+    // files are made for these alone.
+    if (site.compression.enabled) site.codings = codings_of(site.compression.codings);
     for (const auto& add : for_root)
         if (LocationConfig* into = find_at("/")) merge_into(*into, add);
     if (auto types = merged_mime_types(cfg.mime_types, site.mime_types)) {  // every location serves files with them
@@ -3010,6 +3075,39 @@ json::Value mime_types_json(const MimeTypes& t) {
     return out;
 }
 
+// A response_compression table as TOML, every field (docs/configuration.md 20); a site's adds its
+// exclude_paths.
+static std::string compression_toml(const CompressionConfig& c, bool site) {
+    const auto list = [](const std::vector<std::string>& v) {
+        std::string s = "[";
+        for (std::size_t i = 0; i < v.size(); ++i) s += (i ? ", \"" : "\"") + v[i] + "\"";
+        return s + "]";
+    };
+    const auto b = [](bool v) { return v ? "true" : "false"; };
+    std::string s = std::string("enabled = ") + b(c.enabled);
+    if (site) s += ", exclude_paths = " + list(c.exclude_paths);
+    s += std::string(", compress_signed_in = ") + b(c.compress_signed_in) + ", compress_event_streams = " + b(c.compress_event_streams) +
+         ", offload = " + b(c.offload) + ", codings = " + list(c.codings) + ", levels = { zstd = " + std::to_string(c.level_zstd) +
+         ", br = " + std::to_string(c.level_br) + ", gzip = " + std::to_string(c.level_gzip) + " }, min_size = " + std::to_string(c.min_size) +
+         ", extra_types = " + list(c.extra_types);
+    return s;
+}
+
+// Which fields of a site's response_compression the site named itself, for the comment beside it.
+static std::string compression_own(const CompressionConfig& c) {
+    static constexpr std::pair<CompressionConfig::Field, const char*> kNames[] = {
+        {CompressionConfig::f_enabled, "enabled"},           {CompressionConfig::f_exclude_paths, "exclude_paths"},
+        {CompressionConfig::f_signed_in, "compress_signed_in"}, {CompressionConfig::f_event_streams, "compress_event_streams"},
+        {CompressionConfig::f_offload, "offload"},           {CompressionConfig::f_codings, "codings"},
+        {CompressionConfig::f_levels, "levels"},             {CompressionConfig::f_min_size, "min_size"},
+        {CompressionConfig::f_extra_types, "extra_types"},
+    };
+    std::string s;
+    for (const auto& [f, name] : kNames)
+        if (c.own & f) s += (s.empty() ? "" : ", ") + std::string(name);
+    return s;
+}
+
 void explain_config(const Config& cfg, std::ostream& out) {
     out << "# effective configuration of " << cfg.config_path.string() << " (presets expanded)\n";
     if (!cfg.mime_types.empty()) out << "mime_types = " << mime_types_toml(cfg.mime_types) << "   # over the built-in table, for every site\n";
@@ -3018,6 +3116,17 @@ void explain_config(const Config& cfg, std::ostream& out) {
     out << "http2 = { max_concurrent_streams = " << cfg.http2.max_concurrent_streams << " }\n";
     out << "http3 = { retry = \"" << cfg.http3.retry << "\", alt_svc = " << (cfg.http3.alt_svc ? "true" : "false")
         << " }\n";
+    // Every site's defaults: a site's own table overrides what it names (docs/configuration.md 20).
+    {
+        const CompressionConfig& c = cfg.compression;
+        const auto b = [](bool v) { return v ? "true" : "false"; };
+        out << "\n[response_compression]  # every site's defaults; a site's own response_compression overrides what it names\n"
+            << "enabled = " << b(c.enabled) << "\ncompress_signed_in = " << b(c.compress_signed_in) << "\ncompress_event_streams = " << b(c.compress_event_streams)
+            << "\noffload = " << b(c.offload) << "\n";
+        print_list(out, "codings", c.codings);
+        out << "levels = { zstd = " << c.level_zstd << ", br = " << c.level_br << ", gzip = " << c.level_gzip << " }\nmin_size = " << c.min_size << "\n";
+        print_list(out, "extra_types", c.extra_types);
+    }
     for (const auto& site : cfg.sites) {
         out << "\n[[site]]";
         if (!site.app.empty()) out << "  # app = \"" << site.app << "\"";
@@ -3057,6 +3166,12 @@ void explain_config(const Config& cfg, std::ostream& out) {
         if (!site.login_paths.empty()) print_list(out, "login_paths", site.login_paths);
         if (!site.public_archives.empty()) print_list(out, "public_archives", site.public_archives);
         if (!site.mime_types.empty()) out << "mime_types = " << mime_types_toml(site.mime_types) << "   # over [mime_types] and the built-in table\n";
+        if (const CompressionConfig& c = site.compression; !c.enabled)
+            out << "response_compression = false  # " << ((c.own & CompressionConfig::f_enabled) ? "this site's" : "from [response_compression]") << "\n";
+        else
+            out << "response_compression = { " << compression_toml(c, true) << " }  # "
+                << (c.own ? "this site's: " + compression_own(c) + "; the rest from [response_compression]" : std::string("from [response_compression]"))
+                << "\n";
         if (!site.refuse.empty()) {
             std::vector<std::string> texts;
             for (const auto& p : site.refuse.patterns) texts.push_back(p.text);
@@ -4130,57 +4245,19 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
         if (auto a = (*h)["alt_svc"].value<bool>()) cfg.http3.alt_svc = *a;
         else if ((*h)["alt_svc"]) fail("server.http3.alt_svc must be true or false");
     }
-    // [response_compression] (docs/design-compression.md 3): root's tuning, restart-only.
+    // [response_compression] (docs/design-compression.md 3): every site's defaults and the encoders'
+    // tuning; a site's own table overrides what it names. Applies at a reload: each site keeps a merged
+    // copy, read at routing. Paths are a site's alone, refused here with the place they go.
     if (const auto* rc = root["response_compression"].as_table()) {
+        if (rc->contains("exclude_paths"))
+            fail("[response_compression] exclude_paths: paths belong to one site; write them in that site's response_compression = { exclude_paths = [...] } "
+                 "(docs/configuration.md 20)");
         check_keys(*rc, {"[response_compression]"}, {}, "response_compression");
-        CompressionConfig& cc = cfg.compression;
-        // A list the administrator wrote names what the build must have; the default list below
-        // drops a coding this binary cannot produce, so a build without libbrotli offers zstd and
-        // gzip without a word (docs/design-compression.md 3).
-        if (rc->contains("codings")) {
-            cc.codings = string_list((*rc)["codings"], "response_compression.codings");
-            if (cc.codings.empty() || cc.codings.size() > 3) fail("response_compression.codings lists one to three of \"zstd\", \"br\", \"gzip\"");
-            for (std::size_t i = 0; i < cc.codings.size(); ++i) {
-                const std::string& c = cc.codings[i];
-                if (c != "zstd" && c != "br" && c != "gzip") fail("response_compression.codings: \"" + c + "\" is not a coding agensio offers (zstd, br, gzip)");
-                for (std::size_t j = 0; j < i; ++j)
-                    if (cc.codings[j] == c) fail("response_compression.codings names \"" + c + "\" twice");
-                // A coding this binary cannot produce (built without its library): refused here, naming
-                // the package, rather than offered and never sent (docs/design-compression.md 3).
-                const Encoding e = c == "zstd" ? Encoding::zstd : c == "br" ? Encoding::br : Encoding::gzip;
-                if (!coding_built(e))
-                    fail("response_compression.codings names \"" + c + "\", which this agensio was built without; install " + std::string(coding_package(e)) +
-                         " and rebuild, or leave it out of the list");
-            }
-        }
-        if (const auto* lv = (*rc)["levels"].as_table()) {
-            check_keys(*lv, {"levels = {}"}, {}, "response_compression.levels");
-            const auto level = [&](const char* name, int lo, int hi, int& out) {
-                if (const auto n = (*lv)[name].value<std::int64_t>()) {
-                    if (*n < lo || *n > hi)
-                        fail("response_compression.levels." + std::string(name) + " must be " + std::to_string(lo) + " to " + std::to_string(hi) +
-                             " (higher levels belong to the copies made once, not to answers compressed per request)");
-                    out = static_cast<int>(*n);
-                } else if (lv->contains(name)) fail("response_compression.levels." + std::string(name) + " must be an integer");
-            };
-            level("zstd", 1, 9, cc.level_zstd);
-            level("br", 1, 6, cc.level_br);
-            level("gzip", 1, 9, cc.level_gzip);
-        } else if (rc->contains("levels")) fail("response_compression.levels must be a table { zstd = 3, br = 3, gzip = 5 }");
-        cc.min_size = size_node((*rc)["min_size"], cc.min_size, "response_compression.min_size");
-        if (cc.min_size > 1024 * 1024) fail("response_compression.min_size must be at most 1MB");
-        if (rc->contains("types_add")) {
-            cc.types_add = string_list((*rc)["types_add"], "response_compression.types_add");
-            if (cc.types_add.size() > 32) fail("response_compression.types_add: at most 32 types");
-            for (std::string& ty : cc.types_add) {
-                ty = to_lower(ty);
-                const auto slash = ty.find('/');
-                if (ty.empty() || ty.size() > 127 || slash == std::string::npos || slash == 0 || slash == ty.size() - 1 || ty.find(';') != std::string::npos ||
-                    ty.find(' ') != std::string::npos)
-                    fail("response_compression.types_add: \"" + ty + "\" is not a media type (type/subtype, no parameters)");
-            }
-        }
+        parse_compression_fields(*rc, cfg.compression, "response_compression", false);
     } else if (root.contains("response_compression")) fail("[response_compression] must be a table (docs/configuration.md 20)");
+    // A list the administrator wrote names what the build must have (refused above, naming the
+    // package); the default list drops a coding this binary cannot produce, so a build without
+    // libbrotli offers zstd and gzip without a word.
     if (!root["response_compression"].as_table() || !root["response_compression"].as_table()->contains("codings")) {
         std::vector<std::string> built;
         for (const std::string& c : cfg.compression.codings)
@@ -4360,8 +4437,14 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
     for (auto& [sub, file] : site_files) {
         const std::size_t before = cfg.sites.size();
         try {
+            // The one table both files name: the main file's is every site's defaults, a site's own
+            // goes below its [[site]] (docs/configuration.md 20).
+            if (sub.contains("response_compression"))
+                fail(file.filename().string() + ": [response_compression] here would be the main file's, every site's defaults; for a site write "
+                     "[site.response_compression] below its [[site]], or response_compression = { ... } inside it");
             check_keys(sub, {}, {"site"}, file.filename().string(),
-                       "an included file holds [[site]] tables; [server], [cache], [log], [control], include, [addresses], [mime_types] and [php] belong in the main file");
+                       "an included file holds [[site]] tables; [server], [cache], [log], [control], [response_compression], include, [addresses], [mime_types] and "
+                       "[php] belong in the main file");
             parse_sites_from(sub, file.parent_path(), cfg, file.filename().string(), &additions, file.string());
             for (std::size_t i = before; i < cfg.sites.size(); ++i)
                 if (auto f = failed_additions.find(cfg.sites[i].server_names.front()); f != failed_additions.end()) {

@@ -96,16 +96,16 @@ Server::Server(Config cfg)
     // A few threads for [[site.auth]]'s slow hashes, whatever the workers do: at most four,
     // a quarter of the machine's threads, never none.
     auth_verifier_ = std::make_unique<auth::Verifier>(std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u));
-    // The copies of cached files (docs/design-compression.md 5), only when a site asks: a host with
-    // every site at the default pays no thread.
-    for (const SiteConfig& site : cfg_.sites)
-        if (site.compression.on) {
-            copy_maker_ = std::make_unique<CopyMaker>(cache_);
-            handler_.set_copy_maker(copy_maker_.get());
-            break;
-        }
     dispatcher_.set_verifier(auth_verifier_.get());
 #endif
+    // The copies of cached files (docs/design-compression.md 5): one thread, idle on its queue until a
+    // site asks, started whatever the boot configuration says, since response_compression applies at a
+    // reload and the handler's pointer to it is never changed while workers run (before 2026-10-31 it
+    // was started only for a boot site with compression on, and only in builds with authentication).
+    if (coding_built(Encoding::br) || coding_built(Encoding::gzip)) {
+        copy_maker_ = std::make_unique<CopyMaker>(cache_);
+        handler_.set_copy_maker(copy_maker_.get());
+    }
     open_logs();
     if (cfg_.control.enabled) audit_sink_ = logs_.add(cfg_.control.audit);
     control_handler_.attach(this, &logs_, audit_sink_);

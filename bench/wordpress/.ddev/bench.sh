@@ -15,7 +15,7 @@ nc -z 127.0.0.1 $PORT 2>/dev/null && { echo "port $PORT busy" >&2; exit 1; }
   printf '[server]\nworkers = 1\nidle_timeout = 65\n[log]\naccess = "off"\nerror = "%s/error.log"\n' "$TMP"
   [ "$CODING" = off ] || printf '[response_compression]\ncodings = ["%s"]\n' "$CODING"
   printf '[[site]]\nserver_name = ["wp.agensio.ddev.site"]\nlisten = ["127.0.0.1:%s"]\nroot = "%s/bench/wordpress"\napp = "wordpress"\nphp = { socket = "127.0.0.1:9002", remote_root = "/var/www/html", read_timeout = 120 }\n' "$PORT" "$ROOT"
-  [ "$CODING" = off ] || printf 'response_compression = "on"\n'
+  [ "$CODING" = off ] || printf 'response_compression = true\n'
 } > "$TMP/agensio.toml"
 "$BIN" -c "$TMP/agensio.toml" > "$TMP/agensio.out" 2>&1 & PID=$!
 trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null || true' EXIT

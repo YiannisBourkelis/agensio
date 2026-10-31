@@ -142,9 +142,21 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [Different protocols for one site](examples/protocols.md#different-protocols-for-one-site): a site's own `protocols`, and why it needs an address of its own.
 - [Workers and connection limits on a small VPS](examples/protocols.md#workers-and-connection-limits-on-a-small-vps): `workers`, `max_connections`, `idle_timeout`, and what a refused client gets.
 - [Request size and time limits](examples/protocols.md#request-size-and-time-limits): `max_header_size`, `max_body_size` per site, `body_timeout`; 431 and 413.
-- [Compress a site's answers for the browsers that take it](examples/protocols.md#compress-a-sites-answers-for-the-browsers-that-take-it): `response_compression = "on"`, the `off` paths and `session_cookies`, `upstream = "offload"`, brotli first behind a CDN, and the `curl` check.
 - [The file cache for a site with many large files](examples/protocols.md#the-file-cache-for-a-site-with-many-large-files): `[cache]` sizes, open descriptors, revalidation.
 - [Reload without dropping a connection](examples/protocols.md#reload-without-dropping-a-connection): what a reload applies and what needs a restart.
+
+## Compression: smaller answers for the browsers that take them
+
+[examples/compression.md](examples/compression.md)
+
+- [Compress one site](examples/compression.md#compress-one-site): `response_compression = true`; static copies, PHP and proxied answers, what passes through untouched.
+- [Compress every site of the host, one kept off](examples/compression.md#compress-every-site-of-the-host-one-kept-off): the main file's `[response_compression]` with `enabled = true`, managed sites included, and a site's `false`.
+- [A shop: account and checkout pages left uncompressed](examples/compression.md#a-shop-account-and-checkout-pages-left-uncompressed): `exclude_paths` against BREACH, the Laravel pages to name.
+- [Behind Cloudflare, CloudFront or Fastly: brotli first](examples/compression.md#behind-cloudflare-cloudfront-or-fastly-brotli-first): a site's own `codings` while the others keep zstd first.
+- [An application that compresses its own answers](examples/compression.md#an-application-that-compresses-its-own-answers): passed through; the application's switch that hands the work to agensio; `offload` from step 6.
+- [A staging site behind a password, compressed anyway](examples/compression.md#a-staging-site-behind-a-password-compressed-anyway): the signed-in guard and `compress_signed_in`.
+- [A type the built-in list leaves out](examples/compression.md#a-type-the-built-in-list-leaves-out): `extra_types` with `mime_types`, for NDJSON and YAML.
+- [Fewer bytes or less CPU: the levels](examples/compression.md#fewer-bytes-or-less-cpu-the-levels): `levels` in the main file and per site, with the measured trade.
 
 ## Adding a recipe
 

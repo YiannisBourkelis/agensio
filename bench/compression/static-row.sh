@@ -24,13 +24,20 @@ sendfile_min_size = "48KB"
 server_name = ["*"]
 listen = ["127.0.0.1:8087"]
 root = "$ROOT/bench/www"
-response_compression = "on"
+response_compression = @ON@
 TOML
+# The switch as each binary spells it: true since 2026-10-31, "on" in the binaries before.
+conf_for() {
+  sed 's/@ON@/true/' "$T/agensio.toml" > "$T/agensio-side.toml"
+  "$1" -t -c "$T/agensio-side.toml" > /dev/null 2>&1 || sed 's/@ON@/"on"/' "$T/agensio.toml" > "$T/agensio-side.toml"
+  echo "$T/agensio-side.toml"
+}
 cpu() { awk -v tck="$(getconf CLK_TCK)" '{ printf "%.3f", ($14+$15)/tck }' "/proc/$1/stat"; }
 flt() { awk '{ print $10 }' "/proc/$1/stat"; }
 side() {  # name binary [env...]
   local name=$1 bin=$2; shift 2
-  env "$@" "$bin" -c "$T/agensio.toml" > "$T/server.log" 2>&1 & local PID=$!
+  local conf; conf=$(conf_for "$bin")
+  env "$@" "$bin" -c "$conf" > "$T/server.log" 2>&1 & local PID=$!
   for _ in $(seq 1 50); do nc -z 127.0.0.1 8087 2>/dev/null && break; sleep 0.1; done
   wrk -t4 -c64 -d2s http://127.0.0.1:8087/style.css > /dev/null 2>&1
   local c0 f0 c1 f1 out reqs

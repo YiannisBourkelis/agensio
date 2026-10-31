@@ -377,8 +377,8 @@ private:
     ErrorLog error_log_;
     bool access_logging_ = false;
     FileCache cache_;
-    // The copies of cached files made once (docs/design-compression.md 5): made when any site of
-    // the boot configuration has response_compression on; one thread, stopped with the server.
+    // The copies of cached files made once (docs/design-compression.md 5): one thread, started with
+    // the server when the build has brotli or zlib, stopped with it.
     std::unique_ptr<CopyMaker> copy_maker_;
     StaticHandler handler_;
     FcgiHandler fcgi_handler_;

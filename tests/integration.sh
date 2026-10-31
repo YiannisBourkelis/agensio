@@ -1146,7 +1146,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 232 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 240 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -3467,11 +3467,15 @@ print(data.split(b"\r\n")[0].decode(), closed, "within 4s" if time.time() - t0 <
 PY
 )
 check "body timeout: response served, then the server closes" "HTTP/1.1 200 OK closed within 4s" "$slow"
-# Response compression, step 2 (docs/design-compression.md 5): a site with the key on gets copies
-# of its compressible cached files made once in memory, brotli 11 and gzip 9, served as twins are,
-# each with its own strong ETag, counted in cache.max_size; a disk twin is kept over a copy, an
-# image, a small file and a site without the key get none. A private instance so the key is on.
-mkdir -p bench/tmp/comp/www bench/tmp/comp/off
+# Response compression, step 2 (docs/design-compression.md 5): a site with compression enabled gets
+# copies of its compressible cached files made once in memory, brotli 11 and gzip 9, served as twins
+# are, each with its own strong ETag, counted in cache.max_size; a disk twin is kept over a copy, an
+# image, a small file and a site with compression off get none. A private instance that starts with
+# compression off everywhere and turns it on by a reload: the main file's [response_compression]
+# enabled reaches the sites that say nothing, a site's own false keeps it off, a site's codings of
+# gzip alone get a gzip copy and no brotli (before 2026-10-31 the copies were brotli and gzip whatever
+# the codings, and a server that booted with no site compressing never made a copy until a restart).
+mkdir -p bench/tmp/comp/www bench/tmp/comp/off bench/tmp/comp/gz
 python3 - <<'PY'
 import os, random
 random.seed(7)
@@ -3484,23 +3488,44 @@ open("bench/tmp/comp/www/photo.jpg", "wb").write(bytes(random.getrandbits(8) for
 open("bench/tmp/comp/www/built.js", "w").write("console.log('built');\n" * 2000)
 open("bench/tmp/comp/www/built.js.gz", "wb").write(b"GZ-TWIN-" * 60)
 open("bench/tmp/comp/off/page.html", "w").write("<html><body>" + text + "</body></html>")
+open("bench/tmp/comp/gz/style.css", "w").write("p{margin:1px}\n" * 400)
+open("bench/tmp/comp/gz/style.css.br", "wb").write(b"BR-TWIN-" * 30)
 PY
-touch -d '-1 minute' bench/tmp/comp/www/* bench/tmp/comp/off/*
-printf '[server]\nworkers = 1\n[cache]\nmax_size = "200KB"\n[log]\naccess = "off"\nerror = "%s/bench/tmp/comp/error.log"\n[control]\nsocket = "%s/bench/tmp/comp/control.sock"\naudit = "%s/bench/tmp/comp/audit.log"\n[[site]]\nserver_name = ["on.test"]\nlisten = ["127.0.0.1:8064"]\nroot = "%s/bench/tmp/comp/www"\nresponse_compression = "on"\n[[site]]\nserver_name = ["off.test"]\nlisten = ["127.0.0.1:8064"]\nroot = "%s/bench/tmp/comp/off"\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" > bench/tmp/comp/agensio.toml
+touch -d '-1 minute' bench/tmp/comp/www/* bench/tmp/comp/off/* bench/tmp/comp/gz/*
+# The cache holds every file with room to spare: the page cached before the reload keeps its share
+# of the budget under its old location until evicted, and an eviction among entries touched in the
+# same second would drop a copy at random.
+comp_conf() {  # $1: the main file's [response_compression] and the sites' keys, or nothing at all
+  printf '[server]\nworkers = 1\n[cache]\nmax_size = "1MB"\n[log]\naccess = "off"\nerror = "%s/bench/tmp/comp/error.log"\n[control]\nsocket = "%s/bench/tmp/comp/control.sock"\naudit = "%s/bench/tmp/comp/audit.log"\n' "$ROOT" "$ROOT" "$ROOT"
+  [ "${1:-}" = on ] && printf '[response_compression]\nenabled = true\n'
+  printf '[[site]]\nserver_name = ["on.test"]\nlisten = ["127.0.0.1:8064"]\nroot = "%s/bench/tmp/comp/www"\n' "$ROOT"
+  printf '[[site]]\nserver_name = ["off.test"]\nlisten = ["127.0.0.1:8064"]\nroot = "%s/bench/tmp/comp/off"\n' "$ROOT"
+  [ "${1:-}" = on ] && printf 'response_compression = false\n'
+  printf '[[site]]\nserver_name = ["gz.test"]\nlisten = ["127.0.0.1:8064"]\nroot = "%s/bench/tmp/comp/gz"\n' "$ROOT"
+  [ "${1:-}" = on ] && printf '[site.response_compression]\ncodings = ["gzip"]\n'
+  return 0
+}
+comp_conf > bench/tmp/comp/agensio.toml
 rm -f bench/tmp/comp/error.log bench/tmp/comp/control.sock
 "$BIN" -c bench/tmp/comp/agensio.toml > bench/tmp/comp/server.out 2>&1 & CPID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8064 2>/dev/null && [ -S bench/tmp/comp/control.sock ] && break; sleep 0.1; done
 ch() { curl -sS -D - -o /dev/null -H "Host: $1" "${@:3}" "http://127.0.0.1:8064$2" | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-encoding:"{e=$2} tolower($1)=="vary:"{v=$2} tolower($1)=="etag:"{t=$2} tolower($1)=="content-length:"{l=$2} END{printf "%s %s %s %s %s", c, e?e:"-", v?v:"-", t, l}'; }
 cb() { curl -sS -o "$3" -H "Host: $1" "${@:4}" "http://127.0.0.1:8064$2"; }
+# Off unless asked: the page cached before the reload goes as it is, with no Vary.
+check "compression: off by default, a cached page goes uncompressed and without Vary until the configuration asks" "200 - -" \
+  "$(ch on.test /page.html -H 'Accept-Encoding: br' | cut -d' ' -f1-3)"
+comp_conf on > bench/tmp/comp/agensio.toml; kill -HUP $CPID
+for _ in $(seq 1 50); do grep -qE 'reloaded|reload refused' bench/tmp/comp/error.log 2>/dev/null && break; sleep 0.1; done
 # The first request fills the cache and asks for the copies, made on the maker's thread: the
 # second, a moment later, gets one.
 curl -sS -o /dev/null -H 'Host: on.test' http://127.0.0.1:8064/page.html; curl -sS -o /dev/null -H 'Host: on.test' http://127.0.0.1:8064/style.css
 curl -sS -o /dev/null -H 'Host: on.test' http://127.0.0.1:8064/small.css; curl -sS -o /dev/null -H 'Host: on.test' http://127.0.0.1:8064/photo.jpg
 curl -sS -o /dev/null -H 'Host: on.test' http://127.0.0.1:8064/built.js; curl -sS -o /dev/null -H 'Host: off.test' http://127.0.0.1:8064/page.html
-for _ in $(seq 1 50); do [ "$(curl -sS --unix-socket bench/tmp/comp/control.sock http://control/v1/status | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["compression"]["copies_made"]))')" -ge 4 ] && break; sleep 0.1; done
+curl -sS -o /dev/null -H 'Host: gz.test' http://127.0.0.1:8064/style.css
+for _ in $(seq 1 50); do [ "$(curl -sS --unix-socket bench/tmp/comp/control.sock http://control/v1/status | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["compression"]["copies_made"]))')" -ge 5 ] && break; sleep 0.1; done
 IDTAG=$(ch on.test /page.html | awk '{print $4}')
 cb on.test /page.html bench/tmp/comp/got.br -H 'Accept-Encoding: br'; cb on.test /page.html bench/tmp/comp/got.gz -H 'Accept-Encoding: gzip'
-check "compression copies: a page with the key on is served brotli to a browser that takes it, with Content-Encoding, Vary, its own strong ETag (the file's with -br), and decodes to the file" \
+check "compression copies: after the reload that enabled compression, a page is served brotli to a browser that takes it, with Content-Encoding, Vary, its own strong ETag (the file's with -br), and decodes to the file" \
   "200 br Accept-Encoding ${IDTAG%\"}-br\" yes" \
   "$(ch on.test /page.html -H 'Accept-Encoding: br' | cut -d' ' -f1-4) $(cmp -s <(brotli -dc bench/tmp/comp/got.br) bench/tmp/comp/www/page.html && echo yes || echo no)"
 check "compression copies: gzip likewise, and the file itself carries Vary with no coding" \
@@ -3508,24 +3533,27 @@ check "compression copies: gzip likewise, and the file itself carries Vary with 
   "$(ch on.test /page.html -H 'Accept-Encoding: gzip' | cut -d' ' -f1-4) $(cmp -s <(gzip -dc bench/tmp/comp/got.gz) bench/tmp/comp/www/page.html && echo yes || echo no) ; $(ch on.test /page.html | cut -d' ' -f1-4)"
 check "compression copies: a copy answers 304 to its own tag and a Range over its bytes; the copies are smaller than the file" "304 206 yes" \
   "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: on.test' -H 'Accept-Encoding: br' -H "If-None-Match: ${IDTAG%\"}-br\"" http://127.0.0.1:8064/page.html) $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: on.test' -H 'Accept-Encoding: br' -H 'Range: bytes=0-9' http://127.0.0.1:8064/page.html) $([ "$(stat -c %s bench/tmp/comp/got.br)" -lt "$(stat -c %s bench/tmp/comp/www/page.html)" ] && [ "$(stat -c %s bench/tmp/comp/got.gz)" -lt "$(stat -c %s bench/tmp/comp/www/page.html)" ] && echo yes)"
-check "compression copies: a twin the build left on disk is kept over a copy; an image, a file under min_size and a site without the key get none" \
+check "compression copies: a twin the build left on disk is kept over a copy; an image, a file under min_size and a site whose response_compression is false get none" \
   "480 GZ ; - - -" \
   "$(ch on.test /built.js -H 'Accept-Encoding: gzip' | awk '{print $5}') $(curl -sS -H 'Host: on.test' -H 'Accept-Encoding: gzip' http://127.0.0.1:8064/built.js | head -c 2) ; $(ch on.test /photo.jpg -H 'Accept-Encoding: br, gzip' | awk '{print $2}') $(ch on.test /small.css -H 'Accept-Encoding: br, gzip' | awk '{print $2}') $(ch off.test /page.html -H 'Accept-Encoding: br, gzip' | awk '{print $2}')"
-check "compression copies: status counts the copies and their bytes, which fit the cache's budget, and names the codings this build has" "4 yes br,gzip,zstd" \
-  "$(curl -sS --unix-socket bench/tmp/comp/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin)["compression"]; print(int(d["copies_made"]), "yes" if 0 < d["copies_bytes"] < 200*1024 else d["copies_bytes"], ",".join(sorted(d["codings_built"])))')"
+check "compression copies: a site whose codings are gzip alone gets a gzip copy and no brotli, its brotli twin on disk passed over, so a browser taking both gets gzip and one taking brotli alone the file" \
+  "gzip - -" \
+  "$(ch gz.test /style.css -H 'Accept-Encoding: br, gzip' | awk '{print $2}') $(ch gz.test /style.css -H 'Accept-Encoding: br' | awk '{print $2}') $(curl -sS -H 'Host: gz.test' -H 'Accept-Encoding: br' http://127.0.0.1:8064/style.css | grep -c BR-TWIN | sed 's/^0$/-/')"
+check "compression copies: status counts the copies and their bytes, which fit the cache's budget, and names the codings this build has" "5 yes br,gzip,zstd" \
+  "$(curl -sS --unix-socket bench/tmp/comp/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin)["compression"]; print(int(d["copies_made"]), "yes" if 0 < d["copies_bytes"] < 1024*1024 else d["copies_bytes"], ",".join(sorted(d["codings_built"])))')"
 kill $CPID; wait $CPID 2>/dev/null
-# Response compression, steps 3 and 4 (docs/design-compression.md 6, 7, 8): a PHP site with the key
-# on, on a private instance over a php-fpm of its own (the suite's was stopped above, for the 502
+# Response compression, steps 3 and 4 (docs/design-compression.md 6, 7, 8): a PHP site with compression
+# enabled, on a private instance over a php-fpm of its own (the suite's was stopped above, for the 502
 # check): a buffered answer compressed whole with the client's coding (zstd, brotli or gzip), its
 # ETag weakened and answering 304, Vary on it and on what could have been compressed, a HEAD with
 # the GET's negotiation, no-transform honoured both ways, an answer the application compressed
-# passed through with Vary merged, Content-Encoding: identity dropped, an off path, a 206, an image,
+# passed through with Vary merged, Content-Encoding: identity dropped, an excluded path, a 206, an image,
 # a small body and one above 256 KB left alone while a page of a CMS home page's size (112 KB) is
 # compressed whole, a client sending no Accept-Encoding given identity with Vary, the compressed
 # page over h2c, every compressed answer padded; the guard (design 7) on agensio's own credentials:
 # a Basic Authorization, a path the site's password protects (skip_for lets loopback in), an address
 # rule's admission, each identity; a Bearer token, a subtree reopened with "any", a report-mode rule
-# (it refuses nobody) and an application's cookie compressed; a second site with signed_in = "on" compressing the Basic case too.
+# (it refuses nobody) and an application's cookie compressed; a second site with compress_signed_in = true compressing the Basic case too.
 if [ -n "$PHPFPM" ]; then
   mkdir -p bench/tmp/comp3
   cat > bench/tmp/comp3/fpm.conf <<FPMCONF
@@ -3547,7 +3575,7 @@ FPMCONF
     printf 'secret\n' | "$BIN" passwd anna > bench/tmp/comp3/users; chmod 640 bench/tmp/comp3/users
     C3AUTH=$(printf '[[site.auth]]\npath = "/priv/"\nusers = "%s/bench/tmp/comp3/users"\nskip_for = ["127.0.0.1"]\n' "$ROOT")
   fi
-  printf '[server]\nworkers = 1\nprotocols = ["h1", "h2c"]\n[log]\naccess = "off"\nerror = "%s/bench/tmp/comp3/error.log"\n[[site]]\nserver_name = ["c3.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { mode = "on", off = ["/off/"] }\n[[site.access]]\npath = "/adm/"\nallow = ["127.0.0.1"]\n[[site.access]]\npath = "/adm/open/"\nallow = ["any"]\n[[site.access]]\npath = "/rep/"\nallow = ["127.0.0.1"]\nmode = "report"\n%s\n[[site]]\nserver_name = ["c4.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { mode = "on", signed_in = "on" }\n' "$ROOT" "$ROOT" "$ROOT" "$C3AUTH" "$ROOT" "$ROOT" > bench/tmp/comp3/agensio.toml
+  printf '[server]\nworkers = 1\nprotocols = ["h1", "h2c"]\n[log]\naccess = "off"\nerror = "%s/bench/tmp/comp3/error.log"\n[[site]]\nserver_name = ["c3.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { enabled = true, exclude_paths = ["/off/"] }\n[[site.access]]\npath = "/adm/"\nallow = ["127.0.0.1"]\n[[site.access]]\npath = "/adm/open/"\nallow = ["any"]\n[[site.access]]\npath = "/rep/"\nallow = ["127.0.0.1"]\nmode = "report"\n%s\n[[site]]\nserver_name = ["c4.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { enabled = true, compress_signed_in = true }\n' "$ROOT" "$ROOT" "$ROOT" "$C3AUTH" "$ROOT" "$ROOT" > bench/tmp/comp3/agensio.toml
   mkdir -p tests/compress/off tests/compress/adm/open tests/compress/priv tests/compress/rep
   for d in off adm adm/open priv rep; do cp tests/compress/page.php tests/compress/$d/page.php; done
   rm -f bench/tmp/comp3/error.log
@@ -3577,8 +3605,8 @@ FPMCONF
   # mitigation, as Thruster and Django pad by default) by a length drawn per answer, where the
   # coding's decoders skip it; six zstd fetches show at least two lengths and each decodes to the
   # page, padded brotli and gzip decode with their tools, and curl's own decoders (libzstd,
-  # libbrotli, zlib: the browsers' three) take all of them. Until this step the padding sat behind
-  # signed_in = "on" and the committed binary answers six equal lengths here.
+  # libbrotli, zlib: the browsers' three) take all of them. Before step 5 the padding was only for
+  # the signed-in visitors' answers, and that binary answers six equal lengths here.
   c3l() { curl -sS -o "$2" -D - -H 'Host: c3.test' "${@:3}" "http://127.0.0.1:8065$1" | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}'; }
   lens=""; n=0
   for i in 1 2 3 4 5 6; do lens="$lens $(c3l /page.php bench/tmp/comp3/pad$i.zst -H 'Accept-Encoding: zstd')"; [ "$(zstd -dc bench/tmp/comp3/pad$i.zst 2>/dev/null | wc -c)" = "$IDLEN" ] && n=$((n+1)); done
@@ -3591,14 +3619,14 @@ FPMCONF
   # The guard (design 7): what agensio itself knows marks the visitor signed in; an application's
   # cookie does not (no server reads one; decision 9).
   BASIC='Authorization: Basic YW5uYTpzZWNyZXQ='
-  check "compression guard: a Basic credential gets identity without Vary, a Bearer token and an application's login cookie are compressed; a path an address rule admits is identity, a subtree it reopens with any and a report-mode rule's path compressed; signed_in = \"on\" compresses the Basic case" \
+  check "compression guard: a Basic credential gets identity without Vary, a Bearer token and an application's login cookie are compressed; a path an address rule admits is identity, a subtree it reopens with any and a report-mode rule's path compressed; compress_signed_in = true compresses the Basic case" \
     "200|-|- zstd zstd 200|- zstd zstd zstd" \
     "$(c3 /page.php -H 'Accept-Encoding: zstd' -H "$BASIC" | f 1-3) $(c3 /page.php -H 'Accept-Encoding: zstd' -H 'Authorization: Bearer abc.def' | f 2) $(c3 /page.php -H 'Accept-Encoding: zstd' -H 'Cookie: wordpress_logged_in_x=1; laravel_session=y' | f 2) $(c3 /adm/page.php -H 'Accept-Encoding: zstd' | f 1,2) $(c3 /adm/open/page.php -H 'Accept-Encoding: zstd' | f 2) $(c3 /rep/page.php -H 'Accept-Encoding: zstd' | f 2) $(curl -sS -D - -o /dev/null -H 'Host: c4.test' -H 'Accept-Encoding: zstd' -H "$BASIC" http://127.0.0.1:8065/page.php | c3fmt | f 2)"
   [ -n "$C3AUTH" ] && check "compression guard: a path the site's own password protects, entered through skip_for, is identity" "200|-|-" "$(c3 /priv/page.php -H 'Accept-Encoding: zstd' | f 1-3)"
   check "compression: no-transform in the answer and in the request is honoured; the application's own gzip passes through with Vary merged; Content-Encoding: identity is dropped and the body left alone" \
     "200|- ; 200|- ; 200|gzip|Cookie, Accept-Encoding ; 200|-|Accept-Encoding" \
     "$(c3 /nt.php -H 'Accept-Encoding: gzip' | f 1,2) ; $(c3 /page.php -H 'Accept-Encoding: gzip' -H 'Cache-Control: no-transform' | f 1,2) ; $(c3 /gz.php -H 'Accept-Encoding: gzip' | f 1-3) ; $(c3 /ident.php -H 'Accept-Encoding: gzip' | f 1-3)"
-  check "compression: an off path, a 206, an image and a body under min_size are left alone; one above 256 KB too (step 6's), with Vary" "- - - - -|Accept-Encoding" \
+  check "compression: an excluded path, a 206, an image and a body under min_size are left alone; one above 256 KB too (step 6's), with Vary" "- - - - -|Accept-Encoding" \
     "$(c3 /off/page.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /range.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /img.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /small.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /huge.php -H 'Accept-Encoding: gzip' | f 2,3)"
   # The whole-answer limit is 256 KB (compress_answer::kWholeMax; 64 KB until the measurement of
   # bench/results/compression-levels-20261030.md): a page of a CMS home page's size is compressed whole.

@@ -563,14 +563,12 @@ static void test_encoding() {
 // context round-tripped and reset between answers.
 static void test_compress_answer() {
     using namespace compress_answer;
-    SiteConfig::Compression site;
-    site.on = true;
-    site.off_paths = {"/my-account/", "/checkout"};
-    CompressionConfig root;
-    root.types_add = {"application/vnd.api+json"};
+    CompressionConfig site;
+    site.enabled = true;
+    site.exclude_paths = {"/my-account/", "/checkout"};
+    site.extra_types = {"application/x-ndjson"};
     Stream s;
     s.site_compression = &site;
-    s.root_compression = &root;
     s.coding = static_cast<std::uint8_t>(Encoding::gzip);
     s.request.target = "/page?x=1";
     Answer a;
@@ -591,8 +589,8 @@ static void test_compress_answer() {
     a.body_size = 4096;
     a.content_type = "image/png";
     CHECK(decide(s, a) == Reason::type);
-    a.content_type = "application/vnd.api+json; charset=utf-8";
-    CHECK(decide(s, a) == Reason::compress);  // types_add, parameters ignored
+    a.content_type = "application/x-ndjson; charset=utf-8";
+    CHECK(!compressible_type(a.content_type) && decide(s, a) == Reason::compress);  // extra_types, parameters ignored
     a.content_type = "";
     CHECK(decide(s, a) == Reason::type);
     a.content_type = "text/html";
@@ -628,18 +626,18 @@ static void test_compress_answer() {
     CHECK(decide(s, a) == Reason::compress);  // a prefix must end at a segment
     s.request.target = "/page";
     // The guard (docs/design-compression.md 7): the three credentials agensio itself sees mark the
-    // visitor signed in and leave the answer uncompressed with signed_in = "off": a path its own
+    // visitor signed in and leave the answer uncompressed with compress_signed_in = false: a path its own
     // [[site.auth]] protects, admission by an address rule of [[site.access]], an Authorization the
     // browser replays on its own (Basic, Digest, Negotiate, NTLM; a Bearer token is a script's).
-    // An application's cookie is not looked at (decision 9). signed_in = "on" compresses them too.
+    // An application's cookie is not looked at (decision 9). compress_signed_in = true compresses them too.
     s.auth.protected_path = true;
     CHECK(decide(s, a) == Reason::signed_in);
     a.head = true;
     CHECK(decide(s, a) == Reason::signed_in);  // before head: the HEAD of a signed-in visitor names the coding of nothing
     a.head = false;
-    site.signed_in = true;
+    site.compress_signed_in = true;
     CHECK(decide(s, a) == Reason::compress);
-    site.signed_in = false;
+    site.compress_signed_in = false;
     s.auth.protected_path = false;
     s.access_admitted = true;
     CHECK(decide(s, a) == Reason::signed_in);
@@ -661,9 +659,9 @@ static void test_compress_answer() {
     CHECK(reason_name(Reason::signed_in) == "signed_in");
     a.content_type = "text/event-stream";
     CHECK(decide(s, a) == Reason::event_stream);
-    site.event_streams = true;
+    site.compress_event_streams = true;
     CHECK(decide(s, a) == Reason::streamed);
-    site.event_streams = false;
+    site.compress_event_streams = false;
     a.content_type = "text/html";
     a.streamed = true;
     CHECK(decide(s, a) == Reason::streamed);
@@ -679,9 +677,9 @@ static void test_compress_answer() {
     s.coding = 0;
     CHECK(decide(s, a) == Reason::no_accept);
     s.coding = static_cast<std::uint8_t>(Encoding::gzip);
-    site.on = false;
+    site.enabled = false;
     CHECK(decide(s, a) == Reason::mode_off);
-    site.on = true;
+    site.enabled = true;
     s.site_compression = nullptr;
     CHECK(decide(s, a) == Reason::mode_off);
     CHECK(has_no_transform("no-transform") && has_no_transform("public, no-transform, max-age=1") && !has_no_transform("") && !has_no_transform("no-store"));
@@ -1013,6 +1011,97 @@ static void test_precompressed() {
     cache.find(dkey)->last_validated.store(0);
     serve("/d.css", "br");
     CHECK(body() == br && has("Content-Encoding: br\r\n"));
+    fs::remove_all(dir);
+}
+
+// response_compression in both files (docs/configuration.md 20): the main file's [response_compression]
+// is every site's defaults, a site's own table overrides the fields it names (codings replaces the
+// list, extra_types adds to it, exclude_paths is the site's alone), every field applies at a reload,
+// and -t --explain says which values are the site's.
+static void test_compression_config() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-compression-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir / "www");
+    fs::create_directories(dir / "sites.d");
+    auto load = [&](const std::string& text) {
+        std::ofstream(dir / "c.toml") << text;
+        return load_config(dir / "c.toml");
+    };
+    auto refused = [&](const std::string& text, const std::string& why) {
+        try {
+            load(text);
+        } catch (const std::exception& e) {
+            if (std::string(e.what()).find(why) != std::string::npos) return true;
+            std::printf("compression config: refused with \"%s\", not \"%s\"\n", e.what(), why.c_str());
+            return false;
+        }
+        std::printf("compression config: loaded, expected a refusal naming \"%s\"\n", why.c_str());
+        return false;
+    };
+    const std::string site = "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n";
+    const std::string other = "[[site]]\nserver_name = [\"b\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n";
+    // Off unless asked: no table, no key.
+    const Config none = load(site);
+    CHECK(!none.compression.enabled && !none.sites[0].compression.enabled && none.sites[0].compression.own == 0 && none.sites[0].codings.mask == 0);
+    // The server's switch reaches a site that says nothing, and a site's false keeps it off.
+    const Config on = load("[response_compression]\nenabled = true\n" + site + other + "response_compression = false\n");
+    CHECK(on.sites[0].compression.enabled && on.sites[0].compression.own == 0 && on.sites[0].codings.mask != 0);
+    CHECK(!on.sites[0].compression.codings_written);  // the default list does not decide the files a build left on disk
+    CHECK(!on.sites[1].compression.enabled && on.sites[1].compression.own == CompressionConfig::f_enabled && on.sites[1].codings.mask == 0);
+    // Field by field: what the site names is its own, the rest the main file's.
+    const Config mixed = load("[response_compression]\nenabled = true\nlevels = { br = 4 }\nextra_types = [\"application/x-a\"]\nmin_size = \"2KB\"\n" + site +
+                              "[site.response_compression]\nlevels = { zstd = 5 }\nextra_types = [\"application/x-b\", \"Application/X-A\"]\n"
+                              "exclude_paths = [\"/checkout/\"]\ncompress_signed_in = true\n" +
+                              other + "response_compression = true\n");
+    const CompressionConfig& m = mixed.sites[0].compression;
+    CHECK(m.enabled && m.level_zstd == 5 && m.level_br == 4 && m.level_gzip == 5 && m.min_size == 2048 && m.compress_signed_in && !m.offload);
+    CHECK((m.extra_types == std::vector<std::string>{"application/x-a", "application/x-b"}));  // added to the main file's, each once
+    CHECK(m.exclude_paths == std::vector<std::string>{"/checkout/"});
+    CHECK(m.own == (CompressionConfig::f_levels | CompressionConfig::f_extra_types | CompressionConfig::f_exclude_paths | CompressionConfig::f_signed_in));
+    const CompressionConfig& m2 = mixed.sites[1].compression;
+    CHECK(m2.enabled && m2.level_zstd == 3 && m2.level_br == 4 && m2.min_size == 2048 && !m2.compress_signed_in && m2.exclude_paths.empty() &&
+          m2.extra_types == std::vector<std::string>{"application/x-a"});
+    // A site's codings replace the main file's, order and all, and decide what its copies are made of.
+    if (coding_built(Encoding::br) && coding_built(Encoding::gzip) && coding_built(Encoding::zstd)) {
+        const Config cdn = load("[response_compression]\nenabled = true\n" + site + "response_compression = { codings = [\"br\", \"gzip\"] }\n" + other);
+        const Codings& c0 = cdn.sites[0].codings;
+        CHECK(cdn.sites[0].compression.codings == (std::vector<std::string>{"br", "gzip"}) && c0.order[0] == Encoding::br && c0.has(Encoding::gzip) &&
+              !c0.has(Encoding::zstd));
+        CHECK(cdn.sites[1].codings.order[0] == Encoding::zstd && cdn.sites[1].codings.has(Encoding::zstd));
+        CHECK(cdn.sites[0].compression.codings_written && !cdn.sites[1].compression.codings_written);
+        const Config root_list = load("[response_compression]\nenabled = true\ncodings = [\"gzip\"]\n" + site);
+        CHECK(root_list.sites[0].compression.codings_written && root_list.sites[0].codings.has(Encoding::gzip) &&
+              !root_list.sites[0].codings.has(Encoding::br));
+    }
+    // Refused: the old forms (no compatibility before the stable release), paths in the main file, a
+    // type that is no type, and the main file's table in a site file, which would be every site's.
+    CHECK(refused(site + "response_compression = \"on\"\n", "must be true, false or a table"));
+    CHECK(refused(site + "response_compression = { mode = \"on\" }\n", "mode"));
+    CHECK(refused("[response_compression]\ntypes_add = [\"a/b\"]\n" + site, "types_add"));
+    CHECK(refused("[response_compression]\nexclude_paths = [\"/x/\"]\n" + site, "paths belong to one site"));
+    CHECK(refused(site + "response_compression = { extra_types = [\"json\"] }\n", "is not a media type"));
+    CHECK(refused(site + "response_compression = { enabled = \"yes\" }\n", "enabled must be true or false"));
+    std::ofstream(dir / "sites.d" / "x.toml") << "[response_compression]\nenabled = true\n" << other;
+    const Config inc = load("include = [\"sites.d/*.toml\"]\n" + site);
+    CHECK(inc.held_back.size() == 1 && inc.held_back[0].error.find("[site.response_compression] below its [[site]]") != std::string::npos);
+    // Applies at a reload: no field names a restart.
+    Config changed = mixed;
+    changed.compression.codings = {"gzip"};
+    changed.compression.level_zstd = 9;
+    changed.compression.min_size = 4096;
+    changed.compression.extra_types = {"application/x-c"};
+    changed.compression.enabled = false;
+    CHECK(control::restart_needed(changed, mixed).empty());
+    // -t --explain: the main file's table and each site's values with what is its own.
+    std::ostringstream ex;
+    explain_config(mixed, ex);
+    const std::string text = ex.str();
+    CHECK(text.find("\n[response_compression]  # every site's defaults") != std::string::npos && text.find("\nlevels = { zstd = 3, br = 4, gzip = 5 }\n") != std::string::npos);
+    CHECK(text.find("exclude_paths = [\"/checkout/\"]") != std::string::npos &&
+          text.find("# this site's: exclude_paths, compress_signed_in, levels, extra_types; the rest from [response_compression]") != std::string::npos);
+    CHECK(text.find("compress_signed_in = false, compress_event_streams = false, offload = false") != std::string::npos &&
+          text.find("}  # this site's: enabled; the rest from [response_compression]\n") != std::string::npos);
     fs::remove_all(dir);
 }
 
@@ -4545,23 +4634,11 @@ static void test_control_commands() {
             {"cache.max_open_files", [](Config& c) { c.cache_max_open_files += 1; }},
             {"cache.precompressed", [](Config& c) { c.cache_precompressed = !c.cache_precompressed; }},
             {"control.provision", [](Config& c) { c.control.provision = !c.control.provision; }},
-            // [response_compression] (docs/design-compression.md 3): a level names its own row and the
-            // table's levels row, so those two are allowed to come together below.
-            {"[response_compression] codings", [](Config& c) { c.compression.codings = {"gzip"}; }},
-            {"levels = {} zstd", [](Config& c) { c.compression.level_zstd += 1; }},
-            {"levels = {} br", [](Config& c) { c.compression.level_br += 1; }},
-            {"levels = {} gzip", [](Config& c) { c.compression.level_gzip += 1; }},
-            {"[response_compression] min_size", [](Config& c) { c.compression.min_size *= 2; }},
-            {"[response_compression] types_add", [](Config& c) { c.compression.types_add = {"application/x-thing"}; }},
         };
         for (const auto& [key, change] : restart_only) {
             Config one = cfg;
             change(one);
             auto named = restart_needed(one, cfg);
-            if (key.starts_with("levels = {} ")) {  // a level also names the levels table's row
-                CHECK(named.size() == 2 && named[0] == "[response_compression] levels");
-                named.erase(named.begin());
-            }
             if (named != std::vector<std::string>{key}) {
                 std::string got;
                 for (const auto& n : named) got += " " + n;
@@ -4575,7 +4652,7 @@ static void test_control_commands() {
         CHECK(restart_needed(moved, with_control) == std::vector<std::string>{"control.socket"});
         // The reference's restart rows are exactly these keys: a new restart-only key gets its
         // line in restart_needed and here, or this fails.
-        std::set<std::string> covered = {"workers", "control.socket", "[response_compression] levels"};
+        std::set<std::string> covered = {"workers", "control.socket"};
         for (const auto& [key, change] : restart_only) covered.insert(key);
         for (const auto& d : control::key_defs()) {
             if (std::string_view(d.applies) != "restart") continue;
@@ -12987,6 +13064,7 @@ int main() {
     test_size();
     test_cache();
     test_hpack_encoder();
+    test_compression_config();
     test_site_protocols();
 #ifdef AGENSIO_HTTPARENA
     test_httparena();

@@ -22,7 +22,7 @@ CopyMaker::~CopyMaker() {
     thread_.join();
 }
 
-bool CopyMaker::ask(EntryPtr entry) {
+bool CopyMaker::ask(EntryPtr entry, Codings codings) {
     if (!entry || entry->descriptor_only || entry->data.empty() || entry->data.size() > max_size_ || entry->has_variants()) return false;
     {
         const std::lock_guard lock(mutex_);
@@ -31,7 +31,7 @@ bool CopyMaker::ask(EntryPtr entry) {
             queue_full_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
-        queue_.push_back(std::move(entry));
+        queue_.emplace_back(std::move(entry), codings);
     }
     wake_.notify_one();
     return true;
@@ -45,23 +45,25 @@ CopyMaker::Counts CopyMaker::counts() const noexcept {
 void CopyMaker::run() {
     for (;;) {
         EntryPtr entry;
+        Codings codings;
         {
             std::unique_lock lock(mutex_);
             wake_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
             if (stopping_) return;
-            entry = std::move(queue_.front());
+            entry = std::move(queue_.front().first);
+            codings = queue_.front().second;
             queue_.pop_front();
         }
-        make(entry);
+        make(entry, codings);
     }
 }
 
-// One copy per coding the build has, brotli 11 and gzip 9 (the smallest output: paid once), each
-// an entry of its own as a twin is, with the file's type and dates, its own strong ETag (the
-// file's tag plus the coding, so a copy and a twin never share one), the coding's headers and
-// Vary, no descriptor. Attached with a release store once complete: a worker that sees the
+// One copy per coding the site offers and the build has, brotli 11 and gzip 9 (the smallest
+// output: paid once), each an entry of its own as a twin is, with the file's type and dates, its
+// own strong ETag (the file's tag plus the coding, so a copy and a twin never share one), the
+// coding's headers and Vary, no descriptor. Attached with a release store once complete: a worker that sees the
 // pointer sees the entry whole (the hit path reads it with an acquire, as it reads the twins).
-void CopyMaker::make(const EntryPtr& entry) {
+void CopyMaker::make(const EntryPtr& entry, Codings codings) {
     if (entry->stale.load(std::memory_order_acquire)) return;  // evicted since it was asked
     struct Copy {
         Encoding coding;
@@ -71,7 +73,7 @@ void CopyMaker::make(const EntryPtr& entry) {
     std::vector<char> out;
     const std::string_view in(entry->data.data(), entry->data.size());
     for (const Copy& c : kCopies) {
-        if (!coding_built(c.coding)) continue;
+        if (!codings.has(c.coding) || !coding_built(c.coding)) continue;  // the site's codings alone
         if (!compress_whole(c.coding, c.level, in, out)) {
             failed_.fetch_add(1, std::memory_order_relaxed);
             continue;

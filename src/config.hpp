@@ -266,16 +266,46 @@ struct RedirectSet {
     bool empty() const noexcept { return rules.empty(); }
 };
 
-// [response_compression] (docs/design-compression.md 3): root's tuning, restart-only, read once at
-// start and never per request. Levels and windows are set explicitly so a library upgrade never
-// changes what agensio sends; the windows (zstd 2^19, brotli 2^18) are not keys.
+// response_compression (docs/design-compression.md 3): the main file's [response_compression] holds
+// every site's defaults and the encoders' tuning; a site's own response_compression overrides the
+// fields it names (codings replaces the list, extra_types adds to it) and alone has exclude_paths.
+// Merged when the site loads (SiteConfig::compression), so the request path reads one struct per
+// site and every field applies at a reload. Off unless enabled: no CPU is spent unless asked.
+// Levels and windows are set explicitly so a library upgrade never changes what agensio sends; the
+// windows (zstd 2^19, brotli 2^18) are not keys.
 struct CompressionConfig {
+    bool enabled = false;
+    // An answer agensio itself knows to be a signed-in visitor's (a [[site.auth]] path, an address
+    // rule's admission, a browser-replayed Authorization) is compressed too: false is the BREACH guard
+    // (section 7); an application's own login is invisible to the server, its pages are padded.
+    bool compress_signed_in = false;
+    bool compress_event_streams = false;  // text/event-stream too, flushed per event (step 6)
+    bool offload = false;                 // the browser's Accept-Encoding kept from the application (step 6)
     std::vector<std::string> codings = {"zstd", "br", "gzip"};  // offered, the order decides a tie
+    // The list was written, in the main file or on the site: it then decides the .br and .gz files
+    // beside a cached file too. The default list is trimmed to the codings the build can produce,
+    // which says nothing about a file the site's build left on disk (serving it needs no library).
+    bool codings_written = false;
     int level_zstd = 3;  // 1..9
     int level_br = 3;    // 1..6; 3 since bench/results/compression-levels-20261030.md (4 before)
     int level_gzip = 5;  // 1..9
     std::size_t min_size = 1024;
-    std::vector<std::string> types_add;  // media types beyond compressible_type, lower-case, no parameters
+    std::vector<std::string> extra_types;    // media types beyond compressible_type, lower-case, no parameters
+    std::vector<std::string> exclude_paths;  // a site's alone: "/"-rooted prefixes, at most 32
+    // The fields a site's own table named (bits of Field), for -t --explain: the rest came from the
+    // main file. 0 in the main file's table itself.
+    enum Field : std::uint16_t {
+        f_enabled = 1,
+        f_signed_in = 2,
+        f_event_streams = 4,
+        f_offload = 8,
+        f_codings = 16,
+        f_levels = 32,
+        f_min_size = 64,
+        f_extra_types = 128,
+        f_exclude_paths = 256,
+    };
+    std::uint16_t own = 0;
 };
 
 struct SiteConfig {
@@ -310,29 +340,16 @@ struct SiteConfig {
     // response_headers_baseline (alpha.94, docs/headers.md 4): the preset's baseline, rules marked `baseline`
     // in response_headers below every written one; unset: on for a site with app, off without.
     std::optional<bool> response_headers_baseline;
-    // response_compression (docs/design-compression.md 3): off by default, no CPU unless the site asks.
-    // `on` covers the cached files' copies made once and the answers compressed per request; `off`
-    // paths are never compressed; signed_in says whether an answer agensio itself knows to be a
-    // signed-in visitor's (a [[site.auth]] path, an address rule's admission, a browser-replayed
-    // Authorization) is compressed (the BREACH guard, section 7: "off" by default; an application's
-    // own login is invisible to the server, as to every server, and every compressed answer is padded);
-    // upstream = "offload" keeps Accept-Encoding from the application; event_streams compresses
-    // text/event-stream. Read at routing only when `on`: a site without the key pays nothing (the one
-    // test is `compression.on`).
-    struct Compression {
-        bool on = false;
-        bool signed_in = false;
-        bool offload = false;
-        bool event_streams = false;
-        std::vector<std::string> off_paths;  // "/"-rooted prefixes, at most 32
-    } compression;
-    // The codings this site offers in root's order (Config::compression.codings), built at load
-    // for the one choose_encoding call of a request's routing; empty when compression is off.
+    // response_compression (docs/design-compression.md 3): the main file's [response_compression]
+    // with this site's own fields over it, merged at load. A copy per site, not a pointer into the
+    // Config, which is moved into its Generation after loading; a site held back at a reload keeps the
+    // copy of its last good version, matching the cache entries keyed by its locations. Read at
+    // routing only when enabled: a site that does not compress pays the one test.
+    CompressionConfig compression;
+    // The codings this site offers in its order (compression.codings), built at load for the one
+    // choose_encoding call of a request's routing and for which copies of a cached file are made;
+    // empty when compression is off.
     Codings codings;
-    // Root's tuning (min_size, levels, types_add), copied in at load for the answers' decision: the
-    // dispatcher routes with the site alone, and a Config is moved into its Generation after loading,
-    // so a pointer into it would not survive; a copy per site costs a few bytes.
-    CompressionConfig root_compression;
     // response_headers_offer_declined (alpha.94, docs/headers.md 7): the offered fields (4.1) the owner
     // said the site must not send, in their canonical spelling; path_check's offer and health's
     // response_headers_suggested leave them out.

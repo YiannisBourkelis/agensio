@@ -24,7 +24,7 @@ MimeInfo mime_info(std::string_view path) noexcept;
 // TTF/OTF/EOT fonts, web manifests. Never images (but SVG and ICO), audio, video, archives, WOFF
 // (already compressed) or application/octet-stream. Judged on the media type alone: parameters
 // (";charset=utf-8") are cut off first, nginx's `gzip_types application/json` trap. The site's
-// `types_add` extends this through Config::compressible_types.
+// response_compression's extra_types extends this per site (docs/configuration.md 20).
 bool compressible_type(std::string_view content_type) noexcept;
 
 }  // namespace agensio

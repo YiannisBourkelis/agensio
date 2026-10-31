@@ -17,16 +17,16 @@ namespace agensio::compress_answer {
 
 enum class Reason : std::uint8_t {
     compress,         // yes, with Stream::coding
-    mode_off,         // the site has no key, or a client that sent no acceptable Accept-Encoding
+    mode_off,         // compression is not enabled for the site
     no_accept,        // no Accept-Encoding, or none acceptable
     type,             // not a compressible media type (or none)
     size,             // under min_size
     status,           // a status without content, or a 206
     already_encoded,  // the application sent a Content-Encoding
     no_transform,     // Cache-Control: no-transform, in the request or the answer
-    path_off,         // under one of the site's `off` paths
-    signed_in,        // the request carried a credential agensio itself knows (design 7) and signed_in = "off"
-    event_stream,     // text/event-stream without event_streams = true
+    path_off,         // under one of the site's exclude_paths
+    signed_in,        // the request carried a credential agensio itself knows (design 7) and compress_signed_in = false
+    event_stream,     // text/event-stream without compress_event_streams = true
     streamed,         // a streamed answer: compressed in pieces from step 6 on, identity until then
     large,            // a buffered answer above kWholeMax: in pieces from step 6 on, identity with Vary until then
     head,             // a HEAD answer: the GET's bytes are not here to compress; Vary says what the GET varies on
@@ -60,12 +60,12 @@ inline std::string_view reason_name(Reason r) noexcept {
 // larger answer is compressed as the writer pulls it, in 64 KB pieces, from step 6 on.
 inline constexpr std::uint64_t kWholeMax = 256 * 1024;
 
-// Root's level for the coding (levels = { zstd, br, gzip }).
-inline int level_for(const CompressionConfig& root, Encoding e) noexcept {
+// The site's level for the coding (levels = { zstd, br, gzip }, the main file's unless the site sets its own).
+inline int level_for(const CompressionConfig& c, Encoding e) noexcept {
     switch (e) {
-        case Encoding::zstd: return root.level_zstd;
-        case Encoding::br: return root.level_br;
-        case Encoding::gzip: return root.level_gzip;
+        case Encoding::zstd: return c.level_zstd;
+        case Encoding::br: return c.level_br;
+        case Encoding::gzip: return c.level_gzip;
         case Encoding::identity: break;
     }
     return 0;
@@ -106,7 +106,7 @@ inline bool has_no_transform(std::string_view cc) noexcept {
     return false;
 }
 
-// The request's path (the target before its query) lies under one of the site's `off` prefixes.
+// The request's path (the target before its query) lies under one of the site's exclude_paths.
 inline bool under_off_path(std::string_view target, const std::vector<std::string>& off) noexcept {
     const std::size_t q = target.find('?');
     const std::string_view path = q == std::string_view::npos ? target : target.substr(0, q);
@@ -135,7 +135,7 @@ inline bool signed_in_visitor(const Stream& s) noexcept {
     return s.auth.protected_path || s.access_admitted || browser_credential(s.request.headers.get("authorization"));
 }
 
-// Media types beyond the built-in list (root's types_add, lower-case, no parameters).
+// Media types beyond the built-in list (extra_types, lower-case, no parameters).
 inline bool added_type(std::string_view content_type, const std::vector<std::string>& types) noexcept {
     if (types.empty()) return false;
     std::string_view t = content_type;
@@ -154,23 +154,22 @@ inline bool added_type(std::string_view content_type, const std::vector<std::str
 }
 
 inline Reason decide(const Stream& s, const Answer& a) noexcept {
-    if (!s.site_compression || !s.root_compression) return Reason::mode_off;
-    const auto* site = static_cast<const SiteConfig::Compression*>(s.site_compression);
-    const auto* root = static_cast<const CompressionConfig*>(s.root_compression);
-    if (!site->on) return Reason::mode_off;
+    if (!s.site_compression) return Reason::mode_off;
+    const auto* site = static_cast<const CompressionConfig*>(s.site_compression);
+    if (!site->enabled) return Reason::mode_off;
     if (s.coding == 0) return Reason::no_accept;
     if (a.status < 200 || a.status == 204 || a.status == 304 || a.status == 206 || a.content_range) return Reason::status;
     if (!a.content_encoding.empty()) return Reason::already_encoded;
     if (a.content_type.empty()) return Reason::type;
     const bool event_stream = a.content_type.size() >= 17 && (a.content_type.substr(0, 17) == "text/event-stream");
-    if (event_stream) return site->event_streams ? Reason::streamed : Reason::event_stream;
-    if (!compressible_type(a.content_type) && !added_type(a.content_type, root->types_add)) return Reason::type;
+    if (event_stream) return site->compress_event_streams ? Reason::streamed : Reason::event_stream;
+    if (!compressible_type(a.content_type) && !added_type(a.content_type, site->extra_types)) return Reason::type;
     if (has_no_transform(a.cache_control) || has_no_transform(s.request.headers.get("cache-control"))) return Reason::no_transform;
-    if (!site->off_paths.empty() && under_off_path(s.request.target, site->off_paths)) return Reason::path_off;
-    if (!site->signed_in && signed_in_visitor(s)) return Reason::signed_in;
+    if (!site->exclude_paths.empty() && under_off_path(s.request.target, site->exclude_paths)) return Reason::path_off;
+    if (!site->compress_signed_in && signed_in_visitor(s)) return Reason::signed_in;
     if (a.head) return Reason::head;  // before the size: a HEAD answer has no body to measure
     if (a.streamed) return Reason::streamed;
-    if (a.body_size < root->min_size) return Reason::size;
+    if (a.body_size < site->min_size) return Reason::size;
     if (a.body_size > kWholeMax) return Reason::large;
     return Reason::compress;
 }

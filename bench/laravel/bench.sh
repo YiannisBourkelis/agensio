@@ -9,7 +9,7 @@
 #   of the TCP pool published through docker-proxy.
 #   AGENSIO_PHP_EXTRA=', keep_conn = true' bench/laravel/bench.sh -s agensio   # extra php = { } options
 #   -e zstd|br|gzip   response compression (docs/design-compression.md 10): wrk asks for that coding,
-#                     agensio gets response_compression = "on" with codings = [the one], nginx gzip at
+#                     agensio gets response_compression = true with codings = [the one], nginx gzip at
 #                     level 5 for gzip and is skipped for br and zstd (its stock build has no module);
 #                     the table gains the bytes on the wire per answer, headers included.
 #
@@ -74,7 +74,7 @@ listen = ["127.0.0.1:$PORT_AGENSIO"]
 root = "$BED"
 app = "laravel"
 php = { socket = "$FPM_AGENSIO", remote_root = "$REMOTE_ROOT", read_timeout = 60${AGENSIO_PHP_EXTRA:-} }
-$([ $CODING = off ] || echo 'response_compression = "on"')
+$([ $CODING = off ] || echo 'response_compression = true')
 TOML
 
 mkdir -p "$TMP/nginx"
@@ -194,7 +194,7 @@ CHILDREN=$(pids_of fpm | tr ',' '\n' | grep -c . || true)
   echo "- commit: $(git -C "$ROOT" rev-parse --short HEAD)$(git -C "$ROOT" diff --quiet || echo '+dirty')"
   echo "- servers: $(for s in $SERVERS; do printf '%s; ' "$(version_of "$s")"; done)nginx via $NGINX_MODE"
   echo "- app: Laravel $LARAVELV on PHP $PHPV, php-fpm pool \`$POOL_NAME\` in $FPM_CONTAINER ($CHILDREN static children, $POOL $FPM), same pool for both servers; agensio php options: ${AGENSIO_PHP_EXTRA:-none beyond the defaults}"
-  echo "- one web-server worker each; wrk $THREADS threads, $CONNS connections, $DUR, $ROUNDS round(s); compression: $CODING$([ $CODING = off ] || echo " (wrk sends Accept-Encoding: $CODING; agensio response_compression = \"on\" with codings = [\"$CODING\"]; nginx gzip level 5 for gzip, skipped for the others; bytes/ans = bytes on the wire per answer, headers included)"); command: \`$0 $*\`"
+  echo "- one web-server worker each; wrk $THREADS threads, $CONNS connections, $DUR, $ROUNDS round(s); compression: $CODING$([ $CODING = off ] || echo " (wrk sends Accept-Encoding: $CODING; agensio response_compression = true with codings = [\"$CODING\"]; nginx gzip level 5 for gzip, skipped for the others; bytes/ans = bytes on the wire per answer, headers included)"); command: \`$0 $*\`"
   echo "- web us/req = CPU time of the web server's processes / requests; php us/req = CPU of the web container (cgroup, i.e. the php-fpm children) / requests: the application's cost, the same work for both servers"
   echo
   echo "| server | path | conns | req/s | p50 | p99 | web us/req | php us/req | rss MB | bytes/ans | errors |"

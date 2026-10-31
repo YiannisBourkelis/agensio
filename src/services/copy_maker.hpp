@@ -1,6 +1,8 @@
 // The copies of cached files made once (docs/design-compression.md 5): a site with
-// response_compression on gets brotli 11 and gzip 9 copies of each compressible file it
-// caches, made here on one low-priority thread, never on a worker (brotli 11 takes about 60 ms
+// response_compression enabled gets brotli 11 and gzip 9 copies of each compressible file it
+// caches, those of the two its codings offer, made here on one low-priority thread, started with the
+// server whatever the sites say, so a site that turns compression on at a reload gets them; never
+// on a worker (brotli 11 takes about 60 ms
 // per 100 KB), and attached to the file's CacheEntry as its `br` and `gzip` twins are, in memory
 // only, charged to the cache's byte budget with the file, served by the twin code unchanged. A
 // file with a twin on disk keeps it and gets no copy; a file whose entry was evicted while its
@@ -15,8 +17,10 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 #include "cache.hpp"
+#include "handlers/encoding.hpp"
 
 namespace agensio {
 
@@ -28,10 +32,10 @@ public:
     CopyMaker(const CopyMaker&) = delete;
     CopyMaker& operator=(const CopyMaker&) = delete;
 
-    // Asks for the entry's copies. False, nothing queued, when the queue is full or the entry does
-    // not qualify (its bytes beyond max_size, a twin already there); the caller serves the file
-    // as it is. Cheap: one lock, one push.
-    bool ask(EntryPtr entry);
+    // Asks for the entry's copies in `codings` (brotli, gzip or both: the site's). False, nothing
+    // queued, when the queue is full or the entry does not qualify (its bytes beyond max_size, a twin
+    // already there); the caller serves the file as it is. Cheap: one lock, one push.
+    bool ask(EntryPtr entry, Codings codings);
 
     // For status: copies made, bytes they hold, entries refused by the queue or the budget.
     struct Counts {
@@ -41,13 +45,13 @@ public:
 
 private:
     void run();
-    void make(const EntryPtr& entry);
+    void make(const EntryPtr& entry, Codings codings);
     FileCache& cache_;
     const std::size_t max_size_;
     const std::size_t limit_;
     std::mutex mutex_;
     std::condition_variable wake_;
-    std::deque<EntryPtr> queue_;
+    std::deque<std::pair<EntryPtr, Codings>> queue_;
     bool stopping_ = false;
     std::atomic<std::uint64_t> made_{0}, bytes_{0}, queue_full_{0}, budget_refused_{0}, failed_{0};
     std::thread thread_;

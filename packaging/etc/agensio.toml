@@ -12,6 +12,11 @@ access = "/var/log/agensio/access.log"
 error = "/var/log/agensio/error.log"
 level = "warn"
 
+# Response compression (docs/configuration.md 20): off for every site; a site turns it on with
+# `response_compression = true` in its file, or `enabled = true` here turns it on for every site.
+[response_compression]
+enabled = false
+
 # The control socket for `agensio ctl` and the MCP server (`agensio mcp`): root and the
 # agensio user are admins; add your administrator account to the agensio-admin group.
 [control]

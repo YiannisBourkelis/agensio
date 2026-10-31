@@ -3,16 +3,15 @@
 ## 0.1.0-alpha.118
 
 - **Response compression, step 1 of `docs/design-compression.md`: the keys and the chooser.** The
-  site key `response_compression` (`"on"` | `"off"`, off by default, or the table with `mode`,
-  `off` paths, `signed_in`, `upstream`, `event_streams`) and root's
-  `[response_compression]` (`codings`, `levels`, `min_size`, `types_add`) load, are refused with
-  the reason when wrong, have their reference rows (`docs/configuration.md` 20, `docs/keys.md`)
-  and a cookbook recipe. `choose_encoding` knows zstd and takes the configured order on a tie;
+  key `response_compression` (off by default; in the main file every site's defaults, on a site its
+  own, with the fields of the last entry of this release, whose names this release's entries use)
+  loads, is refused with the reason when wrong, has its reference rows (`docs/configuration.md`
+  20, `docs/keys.md`) and cookbook recipes. `choose_encoding` knows zstd and takes the configured order on a tie;
   the MIME table carries a `compressible` column, judged on the media type without parameters.
   A site with the key on has its client's coding chosen once at routing (`Stream::coding`); a
   site without it pays one flag test. No answer is compressed yet: the encoders come with the
   next steps.
-- **Step 2: the copies of cached files, made once.** A site with `response_compression = "on"`
+- **Step 2: the copies of cached files, made once.** A site with compression enabled
   gets brotli 11 and gzip 9 copies of each compressible file it caches (text, JavaScript, JSON,
   XML, SVG, fonts not compressed already, wasm; at least `min_size`, at most 8 MB; a file with a
   `.br` or `.gz` beside it keeps the build's and gets no copy), made on one background thread
@@ -34,12 +33,12 @@
   100 KB CSS from its brotli copy, from its gzip copy, as identity to a client sending no
   `Accept-Encoding`, over TLS, and over HTTP/2 at ten streams with `-2`.
 - **Step 3: PHP, proxied and CGI answers compressed per request, with gzip.** A site with
-  `response_compression = "on"` compresses a buffered application answer whole on the worker
+  compression enabled compresses a buffered application answer whole on the worker
   (gzip through zlib at `levels.gzip`, 5 by default; the zlib stream kept per thread and reset
   per answer, no allocation per answer) when it is a compressible media type, at least `min_size`
   and at most 64 KB (a larger one, and a streamed one, wait for step 6's pieces), a status with
   content and not a 206, without a `Content-Encoding` of its own or `Cache-Control: no-transform`
-  in the answer or the request, and not under an `off` path; a browser whose best coding is zstd
+  in the answer or the request, and not under one of `exclude_paths`; a browser whose best coding is zstd
   or brotli gets gzip until step 4. The compressed answer carries its exact `Content-Length`, the
   application's strong ETag weakened to `W/"…"` (RFC 9110 8.8.1; a correct application still
   answers 304 to it, and the browser's `If-None-Match` is forwarded as it came), `Accept-Ranges`
@@ -62,7 +61,7 @@
   an eighth of it, is the default coding once step 4 brings it. For `levels.gzip`, the same
   zlib 1.3.1 on the same page: level 1 85 µs at 2.86:1, 3 222 µs, 5 376 µs at 3.08:1, 6 554 µs,
   9 614 µs at 3.12:1. The Laravel and WordPress beds were down; their rows come with step 4.
-- **Step 4: zstd and brotli per request, and the padding behind `signed_in = "on"`.** A buffered
+- **Step 4: zstd and brotli per request, and the padding behind `compress_signed_in`.** A buffered
   application answer is compressed with the coding the client chose at routing among the site's
   (`codings`, zstd first by default: Chrome and Firefox get zstd, Safari brotli, a tool taking
   gzip alone gzip), no longer gzip for everyone: zstd at `levels.zstd` (3) through one context
@@ -70,7 +69,7 @@
   gzip as before. The windows are fixed in the code and never a library's default (zstd 2^19,
   brotli 2^18, gzip 2^15; an answer smaller than the window gets a window of its own size), the
   zstd frame carries its content size and no checksum. A HEAD names the coding the GET would
-  carry. With `signed_in = "on"` every compressed answer of the site carries a padding of a
+  carry. With `compress_signed_in = true` every compressed answer of the site carries a padding of a
   length drawn per answer, up to 32 bytes with the coding's framing, where every decoder skips
   it (gzip's FEXTRA field, RFC 1952 2.3.1.1; a zstd skippable frame, RFC 8878 3.1.2; a brotli
   metadata meta-block, RFC 7932 9.2), so one page's length differs from request to request
@@ -140,8 +139,6 @@
   A/B against the defaults commit (`bench/results/ab-20261030-165424.md`, five rounds on a quiet
   box, after `ab-20261030-163149.md` and `ab-20261030-163903.md` on a busy one): every row within
   noise, proxy /json 1.005.
-## 0.1.0-alpha.117 (2026-10-26)
-
 - **Step 5: the BREACH guard on what agensio itself knows, and the padding on every answer.**
   The design counted a visitor signed in by the application's session cookie (a per-preset table
   plus `session_cookies`). Checked against the beds it broke: Laravel gives every anonymous
@@ -152,24 +149,24 @@
   mask their tokens, Django and Rails do, Laravel does not), so agensio compresses an application's
   pages for every visitor too, and does two things none of them does by default
   (`docs/design-compression.md` 7, decision 9, 2026-10-31). Every answer compressed per request
-  carries a random padding of up to 32 bytes (24 before, behind `signed_in = "on"`; what protects
+  carries a random padding of up to 32 bytes (24 before, behind `compress_signed_in`; what protects
   is the spread of the random part, and Rails' Thruster pads 32 by default, Django 100), in the
   place every decoder skips, so a page's compressed length differs from request to request. And
-  `signed_in = "off"`, the default, leaves uncompressed the answers agensio itself knows to be a
+  `compress_signed_in = false`, the default, leaves uncompressed the answers agensio itself knows to be a
   signed-in visitor's: a path under a `[[site.auth]]` password (verified or let in by `skip_for`),
   a request an address rule of `[[site.access]]` admitted that refuses others (not `any`, not
   report mode; the dispatcher records the admission, `Stream::access_admitted`), and a browser-replayed `Authorization`
   (Basic, Digest, Negotiate, NTLM; a Bearer token is a script's and is compressed); no `Vary` on
-  such an answer. `signed_in = "on"` compresses those too; it needs no confirmation dialog now,
+  such an answer. `compress_signed_in = true` compresses those too; it needs no confirmation dialog now,
   and the health finding about unmasked frameworks is not built. `session_cookies` is gone from
   the key, the reference, the guide and the recipe; the guide's section 20 says what BREACH
-  needs, what every server does, and that on a Laravel or plain PHP site the `off` paths are for
+  needs, what every server does, and that on a Laravel or plain PHP site `exclude_paths` is for
   the pages where a form token sits beside typed input. The suite's block pads every answer of
   the page (six zstd fetches, at least two lengths; the committed binary answers six equal ones),
   and checks the guard: a Basic credential identity without `Vary`, a Bearer token and an
   application's login cookie compressed, an address rule's admission identity and a subtree
   reopened with `any` compressed, the site's own password through `skip_for` identity (where the
-  build has authentication), the Basic case compressed with `signed_in = "on"`.
+  build has authentication), the Basic case compressed with `compress_signed_in = true`.
 - **The heap's thresholds set at start: no page faults per brotli answer.** Found while gating
   step 5: the A/B's brotli row (the 32 KB page for a client taking brotli alone) went from 114 to
   151 µs per request, while the padding costs nothing in a hot loop and zstd's and gzip's rows
@@ -184,6 +181,37 @@
   and closes still returns everything when connections go idle. Measured
   (`bench/results/brotli-faults-20261031.md`, `bench/compression/brotli-row.sh`): the brotli row
   150 to 113.5 µs and 84 to 0 faults per request, zstd and gzip unchanged.
+- **`response_compression` in both files, with names that say what they hold.** The main file's
+  `[response_compression]` is every site's defaults and the encoders' tuning; a site's own
+  `response_compression` (`true`, `false`, or a table, in a site file `[site.response_compression]`
+  below its `[[site]]` or inline) overrides the fields it names, and a site that names none follows
+  the main file whole, managed sites included. The fields: `enabled` (the switch, `false` unless
+  set), `exclude_paths` (a site's alone), `compress_signed_in`, `compress_event_streams`, `offload`,
+  `codings` (a site's list replaces the main file's, so a site behind a CDN puts brotli first),
+  `levels` (a site names the ones it changes), `min_size`, `extra_types` (a site's add to the main
+  file's). Every field applies at a reload: each site keeps a merged copy built at load, which the
+  request path already read, so the restart rows are gone. A bare `[response_compression]` in a
+  site file is refused with the place a site's goes; `exclude_paths` in the main file likewise.
+  `agensio -t --explain` prints the main file's table and every site's values, naming the fields
+  that are its own. The shipped main file writes `enabled = false`. The copies of a cached file
+  follow the site's codings, and so do the `.br` and `.gz` files beside it when the list is written
+  (the default list is trimmed to the build, not to the files on disk): a site offering gzip
+  alone gets a gzip copy and no brotli, with no test added on the hit path, since a reload replaces
+  the cache's entries; between brotli and gzip copies brotli wins a tie. `min_size` and
+  `extra_types` decide the copies too (the copies read the boot configuration's `min_size` and no
+  `extra_types` before). `offload` and `compress_event_streams` are accepted and act from step 6,
+  which compresses streamed answers; the reference and the guide say so. Two bugs fixed on the way:
+  the copy maker was started only when a site of the boot configuration compressed, so a site that
+  turned compression on at a reload got no copies until a restart; and it was started only in
+  builds with authentication (libxcrypt), so no other build ever made a copy. The cookbook has a
+  compression category of eight recipes (one site, every site with one kept off, a shop's excluded
+  pages, brotli first behind a CDN, an application that compresses itself, a password-protected
+  staging site, a type the built-in list leaves out, the levels), and `bench/ab.sh -C` offers the
+  site in either spelling, so a base from before this change still gets the compression rows. The
+  step 5 and heap entries above had been filed under alpha.117 by mistake.
+
+## 0.1.0-alpha.117 (2026-10-26)
+
 - **An HTTP/3 attempt refused at the connection ceiling counts once** (the alpha.116 report). A
   ClientHello with a post-quantum key share, as curl and the browsers send, takes two Initial
   packets, and each was counted, so `connections_refused` read HTTP/3 refusals about double. Each

@@ -100,7 +100,7 @@ if [ $PROXY = 1 ]; then
   [ -f "$BENCH/proxy/ab-site.toml" ] || { echo "bench/proxy/ab-site.toml missing (the proxy site for the gate, phase D1)"; exit 1; }
   SPECS+=("proxy:/json:64" "proxy:/big:64" "proxy:/slow?ms=20:256")
   [ $ACCESS = 1 ] && SPECS+=("proxy-hdr:/json:64" "proxy-cache:/json:64")
-  # -C with -P: the proxy site with response_compression on, on 8085 (docs/design-compression.md 10),
+  # -C with -P: the proxy site with compression on, on 8085 (docs/design-compression.md 10),
   # asked with a browser's header: the upstream's 33-byte JSON (under min_size: the decision alone,
   # must be flat), its 32 KB page compressed whole per request (the encoder's cost), its 100 KB body
   # (above the whole-answer limit: identity with Vary until step 6, must be flat), and the page
@@ -308,7 +308,7 @@ AUTH_SITES
   done
 fi
 if [ $COMP = 1 ]; then
-  # -C, response compression (docs/design-compression.md 10): a site with the key on, on 8087, asked
+  # -C, response compression (docs/design-compression.md 10): a site with compression on, on 8087, asked
   # with a browser's Accept-Encoding: the 1 KB page is under min_size (identity, must be flat
   # against the plain row) and the 100 KB CSS gets its brotli copy, made once at the first fill
   # (must equal a row served from a disk twin). A side whose binary lacks the key does not load
@@ -320,8 +320,14 @@ if [ $COMP = 1 ]; then
   # streams, where the twin code's TLS and framing paths carry it.
   SPECS+=("comp:/:64" "comp:/style.css:64" "comp-gzip:/style.css:64" "comp-plain:/style.css:64" "comp-tls:/style.css:64")
   [ $H2 = 1 ] && SPECS+=("comp-h2:/style.css:64:10")
-  printf '\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8085"]\nroot = "%s/www"\nresponse_compression = "on"\n\n[[site.location]]\npath = "/"\nupstream = "http://127.0.0.1:9100"\n' "$BENCH" > "$BENCH/tmp/ab-comp-proxy.toml"
-  printf '\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8087"]\nroot = "%s/www"\nresponse_compression = "on"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8486"]\nroot = "%s/www"\ntls = { cert = "%s/certs/cert.pem", key = "%s/certs/key.pem" }\nresponse_compression = "on"\n' "$BENCH" "$BENCH" "$BENCH" "$BENCH" > "$BENCH/tmp/ab-comp.toml"
+  # Two spellings of the switch, each side loading the one it knows: `true` since 2026-10-31, "on"
+  # in the binaries of steps 1 to 5.
+  for form in true old; do
+    on='true'; [ $form = old ] && on='"on"'
+    sfx=""; [ $form = old ] && sfx="-old"
+    printf '\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8085"]\nroot = "%s/www"\nresponse_compression = %s\n\n[[site.location]]\npath = "/"\nupstream = "http://127.0.0.1:9100"\n' "$BENCH" "$on" > "$BENCH/tmp/ab-comp-proxy$sfx.toml"
+    printf '\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8087"]\nroot = "%s/www"\nresponse_compression = %s\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8486"]\nroot = "%s/www"\ntls = { cert = "%s/certs/cert.pem", key = "%s/certs/key.pem" }\nresponse_compression = %s\n' "$BENCH" "$on" "$BENCH" "$BENCH" "$BENCH" "$on" > "$BENCH/tmp/ab-comp$sfx.toml"
+  done
 fi
 # The proxy gate adds a site that forwards 127.0.0.1:8093 to the upstream; a side whose
 # binary cannot load it (a base before D1) gets the static-only config and no proxy rows.
@@ -377,11 +383,14 @@ start() {  # binary
     fi
   fi
   SIDE_COMP=0
-  if [ $COMP = 1 ]; then  # the compression site in the side that loads it (docs/design-compression.md 10)
-    cat "$cfg" "$BENCH/tmp/ab-comp.toml" > "$BENCH/tmp/ab-side-comp.toml"
-    [ $SIDE_PROXY = 1 ] && cat "$BENCH/tmp/ab-comp-proxy.toml" >> "$BENCH/tmp/ab-side-comp.toml"
-    if "$1" -t -c "$BENCH/tmp/ab-side-comp.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side-comp.toml"; SIDE_COMP=1
-    else echo "  (this side has no response_compression: no comp rows)"; fi
+  if [ $COMP = 1 ]; then  # the compression site in the form this side loads (docs/design-compression.md 10)
+    local sfx
+    for sfx in "" -old; do
+      cat "$cfg" "$BENCH/tmp/ab-comp$sfx.toml" > "$BENCH/tmp/ab-side-comp.toml"
+      [ $SIDE_PROXY = 1 ] && cat "$BENCH/tmp/ab-comp-proxy$sfx.toml" >> "$BENCH/tmp/ab-side-comp.toml"
+      if "$1" -t -c "$BENCH/tmp/ab-side-comp.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side-comp.toml"; SIDE_COMP=1; echo "  (comp rows: ${sfx:-true}${sfx:+ form})"; break; fi
+    done
+    [ $SIDE_COMP = 1 ] || echo "  (this side has no response_compression: no comp rows)"
   fi
   (cd "$BENCH" && exec "$1" -c "$cfg") >>"$RAW/server.log" 2>&1 &
   PID=$!

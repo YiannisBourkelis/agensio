@@ -330,10 +330,10 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
         // request (design 7, the Heal the Breach mitigation: every answer, as Thruster and Django pad);
         // the compressed bytes replace it, with their exact length. A failure, or no gain, sends the
         // body as it came (the head has no coding line yet).
-        const auto* root = static_cast<const CompressionConfig*>(s.root_compression);
+        const auto* settings = static_cast<const CompressionConfig*>(s.site_compression);
         std::string& out = r.buffer;
         const unsigned padding = padding_length();
-        if (compress_buffered(coding, compress_answer::level_for(*root, coding), padding, res.body, out) && out.size() < res.body.size()) {
+        if (compress_buffered(coding, compress_answer::level_for(*settings, coding), padding, res.body, out) && out.size() < res.body.size()) {
             r.scratch.append("Content-Encoding: ").append(encoding_name(coding)).append("\r\nContent-Length: ");
             append_number(r.scratch, out.size());
             r.scratch.append("\r\n");

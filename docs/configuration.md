@@ -4004,41 +4004,86 @@ the whole feature in one place, with its edge cases.
 
 ## 20. Response compression: `response_compression`
 
-Off by default: agensio spends no CPU on compression unless a site asks. One key turns it on for
-a site, and the defaults behind it are right for a WordPress, Laravel, Drupal, Rails or Node site:
+Off unless asked: agensio spends no CPU on compression until the configuration says so. The key
+lives in two places with one name. The main file's `[response_compression]` table holds every
+site's defaults and the encoders' tuning. A site's own `response_compression` overrides the
+fields it names, and every field it leaves out comes from the main file. Every field applies at a
+reload.
+
+One site, with the defaults behind it, which are right for a WordPress, Laravel, Drupal, Rails or
+Node site:
 
 ```toml
+# sites.d/shop.example.toml
 [[site]]
 server_name = ["shop.example"]
 app = "wordpress"
-response_compression = "on"
+response_compression = true
 ```
 
-With it on, the site's answers go out compressed to a browser that takes it, whatever produced
-them: cached static files (copies made once, in memory, counted in `cache.max_size` with the
-file; a `.br` or `.gz` the site's build left beside a file is served as before and gets no copy),
-PHP, proxied and CGI answers, and agensio's own error pages, compressed as they are sent. The
-coding is the browser's choice among those agensio offers (`Accept-Encoding`, with its q-values):
-zstd, brotli and gzip are built in, so there is no module to add, and a browser that lacks one
-gets the next. What is compressed is decided by the media type (text of every kind, JavaScript,
-JSON, XML, SVG, fonts that are not compressed already, wasm; never images, video, audio or
-archives), judged without the type's parameters, so `application/json; charset=utf-8` is JSON;
-answers under 1 KB are left alone; a 206 is never compressed; `Vary: Accept-Encoding` goes on
-every answer that could have been compressed; an answer the application compressed itself passes
-through untouched; `Cache-Control: no-transform` from the application is honoured. Every answer
-compressed per request carries up to 32 bytes of random padding, so one page's compressed length
-differs from request to request (what an attacker measuring it would need constant; see BREACH
-below).
-
-The table form adds what a site may need; every field is optional:
+Every site of the host, with one that keeps it off:
 
 ```toml
-response_compression = { mode = "on",
-                         off = ["/my-account/", "/checkout/"],   # paths never compressed
-                         signed_in = "off",                      # answers behind the site's own password or address rule uncompressed (default)
-                         upstream = "pass",                      # "offload": agensio compresses instead of the application
-                         event_streams = false }                 # server-sent events uncompressed (default)
+# agensio.toml, the main file
+[response_compression]
+enabled = true
 ```
+
+```toml
+# sites.d/downloads.example.toml
+[[site]]
+server_name = ["downloads.example"]
+response_compression = false
+```
+
+With compression on, a site's answers go out compressed to a browser that takes it, whatever
+produced them: cached static files (copies made once, in memory, counted in `cache.max_size` with
+the file; a `.br` or `.gz` the site's build left beside a file is served as before and gets no
+copy), PHP, proxied and CGI answers, and agensio's own error pages, compressed as they are sent.
+The coding is the browser's choice among those the site offers (`Accept-Encoding`, with its
+q-values): zstd, brotli and gzip are built in, so there is no module to add, and a browser that
+lacks one gets the next. What is compressed is decided by the media type (text of every kind,
+JavaScript, JSON, XML, SVG, fonts that are not compressed already, wasm; never images, video,
+audio or archives), judged without the type's parameters, so `application/json; charset=utf-8`
+is JSON; answers under 1 KB are left alone; a 206 is never compressed; `Vary: Accept-Encoding`
+goes on every answer that could have been compressed; an answer the application compressed itself
+passes through untouched; `Cache-Control: no-transform` from the application is honoured. Every
+answer compressed per request carries up to 32 bytes of random padding, so one page's compressed
+length differs from request to request (what an attacker measuring it would need constant; see
+BREACH below).
+
+A site that needs more writes the table. In a site file it goes below its `[[site]]` as
+`[site.response_compression]`, or inside it on one line as `response_compression = { ... }`:
+
+```toml
+[[site]]
+server_name = ["store.example"]
+app = "wordpress"
+
+[site.response_compression]
+enabled = true
+exclude_paths = ["/my-account/", "/checkout/"]   # never compressed, whoever asks
+```
+
+Every key after `[site.response_compression]` belongs to that table until the next header, so
+the site's other keys go above it; the inline form has no such trap. A bare
+`[response_compression]` in a site file is refused: it would be the main file's table, every
+site's defaults.
+
+| field | main file | site | default | what it does |
+|---|---|---|---|---|
+| `enabled` | yes | yes | `false` | compression on or off; a site's `response_compression = true` or `false` says this alone |
+| `exclude_paths` | no | yes | `[]` | path prefixes never compressed (at most 32, `/`-rooted) |
+| `compress_signed_in` | yes | yes | `false` | compress the answers agensio knows to be a signed-in visitor's too (BREACH below) |
+| `compress_event_streams` | yes | yes | `false` | compress `text/event-stream`, each event flushed (from step 6) |
+| `offload` | yes | yes | `false` | keep `Accept-Encoding` from the application, so agensio compresses (from step 6) |
+| `codings` | yes | yes | `["zstd", "br", "gzip"]` | the codings offered and their order; a site's list replaces the main file's |
+| `levels` | yes | yes | `{ zstd = 3, br = 3, gzip = 5 }` | the levels of answers compressed per request; a site names the ones it changes |
+| `min_size` | yes | yes | `"1KB"` | smaller answers are not compressed |
+| `extra_types` | yes | yes | `[]` | media types beyond the built-in list; a site's are added to the main file's |
+
+`agensio -t --explain` prints the main file's table and, for every site, its values with the
+fields that are its own named in a comment, the rest marked as the main file's.
 
 **BREACH, and what agensio does about it.** A compressed page that holds a secret (a CSRF token,
 an account number) beside something the attacker got reflected into it leaks the secret, byte by
@@ -4055,59 +4100,73 @@ the same and adds two things no mainstream server does by default:
   attacker averaging the length pays with the square of the spread for every byte he guesses:
   hundreds of times the requests of an unpadded page. Rails' own proxy, Thruster, pads 32 bytes
   by default, Django's GZipMiddleware 100. It raises the attack's cost; it does not remove it.
-- *The three credentials agensio itself sees* leave an answer uncompressed with `signed_in =
-  "off"`, the default: a path under a `[[site.auth]]` password (verified, or let in by
-  `skip_for`), a request admitted by an address rule of `[[site.access]]` that refuses others (not
-  `"any"`, not `mode = "report"`),
-  and a browser-replayed `Authorization` (Basic, Digest, Negotiate, NTLM; a Bearer token is a
-  script's, never attached by the browser on its own, so a JSON API authenticated that way is
-  compressed). These are what the attacker's forged request carries without his doing. `signed_in
-  = "on"` compresses those answers too, for a site whose protected pages reflect no input.
+- *The three credentials agensio itself sees* leave an answer uncompressed while
+  `compress_signed_in` is `false`, the default: a path under a `[[site.auth]]` password
+  (verified, or let in by `skip_for`), a request admitted by an address rule of `[[site.access]]`
+  that refuses others (not `"any"`, not `mode = "report"`), and a browser-replayed `Authorization`
+  (Basic, Digest, Negotiate, NTLM; a Bearer token is a script's, never attached by the browser on
+  its own, so a JSON API authenticated that way is compressed). These are what the attacker's
+  forged request carries without his doing. `compress_signed_in = true` compresses those answers
+  too, for a site whose protected pages reflect no input.
 
 An application's own login, its session cookie, is invisible to the server, as to every server:
 agensio does not read cookies to decide (a design that counted the presets' cookie names was
 dropped on 2026-10-31: Laravel, Rails and Symfony give every anonymous visitor a session, so it
-switched compression off for most of those sites, silently). `off` names the paths that stay
-uncompressed whatever the visitor: on a Laravel or plain PHP site, the pages where a form token
-sits beside what a visitor typed (an account page, a checkout, a search with its form). The
+switched compression off for most of those sites, silently). `exclude_paths` names the paths that
+stay uncompressed whatever the visitor: on a Laravel or plain PHP site, the pages where a form
+token sits beside what a visitor typed (an account page, a checkout, a search with its form). The
 application can always opt an answer out with `Cache-Control: no-transform`.
 
-`upstream = "offload"` keeps the browser's `Accept-Encoding` from the application, so an
+`offload = true` will keep the browser's `Accept-Encoding` from the application, so an
 application that would compress itself (Next.js, Ghost, Grafana, a PHP site with
 `zlib.output_compression` on) sends plain answers and agensio compresses them, padded: the way a
-gzip-only application's visitors get zstd or brotli. `event_streams = true` compresses
-`text/event-stream` answers too, each event flushed as it comes; off by default, since a stream
-holds its compressor for its whole life.
+gzip-only application's visitors get zstd or brotli. `compress_event_streams = true` will
+compress `text/event-stream` answers, each event flushed as it comes; off by default, since a
+stream holds its compressor for its whole life. Both are accepted now and act from step 6 of
+`docs/design-compression.md` 11, which compresses streamed answers: until then an event stream
+goes uncompressed either way, and keeping `Accept-Encoding` back would leave an application's
+large answers uncompressed where it compressed them before. Meanwhile an application's own switch
+hands the work to agensio: Next.js with `compress: false`, Ghost with `compress: false`, Grafana
+with `enable_gzip = false`.
 
-Root's table tunes what every site shares; it is read at start, so a change needs a restart:
+The tuning applies to every site that compresses, and a site may set its own:
 
 ```toml
 [response_compression]
-codings   = ["zstd", "br", "gzip"]          # offered; the order decides when the browser accepts several equally
-levels    = { zstd = 3, br = 3, gzip = 5 }  # for answers compressed per request
-min_size  = 1024                            # bytes; smaller answers go uncompressed
-types_add = ["application/vnd.api+json"]    # media types beyond the built-in list
+codings     = ["zstd", "br", "gzip"]          # offered; the order decides when the browser accepts several equally
+levels      = { zstd = 3, br = 3, gzip = 5 }  # for answers compressed per request
+min_size    = "1KB"                           # smaller answers go uncompressed
+extra_types = ["application/x-ndjson"]        # media types beyond the built-in list (every +json and +xml is in it)
 ```
 
 The order matters only when a browser takes several codings equally, which Chrome and Firefox
 do (`gzip, deflate, br, zstd`). zstd first is the default because it costs a quarter of brotli's
 CPU for 1 to 8 % more bytes on HTML and 83 % of browsers take it; brotli serves the rest. A site
-behind Cloudflare, CloudFront or Fastly does better with `["br", "zstd", "gzip"]`: those ask the
-origin for brotli and pass it on to visitors, and ignore an origin's zstd. The levels are for
-answers compressed per request (measured on real pages, `bench/results/compression-levels-20261030.md`:
+behind Cloudflare, CloudFront or Fastly does better with `codings = ["br", "zstd", "gzip"]` of
+its own: those ask the origin for brotli and pass it on to visitors, and ignore an origin's zstd.
+A site's `codings` also decides the copies of its cached files: brotli and gzip copies of the ones
+it lists (no zstd copy is made: brotli 11 is smaller, and every browser that takes zstd takes
+brotli), the `.br` and `.gz` files beside its files likewise when the list is written (in the main
+file or on the site: the default list leaves out what the build cannot produce, not what the site's
+build left on disk), and between those two brotli wins a tie whatever the order, since both are made
+once at their best level. The levels are for answers
+compressed per request (measured on real pages, `bench/results/compression-levels-20261030.md`:
 zstd 3 within 2 % of gzip 6's size at eight times its speed; brotli 3 within 2 % of zstd 3's bytes
 at a third of its speed, brotli 4 five to seven per cent smaller on HTML at 1.5 to 1.8 times
 brotli 3's cost; gzip 5 gzip 6's size at 0.6 of its cost, gzip 1 seven to seventeen per cent larger
 at half of gzip 5's). A buffered answer up to 256 KB is compressed whole on the worker (a CMS home
-page is 70 to 82 KB; at 256 KB zstd 3 holds the worker 0.35 ms, gzip 5 2 ms); a larger one goes out
-uncompressed until the streamed path compresses it in pieces. The copies of cached files are made once at brotli 11 and gzip 9,
-which is not a setting, and the encoders' windows are fixed for the memory each stream takes. A
-coding the build lacks (`libzstd`, `libbrotli` missing at build time) is refused by `agensio -t`,
-naming the package.
+page is 70 to 82 KB; at 256 KB zstd 3 holds the worker 0.35 ms, gzip 5 2 ms); a larger one goes
+out uncompressed until the streamed path compresses it in pieces. The copies of cached files are
+made once at brotli 11 and gzip 9, which is not a setting, and the encoders' windows are fixed for
+the memory each stream takes. A coding the build lacks (`libzstd`, `libbrotli` missing at build
+time) is refused by `agensio -t` when a list names it, naming the package; the default list holds
+the codings the build has.
 
-To see what a path gets and why: `agensio ctl path-check shop.example / --accept-encoding 'gzip,
-br' --visitor signed_in` names the coding, or the one reason none applies (the type, the size,
-the status, a credential the guard counts, an answer already compressed, `no-transform`, an `off`
-path, the mode, the budget). From outside, `curl -sS -o /dev/null -D - -H 'Accept-Encoding: zstd, br, gzip'
-https://shop.example/` shows `Content-Encoding` and `Vary`. The design, with the research behind
-every default, is `docs/design-compression.md`.
+A change to any of these applies at a reload. A reload gives every reloaded site new cache
+entries, so the copies of its files are made again under the new values; a site held back at a
+reload (its file did not load, section 12c) keeps its last good version, compression included.
+
+To check from outside, `curl -sS -o /dev/null -D - -H 'Accept-Encoding: zstd, br, gzip'
+https://shop.example/` shows `Content-Encoding` and `Vary`. `path_check` will name the coding a
+path gets, or the one reason none applies, with step 7 of `docs/design-compression.md` 11. The
+design, with the research behind every default, is `docs/design-compression.md`.
