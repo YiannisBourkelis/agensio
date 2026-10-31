@@ -4025,41 +4025,59 @@ JSON, XML, SVG, fonts that are not compressed already, wasm; never images, video
 archives), judged without the type's parameters, so `application/json; charset=utf-8` is JSON;
 answers under 1 KB are left alone; a 206 is never compressed; `Vary: Accept-Encoding` goes on
 every answer that could have been compressed; an answer the application compressed itself passes
-through untouched; `Cache-Control: no-transform` from the application is honoured.
+through untouched; `Cache-Control: no-transform` from the application is honoured. Every answer
+compressed per request carries up to 32 bytes of random padding, so one page's compressed length
+differs from request to request (what an attacker measuring it would need constant; see BREACH
+below).
 
 The table form adds what a site may need; every field is optional:
 
 ```toml
 response_compression = { mode = "on",
                          off = ["/my-account/", "/checkout/"],   # paths never compressed
-                         signed_in = "off",                      # signed-in visitors' pages uncompressed (default)
-                         session_cookies = ["shop_sid"],         # the site's own login cookies, beside the preset's
+                         signed_in = "off",                      # answers behind the site's own password or address rule uncompressed (default)
                          upstream = "pass",                      # "offload": agensio compresses instead of the application
                          event_streams = false }                 # server-sent events uncompressed (default)
 ```
 
-`signed_in = "off"`, the default, is the guard against BREACH: a compressed page that holds a
-secret (a CSRF token, an account number) beside something the attacker got reflected into it
-leaks the secret, byte by byte, to an attacker who can make the visitor's browser request the
-page over and over, which needs the visitor's own login. Static files and anonymous pages hold no
-secret of that kind, so they are safe to compress; a signed-in visitor's pages are where the
-three conditions can meet. A visitor is signed in when the request carries the application's
-login cookie (the preset knows WordPress's `wordpress_logged_in_*`, Laravel's `laravel_session`,
-Drupal's `SESS*`; `session_cookies` adds a site's own), a password the browser sends on its own
-(Basic, Digest), a `[[site.auth]]` password, or an address rule of `[[site.access]]`. `signed_in =
-"on"` compresses those pages too; it is the user's own decision, taken for a framework that masks
-its tokens per answer (Django, Rails) and pages that reflect no input, and it adds up to 32
-random bytes to each compressed answer. `off` names the paths that stay uncompressed whatever the
-visitor: the account and checkout pages of a shop. The application can always opt an answer out
-with `Cache-Control: no-transform`.
+**BREACH, and what agensio does about it.** A compressed page that holds a secret (a CSRF token,
+an account number) beside something the attacker got reflected into it leaks the secret, byte by
+byte, to an attacker who can make the visitor's browser request the page over and over with the
+visitor's own credentials. Static files and anonymous pages hold no secret of that kind, so they
+are safe to compress. Every web server compresses for every visitor and leaves the rest to the
+application (nginx, Apache, lighttpd, Caddy, h2o, LiteSpeed, IIS and the CDNs alike), and the
+frameworks answer on their side: Django and Rails mask their CSRF tokens per answer, so a compressed
+page leaks nothing useful; Laravel does not, and WordPress's nonces were not examined. agensio does
+the same and adds two things no mainstream server does by default:
+
+- *Random padding on every answer compressed per request*: up to 32 bytes, in a place every
+  decoder skips (gzip's extra field, a zstd skippable frame, a brotli metadata block). An
+  attacker averaging the length pays with the square of the spread for every byte he guesses:
+  hundreds of times the requests of an unpadded page. Rails' own proxy, Thruster, pads 32 bytes
+  by default, Django's GZipMiddleware 100. It raises the attack's cost; it does not remove it.
+- *The three credentials agensio itself sees* leave an answer uncompressed with `signed_in =
+  "off"`, the default: a path under a `[[site.auth]]` password (verified, or let in by
+  `skip_for`), a request admitted by an address rule of `[[site.access]]` that refuses others (not
+  `"any"`, not `mode = "report"`),
+  and a browser-replayed `Authorization` (Basic, Digest, Negotiate, NTLM; a Bearer token is a
+  script's, never attached by the browser on its own, so a JSON API authenticated that way is
+  compressed). These are what the attacker's forged request carries without his doing. `signed_in
+  = "on"` compresses those answers too, for a site whose protected pages reflect no input.
+
+An application's own login, its session cookie, is invisible to the server, as to every server:
+agensio does not read cookies to decide (a design that counted the presets' cookie names was
+dropped on 2026-10-31: Laravel, Rails and Symfony give every anonymous visitor a session, so it
+switched compression off for most of those sites, silently). `off` names the paths that stay
+uncompressed whatever the visitor: on a Laravel or plain PHP site, the pages where a form token
+sits beside what a visitor typed (an account page, a checkout, a search with its form). The
+application can always opt an answer out with `Cache-Control: no-transform`.
 
 `upstream = "offload"` keeps the browser's `Accept-Encoding` from the application, so an
 application that would compress itself (Next.js, Ghost, Grafana, a PHP site with
-`zlib.output_compression` on) sends plain answers and agensio compresses them: the way a
-gzip-only application's visitors get zstd or brotli, and the only way the `signed_in` guard can
-protect a PHP site whose own zlib layer would compress its logged-in pages first. `event_streams =
-true` compresses `text/event-stream` answers too, each event flushed as it comes; off by default,
-since a stream holds its compressor for its whole life.
+`zlib.output_compression` on) sends plain answers and agensio compresses them, padded: the way a
+gzip-only application's visitors get zstd or brotli. `event_streams = true` compresses
+`text/event-stream` answers too, each event flushed as it comes; off by default, since a stream
+holds its compressor for its whole life.
 
 Root's table tunes what every site shares; it is read at start, so a change needs a restart:
 
@@ -4089,7 +4107,7 @@ naming the package.
 
 To see what a path gets and why: `agensio ctl path-check shop.example / --accept-encoding 'gzip,
 br' --visitor signed_in` names the coding, or the one reason none applies (the type, the size,
-the status, a signed-in visitor, an answer already compressed, `no-transform`, an `off` path, the
-mode, the budget). From outside, `curl -sS -o /dev/null -D - -H 'Accept-Encoding: zstd, br, gzip'
+the status, a credential the guard counts, an answer already compressed, `no-transform`, an `off`
+path, the mode, the budget). From outside, `curl -sS -o /dev/null -D - -H 'Accept-Encoding: zstd, br, gzip'
 https://shop.example/` shows `Content-Encoding` and `Vary`. The design, with the research behind
 every default, is `docs/design-compression.md`.

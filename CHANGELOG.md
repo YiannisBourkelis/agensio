@@ -4,7 +4,7 @@
 
 - **Response compression, step 1 of `docs/design-compression.md`: the keys and the chooser.** The
   site key `response_compression` (`"on"` | `"off"`, off by default, or the table with `mode`,
-  `off` paths, `signed_in`, `session_cookies`, `upstream`, `event_streams`) and root's
+  `off` paths, `signed_in`, `upstream`, `event_streams`) and root's
   `[response_compression]` (`codings`, `levels`, `min_size`, `types_add`) load, are refused with
   the reason when wrong, have their reference rows (`docs/configuration.md` 20, `docs/keys.md`)
   and a cookbook recipe. `choose_encoding` knows zstd and takes the configured order on a tie;
@@ -142,6 +142,48 @@
   noise, proxy /json 1.005.
 ## 0.1.0-alpha.117 (2026-10-26)
 
+- **Step 5: the BREACH guard on what agensio itself knows, and the padding on every answer.**
+  The design counted a visitor signed in by the application's session cookie (a per-preset table
+  plus `session_cookies`). Checked against the beds it broke: Laravel gives every anonymous
+  visitor `laravel-session` and `XSRF-TOKEN` on the first page, Rails and Symfony start guest
+  sessions too, so the guard would have switched compression off for every returning visitor of
+  those sites, silently. No other server reads cookies to decide (nginx, Apache, lighttpd, Caddy,
+  h2o, LiteSpeed, IIS, HAProxy, Envoy, Traefik and the CDNs compress for everyone; the frameworks
+  mask their tokens, Django and Rails do, Laravel does not), so agensio compresses an application's
+  pages for every visitor too, and does two things none of them does by default
+  (`docs/design-compression.md` 7, decision 9, 2026-10-31). Every answer compressed per request
+  carries a random padding of up to 32 bytes (24 before, behind `signed_in = "on"`; what protects
+  is the spread of the random part, and Rails' Thruster pads 32 by default, Django 100), in the
+  place every decoder skips, so a page's compressed length differs from request to request. And
+  `signed_in = "off"`, the default, leaves uncompressed the answers agensio itself knows to be a
+  signed-in visitor's: a path under a `[[site.auth]]` password (verified or let in by `skip_for`),
+  a request an address rule of `[[site.access]]` admitted that refuses others (not `any`, not
+  report mode; the dispatcher records the admission, `Stream::access_admitted`), and a browser-replayed `Authorization`
+  (Basic, Digest, Negotiate, NTLM; a Bearer token is a script's and is compressed); no `Vary` on
+  such an answer. `signed_in = "on"` compresses those too; it needs no confirmation dialog now,
+  and the health finding about unmasked frameworks is not built. `session_cookies` is gone from
+  the key, the reference, the guide and the recipe; the guide's section 20 says what BREACH
+  needs, what every server does, and that on a Laravel or plain PHP site the `off` paths are for
+  the pages where a form token sits beside typed input. The suite's block pads every answer of
+  the page (six zstd fetches, at least two lengths; the committed binary answers six equal ones),
+  and checks the guard: a Basic credential identity without `Vary`, a Bearer token and an
+  application's login cookie compressed, an address rule's admission identity and a subtree
+  reopened with `any` compressed, the site's own password through `skip_for` identity (where the
+  build has authentication), the Basic case compressed with `signed_in = "on"`.
+- **The heap's thresholds set at start: no page faults per brotli answer.** Found while gating
+  step 5: the A/B's brotli row (the 32 KB page for a client taking brotli alone) went from 114 to
+  151 µs per request, while the padding costs nothing in a hot loop and zstd's and gzip's rows
+  paid nothing for theirs. By hand both binaries cost 150 µs and 84 page faults per answer; the
+  A/B's base side had been lucky. The brotli encoder is created and destroyed per answer (zstd's
+  and gzip's contexts live per thread) and allocates six blocks of 7 KB to 540 KB; glibc maps a
+  block above its mmap threshold from the kernel and unmaps it at free, so each answer faults the
+  pages in again, zeroed, and its dynamic threshold, raised to the size of each mapped block freed,
+  keeps mapping a block that recurs at exactly that size. `Server::run` now sets `M_MMAP_THRESHOLD`
+  to 2 MB and `M_TRIM_THRESHOLD` to 8 MB (glibc, not under a sanitizer): memory freed and
+  allocated again between two answers stays mapped, and the worker's `malloc_trim(0)` after sheds
+  and closes still returns everything when connections go idle. Measured
+  (`bench/results/brotli-faults-20261031.md`, `bench/compression/brotli-row.sh`): the brotli row
+  150 to 113.5 µs and 84 to 0 faults per request, zstd and gzip unchanged.
 - **An HTTP/3 attempt refused at the connection ceiling counts once** (the alpha.116 report). A
   ClientHello with a post-quantum key share, as curl and the browsers send, takes two Initial
   packets, and each was counted, so `connections_refused` read HTTP/3 refusals about double. Each

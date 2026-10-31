@@ -38,12 +38,15 @@ bool compress_whole(Encoding e, int level, std::string_view in, std::vector<char
 inline constexpr int kZstdWindowLog = 19;
 inline constexpr int kBrotliWindowBits = 18;
 
-// The padding behind `signed_in = "on"` (docs/design-compression.md 7): up to kPaddingMax bytes the
-// coding carries where every decoder skips them (gzip's FEXTRA field, RFC 1952 2.3.1.1; a zstd
-// skippable frame, RFC 8878 3.1.2; a brotli metadata meta-block, RFC 7932 9.2), so one answer's
-// length differs from request to request; with the coding's own framing at most 32 bytes. A length
-// of 0 adds nothing. padding_length() draws one from the calling thread's generator.
-inline constexpr unsigned kPaddingMax = 24;
+// The padding of every answer compressed per request (docs/design-compression.md 7): up to kPaddingMax
+// bytes the coding carries where every decoder skips them (gzip's FEXTRA field, RFC 1952 2.3.1.1; a
+// zstd skippable frame, RFC 8878 3.1.2; a brotli metadata meta-block, RFC 7932 9.2), so one answer's
+// length differs from request to request and an attacker measuring it pays for every sample (the
+// Heal the Breach mitigation; Rails' Thruster pads up to 32 bytes by default, Django up to 100).
+// What protects is the spread of the random part, so the bound is the padding's own, 32, and the
+// coding's framing (6 bytes for gzip, 8 for zstd, up to 4 for brotli) comes on top. A length of 0
+// adds nothing. padding_length() draws one from the calling thread's generator.
+inline constexpr unsigned kPaddingMax = 32;
 unsigned padding_length() noexcept;
 
 // A gzip encoder kept by a worker for the answers it compresses per request (docs/design-compression.md

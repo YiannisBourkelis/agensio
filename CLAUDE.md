@@ -1241,6 +1241,14 @@ kevent; nginx knows from the kqueue event that nothing is readable. asio cannot 
 without patching the reactor (`socket.async_wait` re-registers the filter instead, same
 cost). Accepted.
 
+glibc's heap thresholds (2026-10-31, `tune_heap` in `server.cpp`, `bench/results/brotli-faults-20261031.md`):
+a block allocated and freed per answer at or above the dynamic mmap threshold is mapped from the
+kernel and unmapped every time, so every answer faults its pages in again (brotli's per-answer
+encoder: 84 faults and 36 µs on a 33 KB page, and which side of an A/B pays depends on the
+process's heap history). `M_MMAP_THRESHOLD` 2 MB and `M_TRIM_THRESHOLD` 8 MB at start; the idle
+`malloc_trim(0)` keeps idle memory where it was. When an A/B row moves without a reason in the
+code, read `/proc/<pid>/stat`'s minor faults per request (`bench/compression/brotli-row.sh` does).
+
 Things measured with no effect (do not retry without new evidence): cache hit-path
 refcount and `last_access` traffic (under 2 %), `SSL_MODE_RELEASE_BUFFERS`, streaming
 chunk size, memory-BIO reads.

@@ -82,6 +82,7 @@ bool Dispatcher::admit(Stream& s, const SiteConfig& site, std::string_view path,
         return *addr;
     };
     const access::Decision d = access::decide(site, path, address, ws.access_scratch);
+    if (d.admitted) s.access_admitted = true;  // an address unlocked the answer (compression's guard, design-compression 7)
     if (!d.rule) return true;
     const std::string text = address().to_string();
     if (log_ && log_->enabled(LogLevel::warn)) {

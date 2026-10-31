@@ -138,6 +138,11 @@ inline bool script_of(const SiteConfig& site, std::string_view path, std::string
 
 struct Decision {
     const AccessRule* rule = nullptr;  // the rule that refuses (or, in report mode, would), null when none does
+    // A rule that refuses others covered a reading and admitted the client: the answer is one the
+    // client's address unlocks, which response compression counts as a credential
+    // (docs/design-compression.md 7). False when no rule covers the path, the covering rule is `any`,
+    // or it is in report mode, which refuses nobody: that answer is anyone's.
+    bool admitted = false;
     bool refuse() const noexcept { return rule && !rule->report; }
 };
 
@@ -151,7 +156,11 @@ Decision decide(const SiteConfig& site, std::string_view path, Address&& address
     auto judge = [&](std::string_view p) {
         if (d.refuse()) return;
         const AccessRule* r = rule_for(site, p);
-        if (!r || r->any || admits(*r, address())) return;
+        if (!r || r->any) return;
+        if (admits(*r, address())) {
+            if (!r->report) d.admitted = true;
+            return;
+        }
         if (!d.rule || !r->report) d.rule = r;
     };
     auto judge_all = [&](std::string_view p) {

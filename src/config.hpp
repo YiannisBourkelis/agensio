@@ -312,18 +312,19 @@ struct SiteConfig {
     std::optional<bool> response_headers_baseline;
     // response_compression (docs/design-compression.md 3): off by default, no CPU unless the site asks.
     // `on` covers the cached files' copies made once and the answers compressed per request; `off`
-    // paths are never compressed; signed_in says whether a signed-in visitor's answers are (the
-    // BREACH guard, section 7: "off" unless the user decided); session_cookies mark a visitor
-    // signed in beside the preset's; upstream = "offload" keeps Accept-Encoding from the application;
-    // event_streams compresses text/event-stream. Read at routing only when `on`: a site without the
-    // key pays nothing (the one test is `compression.on`).
+    // paths are never compressed; signed_in says whether an answer agensio itself knows to be a
+    // signed-in visitor's (a [[site.auth]] path, an address rule's admission, a browser-replayed
+    // Authorization) is compressed (the BREACH guard, section 7: "off" by default; an application's
+    // own login is invisible to the server, as to every server, and every compressed answer is padded);
+    // upstream = "offload" keeps Accept-Encoding from the application; event_streams compresses
+    // text/event-stream. Read at routing only when `on`: a site without the key pays nothing (the one
+    // test is `compression.on`).
     struct Compression {
         bool on = false;
         bool signed_in = false;
         bool offload = false;
         bool event_streams = false;
-        std::vector<std::string> off_paths;        // "/"-rooted prefixes, at most 32
-        std::vector<std::string> session_cookies;  // names, at most 16
+        std::vector<std::string> off_paths;  // "/"-rooted prefixes, at most 32
     } compression;
     // The codings this site offers in root's order (Config::compression.codings), built at load
     // for the one choose_encoding call of a request's routing; empty when compression is off.

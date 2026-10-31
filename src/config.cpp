@@ -2389,8 +2389,7 @@ Codings codings_of(const std::vector<std::string>& names) {
 
 // response_compression (docs/design-compression.md 3): the string form "on" | "off", or the table
 // with mode and its optional fields. A path in `off` is "/"-rooted and plain (the login_paths
-// rule); a cookie name is a token, "*" at the end a prefix. Nothing here reads a library: whether
-// the build has a coding is the root table's business.
+// rule). Nothing here reads a library: whether the build has a coding is the root table's business.
 void parse_response_compression(const toml::table& t, SiteConfig& site, const std::string& where) {
     if (!t.contains("response_compression")) return;
     const std::string w = where + ".response_compression";
@@ -2424,17 +2423,6 @@ void parse_response_compression(const toml::table& t, SiteConfig& site, const st
         if (c.off_paths.size() > 32) fail(w + ".off: at most 32 paths");
         for (const std::string& p : c.off_paths)
             if (const std::string why = check_login_path(p); !why.empty()) fail(w + ".off: " + why);
-    }
-    if (tt->contains("session_cookies")) {
-        c.session_cookies = string_list((*tt)["session_cookies"], (w + ".session_cookies").c_str());
-        if (c.session_cookies.size() > 16) fail(w + ".session_cookies: at most 16 names");
-        for (const std::string& n : c.session_cookies) {
-            if (n.empty() || n.size() > 64) fail(w + ".session_cookies: a name is 1 to 64 characters");
-            for (const char ch : n)
-                if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-' || ch == '.' || ch == '*'))
-                    fail(w + ".session_cookies: \"" + n + "\" is not a cookie name (letters, digits, _ - . and a trailing *)");
-            if (const auto star = n.find('*'); star != std::string::npos && star != n.size() - 1) fail(w + ".session_cookies: \"" + n + "\": * only at the end");
-        }
     }
 }
 

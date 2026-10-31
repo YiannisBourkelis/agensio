@@ -282,6 +282,23 @@ static void trim_heap() noexcept {
     malloc_trim(0);
 #endif
 }
+// The heap's thresholds, once at start. glibc maps a block above M_MMAP_THRESHOLD from the kernel
+// and unmaps it at free, so the next allocation of that size faults every page in again, zeroed;
+// it raises the threshold to the size of each mapped block it frees, and a block that recurs at
+// exactly that size is mapped every time (the test is >=), so which blocks of a process pay depends
+// on its history. The brotli encoder made per answer (compress.cpp) allocates six blocks of 7 KB
+// to 540 KB (the hasher's 256 KB among them) and paid 84 page faults and 36 us on every 33 KB page
+// (150 against 114 us per request); the A/B of 2026-10-31 saw the base at 114 and the new side at
+// 151 on the same encoder code, the padding having shifted the heap's layout
+// (bench/results/brotli-faults-20261031.md). Blocks under 2 MB come from the heap now and its top
+// is given back only above 8 MB of free space (the automatic trim at free); trim_heap() still
+// returns everything when a worker's connections go idle or close, so idle memory is what it was.
+static void tune_heap() noexcept {
+#if defined(__GLIBC__) && !defined(AGENSIO_ASAN)
+    mallopt(M_MMAP_THRESHOLD, 2 * 1024 * 1024);
+    mallopt(M_TRIM_THRESHOLD, 8 * 1024 * 1024);
+#endif
+}
 
 void Server::arm_flush(Worker& w) {
     w.flush_timer.expires_after(std::chrono::seconds(1));
@@ -1501,6 +1518,7 @@ void Server::run() {
     // descriptor directly; on Linux those raised SIGPIPE under load.
     std::signal(SIGPIPE, SIG_IGN);
 #endif
+    tune_heap();
     if (reuse_port_) {
         for (const auto& l : gen_->listeners)
             for (auto& w : workers_)

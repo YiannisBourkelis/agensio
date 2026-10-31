@@ -109,6 +109,11 @@ struct Stream {
     // tuning (min_size, levels), for the decision an upstream answer takes (handlers/compress_answer.hpp).
     const void* site_compression = nullptr;  // const SiteConfig::Compression*, untyped as conn.site is
     const void* root_compression = nullptr;  // const CompressionConfig*
+    // An address rule of [[site.access]] that refuses others admitted this request (Dispatcher::admit;
+    // not `any`, not report mode):
+    // the answer is one the client's network position unlocks, so the compression guard counts the
+    // visitor as signed in (docs/design-compression.md 7). Set on any hop, never cleared within a request.
+    bool access_admitted = false;
 
     void reset() {
         request.reset();
@@ -120,6 +125,7 @@ struct Stream {
         header_ending = nullptr;
         coding = 0;
         site_compression = root_compression = nullptr;
+        access_admitted = false;
     }
 };
 

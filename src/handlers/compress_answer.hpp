@@ -25,6 +25,7 @@ enum class Reason : std::uint8_t {
     already_encoded,  // the application sent a Content-Encoding
     no_transform,     // Cache-Control: no-transform, in the request or the answer
     path_off,         // under one of the site's `off` paths
+    signed_in,        // the request carried a credential agensio itself knows (design 7) and signed_in = "off"
     event_stream,     // text/event-stream without event_streams = true
     streamed,         // a streamed answer: compressed in pieces from step 6 on, identity until then
     large,            // a buffered answer above kWholeMax: in pieces from step 6 on, identity with Vary until then
@@ -42,6 +43,7 @@ inline std::string_view reason_name(Reason r) noexcept {
         case Reason::already_encoded: return "already_encoded";
         case Reason::no_transform: return "no_transform";
         case Reason::path_off: return "path_off";
+        case Reason::signed_in: return "signed_in";
         case Reason::event_stream: return "event_stream";
         case Reason::streamed: return "streamed";
         case Reason::large: return "large";
@@ -115,6 +117,24 @@ inline bool under_off_path(std::string_view target, const std::vector<std::strin
     return false;
 }
 
+// An Authorization field whose scheme a browser replays on its own on a request another site's page
+// made it send (RFC 9110 11.6.2's HTTP authentication, cached per realm: Basic, Digest, Negotiate,
+// NTLM), the credential BREACH needs (docs/design-compression.md 7). A Bearer token is a script's,
+// never attached by the browser itself, so a JSON API authenticated that way is compressed.
+inline bool browser_credential(std::string_view authorization) noexcept {
+    const std::size_t sp = authorization.find(' ');
+    const std::string_view scheme = sp == std::string_view::npos ? authorization : authorization.substr(0, sp);
+    return Headers::iequals(scheme, "basic") || Headers::iequals(scheme, "digest") || Headers::iequals(scheme, "negotiate") ||
+           Headers::iequals(scheme, "ntlm");
+}
+
+// The visitor is signed in by what agensio itself knows (design 7): a path its own [[site.auth]]
+// protects (verified, or let in by skip_for), admission by an address rule of [[site.access]], or a
+// credential the browser replays. An application's own login is invisible here, as to every server.
+inline bool signed_in_visitor(const Stream& s) noexcept {
+    return s.auth.protected_path || s.access_admitted || browser_credential(s.request.headers.get("authorization"));
+}
+
 // Media types beyond the built-in list (root's types_add, lower-case, no parameters).
 inline bool added_type(std::string_view content_type, const std::vector<std::string>& types) noexcept {
     if (types.empty()) return false;
@@ -147,6 +167,7 @@ inline Reason decide(const Stream& s, const Answer& a) noexcept {
     if (!compressible_type(a.content_type) && !added_type(a.content_type, root->types_add)) return Reason::type;
     if (has_no_transform(a.cache_control) || has_no_transform(s.request.headers.get("cache-control"))) return Reason::no_transform;
     if (!site->off_paths.empty() && under_off_path(s.request.target, site->off_paths)) return Reason::path_off;
+    if (!site->signed_in && signed_in_visitor(s)) return Reason::signed_in;
     if (a.head) return Reason::head;  // before the size: a HEAD answer has no body to measure
     if (a.streamed) return Reason::streamed;
     if (a.body_size < root->min_size) return Reason::size;

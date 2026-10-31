@@ -395,8 +395,8 @@ Off by default: agensio spends no CPU on compression unless a site asks. One key
 and the defaults are right for a WordPress, Laravel, Drupal, Rails or Node site: zstd, brotli
 and gzip are built in (no module to add), the browser's `Accept-Encoding` chooses among them,
 text, JavaScript, JSON, XML, SVG and fonts are compressed and images, video and archives never
-are, answers under 1 KB are left alone, and a visitor who is signed in gets uncompressed pages
-unless the user decides otherwise (the guard against BREACH, `docs/configuration.md` 20).
+are, answers under 1 KB are left alone, and every answer compressed per request carries a few
+random bytes of padding against BREACH (`docs/configuration.md` 20).
 
 ```toml
 [[site]]
@@ -409,7 +409,8 @@ tls = { cert = "/etc/letsencrypt/live/shop.example/fullchain.pem", key = "/etc/l
 response_compression = "on"
 ```
 
-A shop keeps its account and checkout pages out, and names the cookie its plugin sets at login:
+A shop keeps its account and checkout pages out: the pages where a form token sits beside what
+the visitor typed, which is what BREACH needs (`docs/configuration.md` 20):
 
 ```toml
 [[site]]
@@ -419,7 +420,7 @@ app = "wordpress"
 root = "/var/www/store.example"
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
 tls = { cert = "/etc/letsencrypt/live/store.example/fullchain.pem", key = "/etc/letsencrypt/live/store.example/privkey.pem" }
-response_compression = { mode = "on", off = ["/my-account/", "/checkout/"], session_cookies = ["store_sid"] }
+response_compression = { mode = "on", off = ["/my-account/", "/checkout/"] }
 ```
 
 An application that compresses its own answers (Next.js, Ghost, Grafana) is passed through as it
@@ -454,9 +455,8 @@ curl -sS -o /dev/null -D - -H 'Accept-Encoding: zstd, br, gzip' https://shop.exa
 curl -sS --compressed https://shop.example/ | head -c 200
 ```
 
-**MCP:** `site_update` takes the same fields; `signed_in = "on"` needs the user's confirmation in
-person, as the design says; `path_check` names the coding a path gets, or the one reason none
-applies (steps 5 and 7 of `docs/design-compression.md` 11; until then the TOML above).
+**MCP:** `site_update` takes the same fields, and `path_check` names the coding a path gets, or
+the one reason none applies (step 7 of `docs/design-compression.md` 11; until then the TOML above).
 
 ## The file cache for a site with many large files
 

@@ -627,6 +627,38 @@ static void test_compress_answer() {
     s.request.target = "/checkouts";
     CHECK(decide(s, a) == Reason::compress);  // a prefix must end at a segment
     s.request.target = "/page";
+    // The guard (docs/design-compression.md 7): the three credentials agensio itself sees mark the
+    // visitor signed in and leave the answer uncompressed with signed_in = "off": a path its own
+    // [[site.auth]] protects, admission by an address rule of [[site.access]], an Authorization the
+    // browser replays on its own (Basic, Digest, Negotiate, NTLM; a Bearer token is a script's).
+    // An application's cookie is not looked at (decision 9). signed_in = "on" compresses them too.
+    s.auth.protected_path = true;
+    CHECK(decide(s, a) == Reason::signed_in);
+    a.head = true;
+    CHECK(decide(s, a) == Reason::signed_in);  // before head: the HEAD of a signed-in visitor names the coding of nothing
+    a.head = false;
+    site.signed_in = true;
+    CHECK(decide(s, a) == Reason::compress);
+    site.signed_in = false;
+    s.auth.protected_path = false;
+    s.access_admitted = true;
+    CHECK(decide(s, a) == Reason::signed_in);
+    s.access_admitted = false;
+    s.request.headers.add("authorization", "Basic YW5uYTpzZWNyZXQ=");
+    CHECK(decide(s, a) == Reason::signed_in);
+    s.request.headers.clear();
+    s.request.headers.add("Authorization", "DIGEST username=\"anna\", realm=\"x\"");
+    CHECK(decide(s, a) == Reason::signed_in);
+    s.request.headers.clear();
+    s.request.headers.add("authorization", "Bearer eyJhbGciOiJIUzI1NiJ9.e30.x");
+    CHECK(decide(s, a) == Reason::compress);
+    s.request.headers.clear();
+    s.request.headers.add("cookie", "wordpress_logged_in_abc=1; laravel_session=x");
+    CHECK(decide(s, a) == Reason::compress);  // an application's login is invisible here, as to every server
+    s.request.headers.clear();
+    CHECK(browser_credential("Basic x") && browser_credential("negotiate x") && browser_credential("NTLM x") && browser_credential("Digest") &&
+          !browser_credential("Bearer x") && !browser_credential("Basicx y") && !browser_credential(""));
+    CHECK(reason_name(Reason::signed_in) == "signed_in");
     a.content_type = "text/event-stream";
     CHECK(decide(s, a) == Reason::event_stream);
     site.event_streams = true;
@@ -717,7 +749,10 @@ static void test_compress_buffered() {
         const int level = e == Encoding::zstd ? 3 : e == Encoding::br ? 4 : 5;
         CHECK(compress_buffered(e, level, 0, page, plain) && plain.size() < page.size() / 3);
         CHECK(decodes(e, plain, page));
-        CHECK(compress_buffered(e, level, kPaddingMax, page, padded) && padded.size() > plain.size() && padded.size() <= plain.size() + 32);
+        // The bound is the padding's own (32: what protects is the spread of the random part) plus the
+        // coding's framing: 6 bytes for gzip's FEXTRA, 8 for a zstd skippable frame, up to 4 for brotli.
+        CHECK(kPaddingMax == 32);
+        CHECK(compress_buffered(e, level, kPaddingMax, page, padded) && padded.size() > plain.size() + kPaddingMax && padded.size() <= plain.size() + kPaddingMax + 8);
         CHECK(decodes(e, padded, page));
         CHECK(compress_buffered(e, level, 1, page, one) && one.size() > plain.size() && one.size() < padded.size() && decodes(e, one, page));
         CHECK(compress_buffered(e, 1, 0, page, again) && decodes(e, again, page));  // a level change on the kept context
@@ -743,7 +778,7 @@ static void test_compress_buffered() {
         lo = std::min(lo, n);
         hi = std::max(hi, n);
     }
-    CHECK(lo == 0 && hi == kPaddingMax);  // 25 values, 2000 draws: an end missing has odds of 1e-35
+    CHECK(lo == 0 && hi == kPaddingMax);  // 33 values, 2000 draws: an end missing has odds of 1e-27
     const CompressionConfig root;
     // The defaults of docs/configuration.md 20: brotli 3 since bench/results/compression-levels-20261030.md
     // (quality 4 buys 5 to 7 % fewer bytes on HTML for 1.5 to 1.8 times the CPU, and the flushed-stream
@@ -11286,6 +11321,13 @@ static void test_access_rules() {
     CHECK(decide("/admin/x", office) == "allowed" && decide("/admin/x", outsider) == "refused" && decide("/admin/open/x", outsider) == "allowed");
     CHECK(decide("/admin/x", asio::ip::make_address("2001:db8:5::42")) == "allowed" && decide("/admin/x", asio::ip::make_address("::ffff:203.0.113.7")) == "allowed");
     CHECK(decide("/login.php", outsider) == "report" && decide("/login.php", asio::ip::make_address("192.0.2.9")) == "allowed");
+    // Admission, which response compression counts as a credential (docs/design-compression.md 7): by
+    // a rule that refuses others only; "any" and a report-mode rule, which refuse nobody, admit no one.
+    auto admitted = [&](std::string_view path, const asio::ip::address& a) {
+        return access::decide(site, path, [&]() -> const asio::ip::address& { return a; }, scratch).admitted;
+    };
+    CHECK(admitted("/admin/x", office) && !admitted("/admin/x", outsider) && !admitted("/admin/open/x", outsider) && !admitted("/admin/open/x", office));
+    CHECK(!admitted("/login.php", asio::ip::make_address("192.0.2.9")) && !admitted("/other", office));
     // The other readings: a ;parameter segment, a second decoding, the path after a script.
     CHECK(decide("/x/..;/admin/", outsider) == "refused" && decide("/x/..;/other/", outsider) == "allowed");
     CHECK(decide("/%61dmin/", outsider) == "refused" && decide("/index.php/admin/x", outsider) == "refused" && decide("/index.php/other", outsider) == "allowed");

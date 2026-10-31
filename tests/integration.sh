@@ -1146,7 +1146,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 233 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 232 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -3522,7 +3522,10 @@ kill $CPID; wait $CPID 2>/dev/null
 # passed through with Vary merged, Content-Encoding: identity dropped, an off path, a 206, an image,
 # a small body and one above 256 KB left alone while a page of a CMS home page's size (112 KB) is
 # compressed whole, a client sending no Accept-Encoding given identity with Vary, the compressed
-# page over h2c; a second site with signed_in = "on" padding its answers.
+# page over h2c, every compressed answer padded; the guard (design 7) on agensio's own credentials:
+# a Basic Authorization, a path the site's password protects (skip_for lets loopback in), an address
+# rule's admission, each identity; a Bearer token, a subtree reopened with "any", a report-mode rule
+# (it refuses nobody) and an application's cookie compressed; a second site with signed_in = "on" compressing the Basic case too.
 if [ -n "$PHPFPM" ]; then
   mkdir -p bench/tmp/comp3
   cat > bench/tmp/comp3/fpm.conf <<FPMCONF
@@ -3538,8 +3541,15 @@ pm.max_children = 2
 php_admin_flag[display_errors] = off
 FPMCONF
   "$PHPFPM" -y bench/tmp/comp3/fpm.conf -F -p "$ROOT/bench/tmp/comp3" >/dev/null 2>&1 & C3FPM=$!
-  printf '[server]\nworkers = 1\nprotocols = ["h1", "h2c"]\n[log]\naccess = "off"\nerror = "%s/bench/tmp/comp3/error.log"\n[[site]]\nserver_name = ["c3.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { mode = "on", off = ["/off/"] }\n[[site]]\nserver_name = ["c4.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { mode = "on", signed_in = "on" }\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" > bench/tmp/comp3/agensio.toml
-  mkdir -p tests/compress/off; cp tests/compress/page.php tests/compress/off/page.php
+  # The password rule only where the build has authentication (libxcrypt): its users file from `agensio passwd`.
+  C3AUTH=""
+  if printf 'x\n' | "$BIN" passwd probe > /dev/null 2>&1; then
+    printf 'secret\n' | "$BIN" passwd anna > bench/tmp/comp3/users; chmod 640 bench/tmp/comp3/users
+    C3AUTH=$(printf '[[site.auth]]\npath = "/priv/"\nusers = "%s/bench/tmp/comp3/users"\nskip_for = ["127.0.0.1"]\n' "$ROOT")
+  fi
+  printf '[server]\nworkers = 1\nprotocols = ["h1", "h2c"]\n[log]\naccess = "off"\nerror = "%s/bench/tmp/comp3/error.log"\n[[site]]\nserver_name = ["c3.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { mode = "on", off = ["/off/"] }\n[[site.access]]\npath = "/adm/"\nallow = ["127.0.0.1"]\n[[site.access]]\npath = "/adm/open/"\nallow = ["any"]\n[[site.access]]\npath = "/rep/"\nallow = ["127.0.0.1"]\nmode = "report"\n%s\n[[site]]\nserver_name = ["c4.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { mode = "on", signed_in = "on" }\n' "$ROOT" "$ROOT" "$ROOT" "$C3AUTH" "$ROOT" "$ROOT" > bench/tmp/comp3/agensio.toml
+  mkdir -p tests/compress/off tests/compress/adm/open tests/compress/priv tests/compress/rep
+  for d in off adm adm/open priv rep; do cp tests/compress/page.php tests/compress/$d/page.php; done
   rm -f bench/tmp/comp3/error.log
   "$BIN" -c bench/tmp/comp3/agensio.toml > bench/tmp/comp3/server.out 2>&1 & C3PID=$!
   for _ in $(seq 1 50); do nc -z 127.0.0.1 8065 2>/dev/null && break; sleep 0.1; done
@@ -3563,19 +3573,28 @@ FPMCONF
   check "compression: the weak tag gets a 304 from the application; a HEAD carries the GET's negotiation (the coding the GET would get, Vary, the weak tag) and no Content-Length, nor one without Accept-Encoding; a client sending no Accept-Encoding gets identity with Vary" \
     "304|- ; 200|br|Accept-Encoding|W/\"page-v1\"|- ; 200|-|- ; 200|-|Accept-Encoding|$IDLEN" \
     "$(c3 /page.php -H 'Accept-Encoding: gzip' -H 'If-None-Match: W/"page-v1"' | f 1,2) ; $(c3h /page.php -H 'Accept-Encoding: gzip, br' | f 1-5) ; $(c3h /page.php | f 1,2,5) ; $(c3 /page.php | f 1,2,3,5)"
-  # signed_in = "on" (docs/design-compression.md 7): every compressed answer padded by a length drawn
-  # per answer, where the coding's decoders skip it; six zstd fetches show at least two lengths and
-  # each decodes to the page, padded brotli and gzip decode with their tools, and curl's own decoders
-  # (libzstd, libbrotli, zlib: the browsers' three) take all of them.
-  c4() { curl -sS -o "$2" -D - -H 'Host: c4.test' "${@:3}" "http://127.0.0.1:8065$1" | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}'; }
+  # Every compressed answer is padded (docs/design-compression.md 7, decision 9: the Heal the Breach
+  # mitigation, as Thruster and Django pad by default) by a length drawn per answer, where the
+  # coding's decoders skip it; six zstd fetches show at least two lengths and each decodes to the
+  # page, padded brotli and gzip decode with their tools, and curl's own decoders (libzstd,
+  # libbrotli, zlib: the browsers' three) take all of them. Until this step the padding sat behind
+  # signed_in = "on" and the committed binary answers six equal lengths here.
+  c3l() { curl -sS -o "$2" -D - -H 'Host: c3.test' "${@:3}" "http://127.0.0.1:8065$1" | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}'; }
   lens=""; n=0
-  for i in 1 2 3 4 5 6; do lens="$lens $(c4 /page.php bench/tmp/comp3/pad$i.zst -H 'Accept-Encoding: zstd')"; [ "$(zstd -dc bench/tmp/comp3/pad$i.zst 2>/dev/null | wc -c)" = "$IDLEN" ] && n=$((n+1)); done
+  for i in 1 2 3 4 5 6; do lens="$lens $(c3l /page.php bench/tmp/comp3/pad$i.zst -H 'Accept-Encoding: zstd')"; [ "$(zstd -dc bench/tmp/comp3/pad$i.zst 2>/dev/null | wc -c)" = "$IDLEN" ] && n=$((n+1)); done
   m=0
-  for i in 1 2 3; do c4 /page.php bench/tmp/comp3/pad.br -H 'Accept-Encoding: br' >/dev/null; [ "$(brotli -dc bench/tmp/comp3/pad.br 2>/dev/null | wc -c)" = "$IDLEN" ] && m=$((m+1)); c4 /page.php bench/tmp/comp3/pad.gz -H 'Accept-Encoding: gzip' >/dev/null; [ "$(gzip -dc bench/tmp/comp3/pad.gz 2>/dev/null | wc -c)" = "$IDLEN" ] && m=$((m+1)); done
+  for i in 1 2 3; do c3l /page.php bench/tmp/comp3/pad.br -H 'Accept-Encoding: br' >/dev/null; [ "$(brotli -dc bench/tmp/comp3/pad.br 2>/dev/null | wc -c)" = "$IDLEN" ] && m=$((m+1)); c3l /page.php bench/tmp/comp3/pad.gz -H 'Accept-Encoding: gzip' >/dev/null; [ "$(gzip -dc bench/tmp/comp3/pad.gz 2>/dev/null | wc -c)" = "$IDLEN" ] && m=$((m+1)); done
   k=0
-  for e in zstd br gzip; do [ "$(curl -sS --compressed -H 'Host: c4.test' -H "Accept-Encoding: $e" http://127.0.0.1:8065/page.php | wc -c)" = "$IDLEN" ] && k=$((k+1)); done
-  check "compression with signed_in = \"on\": six zstd answers carry at least two lengths and all decode to the page; padded brotli and gzip decode with their tools, three times each; curl's own decoders take the three padded codings" "yes 6 6 3" \
+  for e in zstd br gzip; do [ "$(curl -sS --compressed -H 'Host: c3.test' -H "Accept-Encoding: $e" http://127.0.0.1:8065/page.php | wc -c)" = "$IDLEN" ] && k=$((k+1)); done
+  check "compression: every compressed answer is padded: six zstd answers of one page carry at least two lengths and all decode to the page; padded brotli and gzip decode with their tools, three times each; curl's own decoders take the three padded codings" "yes 6 6 3" \
     "$([ "$(echo "$lens" | tr ' ' '\n' | grep -c .)" = 6 ] && [ "$(echo "$lens" | tr ' ' '\n' | grep . | sort -u | wc -l)" -ge 2 ] && echo yes) $n $m $k"
+  # The guard (design 7): what agensio itself knows marks the visitor signed in; an application's
+  # cookie does not (no server reads one; decision 9).
+  BASIC='Authorization: Basic YW5uYTpzZWNyZXQ='
+  check "compression guard: a Basic credential gets identity without Vary, a Bearer token and an application's login cookie are compressed; a path an address rule admits is identity, a subtree it reopens with any and a report-mode rule's path compressed; signed_in = \"on\" compresses the Basic case" \
+    "200|-|- zstd zstd 200|- zstd zstd zstd" \
+    "$(c3 /page.php -H 'Accept-Encoding: zstd' -H "$BASIC" | f 1-3) $(c3 /page.php -H 'Accept-Encoding: zstd' -H 'Authorization: Bearer abc.def' | f 2) $(c3 /page.php -H 'Accept-Encoding: zstd' -H 'Cookie: wordpress_logged_in_x=1; laravel_session=y' | f 2) $(c3 /adm/page.php -H 'Accept-Encoding: zstd' | f 1,2) $(c3 /adm/open/page.php -H 'Accept-Encoding: zstd' | f 2) $(c3 /rep/page.php -H 'Accept-Encoding: zstd' | f 2) $(curl -sS -D - -o /dev/null -H 'Host: c4.test' -H 'Accept-Encoding: zstd' -H "$BASIC" http://127.0.0.1:8065/page.php | c3fmt | f 2)"
+  [ -n "$C3AUTH" ] && check "compression guard: a path the site's own password protects, entered through skip_for, is identity" "200|-|-" "$(c3 /priv/page.php -H 'Accept-Encoding: zstd' | f 1-3)"
   check "compression: no-transform in the answer and in the request is honoured; the application's own gzip passes through with Vary merged; Content-Encoding: identity is dropped and the body left alone" \
     "200|- ; 200|- ; 200|gzip|Cookie, Accept-Encoding ; 200|-|Accept-Encoding" \
     "$(c3 /nt.php -H 'Accept-Encoding: gzip' | f 1,2) ; $(c3 /page.php -H 'Accept-Encoding: gzip' -H 'Cache-Control: no-transform' | f 1,2) ; $(c3 /gz.php -H 'Accept-Encoding: gzip' | f 1-3) ; $(c3 /ident.php -H 'Accept-Encoding: gzip' | f 1-3)"
@@ -3591,7 +3610,7 @@ FPMCONF
     "$(curl -sS --http2-prior-knowledge -D - -o /dev/null -H 'Host: c3.test' -H 'Accept-Encoding: zstd' http://127.0.0.1:8065/page.php | tr -d '\r' | awk 'NR==1{v=$1} tolower($1)=="content-encoding:"{e=$2} END{sub(/HTTP\//, "", v); printf "%s %s", v, e}') $(curl -sS --http2-prior-knowledge --compressed -H 'Host: c3.test' http://127.0.0.1:8065/page.php | wc -c)"
   kill $C3PID; wait $C3PID 2>/dev/null
   kill $C3FPM 2>/dev/null; wait $C3FPM 2>/dev/null
-  rm -rf tests/compress/off
+  rm -rf tests/compress/off tests/compress/adm tests/compress/priv tests/compress/rep
 fi
 # The connection ceiling (2026-10-02, hardening item 5): a second instance on ports of its own
 # (with reuse_port two agensio processes of one account can share a port, and the kernel would

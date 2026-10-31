@@ -326,13 +326,13 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
     }
     if (compressing && !no_body_status && !res.spill.is_open()) {
         // The whole buffered body through the coding's encoder (docs/design-compression.md 6), padded
-        // by a length drawn per answer where the site compresses signed-in visitors' answers too
-        // (design 7); the compressed bytes replace it, with their exact length. A failure, or no
-        // gain, sends the body as it came (the head has no coding line yet).
-        const auto* site = static_cast<const SiteConfig::Compression*>(s.site_compression);
+        // by a length drawn per answer so that one page's compressed length differs from request to
+        // request (design 7, the Heal the Breach mitigation: every answer, as Thruster and Django pad);
+        // the compressed bytes replace it, with their exact length. A failure, or no gain, sends the
+        // body as it came (the head has no coding line yet).
         const auto* root = static_cast<const CompressionConfig*>(s.root_compression);
         std::string& out = r.buffer;
-        const unsigned padding = site->signed_in ? padding_length() : 0;
+        const unsigned padding = padding_length();
         if (compress_buffered(coding, compress_answer::level_for(*root, coding), padding, res.body, out) && out.size() < res.body.size()) {
             r.scratch.append("Content-Encoding: ").append(encoding_name(coding)).append("\r\nContent-Length: ");
             append_number(r.scratch, out.size());

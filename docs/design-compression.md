@@ -29,8 +29,11 @@ files itself, in memory only, counted in the cache's budget.
   been compressed, a validator per representation that still gives 304s, nothing compressed
   twice, `no-transform` honoured for applications, a 206 never compressed, HEAD with the GET's
   fields, streams never held back.
-- Safe by default against BREACH: a signed-in visitor's page is compressed only when the user
-  decided it, knowing why.
+- Against BREACH, what a server can do (section 7): every answer compressed per request padded
+  with a random length, as Thruster and Django do by default, and no compression of an answer
+  behind agensio's own password, its address rules or a browser-replayed `Authorization` unless
+  the user decided it. An application's own login is its own to protect, by masking its tokens,
+  as every server leaves it.
 - No cost when off: a site without the key pays nothing on the request path (the A/B gate). On,
   the cost is the encoder's and nothing else: no allocation per request beyond the encoder's
   context, no lock, no thread hop for buffered answers.
@@ -98,8 +101,7 @@ A site that needs more writes the table form; every field is optional:
 ```toml
 response_compression = { mode = "on",
                          off = ["/my-account/", "/checkout/"],   # paths never compressed
-                         signed_in = "off",                      # "off" (default): signed-in visitors' pages uncompressed
-                         session_cookies = ["shop_sid"],         # the site's own login cookies, beside the preset's
+                         signed_in = "off",                      # "off" (default): answers behind the site's own password or address rule uncompressed
                          upstream = "pass",                      # "offload": agensio compresses instead of the application
                          event_streams = false }                 # server-sent events uncompressed unless true
 ```
@@ -108,8 +110,7 @@ response_compression = { mode = "on",
 |---|---|---|
 | `mode` | `off` (default), `on` | the site's switch; `on` covers static files, PHP, proxied and CGI answers and agensio's own pages |
 | `off` | path prefixes, up to 32 | where the site never compresses, whoever asks: account and checkout pages, an odd client's API |
-| `signed_in` | `off` (default), `on` | whether a signed-in visitor's answers are compressed (section 7); `on` is the user's decision, taken knowing BREACH |
-| `session_cookies` | names, up to 16 | cookies that mark a visitor signed in, added to the preset's own list |
+| `signed_in` | `off` (default), `on` | whether an answer behind agensio's own `[[site.auth]]` password, an `[[site.access]]` admission or a browser-replayed `Authorization` is compressed (section 7); an application's own login is invisible, its pages are compressed and padded |
 | `upstream` | `pass` (default), `offload` | `offload` stops the browser's `Accept-Encoding` reaching the application, so agensio compresses and the guard applies |
 | `event_streams` | `false` (default), `true` | `text/event-stream` answers compressed, flushed per event |
 
@@ -203,8 +204,14 @@ built, in `apply_upstream_result` and the error-page path, by a `Compressor` the
   the `Stream` (a site without the key never computes it: the one test on the request path).
 - **A buffered answer up to 256 KB** (HTML and JSON; a CMS home page is 70 to 82 KB) is
   compressed whole into the worker's reused output buffer, by a context the worker reuses (zlib
-  and zstd reset; brotli allocates its encoder per answer, inside the measured times), and goes
-  out with an exact `Content-Length`. The limit bounds the time one answer holds the worker: at
+  and zstd reset; brotli allocates its encoder per answer, six blocks of 7 KB to 540 KB, inside
+  the measured times), and goes out with an exact `Content-Length`. Those blocks are why the
+  server sets glibc's heap thresholds at start (`tune_heap`, server.cpp: blocks under 2 MB from
+  the heap, the heap's top kept below 8 MB of free space): with the defaults, a block at the
+  dynamic mmap threshold is mapped from the kernel and unmapped on every answer, 84 page faults
+  and 36 µs per brotli answer, depending on the process's heap history (the A/B of 2026-10-31 saw
+  one side pay and the other not; `bench/results/brotli-faults-20261031.md`). The idle trim of
+  the worker (`malloc_trim(0)` after sheds and closes) still returns everything. The limit bounds the time one answer holds the worker: at
   256 KB about 0.35 ms with zstd 3, 1.4 ms with brotli 4, 2.1 ms with gzip 5
   (`bench/results/compression-levels-20261030.md`; 64 KB until that measurement, which left
   the CMS pages out). Cost on the WordPress home page (70 KB): 54 µs with zstd 3, 191 µs with
@@ -248,43 +255,68 @@ built, in `apply_upstream_result` and the error-page path, by a `Compressor` the
   limits (decoded size, a 200:1 ratio checked per slice, one layer) and a fuzz target come with
   it; the 2026 Envoy CVE on zstd slices is the reason.
 
-## 7. The signed-in guard (BREACH)
+## 7. The signed-in guard (BREACH), and the padding of every answer
 
-The attack needs the victim's own credentials on the request. A visitor is **signed in** when the
-request carries any of:
+The attack needs the victim's own credentials on the request: something the browser attaches on
+its own to a request another site's page made it send. A server sees three such credentials with
+certainty, and agensio counts a visitor **signed in** when the request carries any of:
 
-- a cookie the site counts as a session: the preset's own names (`wordpress_logged_in_*`,
-  `laravel_session` and Laravel's `XSRF-TOKEN`, Drupal's `SESS*`/`SSESS*`, Rails' `_*_session`,
-  Django's `sessionid`, Symfony's `PHPSESSID`, Kanboard's, Grav's; a table to verify per
-  application, as the login paths of fail2ban were) plus `session_cookies`; for `app = "php"` and
-  `"proxy"` without a known application, a conservative fallback: any cookie whose name contains
-  `sess`, `auth`, `token`, `login` or `logged`;
-- `Authorization` with a scheme browsers replay on their own (Basic, Digest, Negotiate); a
-  Bearer token is not counted, since no browser attaches a script's token to a forged request;
-- a path under agensio's own `[[site.auth]]` password;
-- admission by an address rule of `[[site.access]]` other than `any`.
+- a path under agensio's own `[[site.auth]]` password: verified, or let in by `skip_for` (the
+  answer is one a password protects either way; `AuthState::protected_path`);
+- admission by an address rule of `[[site.access]]` that refuses others (`Stream::access_admitted`,
+  set by `Dispatcher::admit` on any hop; not `any`, not `mode = "report"`, which refuse nobody): the
+  answer is one the client's network position unlocks, and an attacker outside the office can make a
+  browser inside it fetch the page;
+- `Authorization` with a scheme browsers replay on their own (Basic, Digest, Negotiate, NTLM;
+  `compress_answer::browser_credential`); a Bearer token is not counted, since no browser attaches
+  a script's token to a forged request, so a JSON API authenticated that way is compressed.
 
-With `signed_in = "off"` such an answer is not compressed. The test costs one scan of the
-request's `Cookie` and `Authorization` fields, run only when the answer is otherwise eligible,
-against tens of microseconds of compression; the cache guards already read `Authorization` for a
-related purpose (`core/private_cache.hpp`). `Vary` stays `Accept-Encoding` alone: the cookie
-decides only whether agensio compresses, never which content is sent.
+With `signed_in = "off"`, the default, such an answer is not compressed (`path_check` reason
+`signed_in`). The test costs one scan of the request's `Authorization` field and two flags the
+dispatcher already set, run only when the answer is otherwise eligible. `Vary` is not added to such
+an answer: no `Accept-Encoding` would compress it, and the password guard already marks it
+`Cache-Control: private`. `signed_in = "on"` compresses those answers too, for a site whose
+protected pages reflect no input. No confirmation dialog: the whole site is compressed for every
+visitor, as every server does, and the key narrows one corner of it.
 
-Why the guard counts only login cookies and not every cookie: consent banners and analytics put a
-first-party cookie on almost every returning visitor, and those unlock nothing; counting them would
-turn compression off for most of a public site.
+**What the guard does not count, and why** (decided 2026-10-31, decision 9). An application's own
+login. The first design counted the presets' session cookies (`wordpress_logged_in_*`,
+`laravel_session`, `SESS*`, ...) plus a `session_cookies` list. Checking the table against the beds
+broke it: Laravel gives every anonymous visitor `laravel-session` and `XSRF-TOKEN` on the first
+page, Rails and Symfony start guest sessions too, so a cookie-name guard switched compression off
+for every returning visitor of those sites, silently, while PageSpeed complained about it; a table
+too narrow was a promise agensio could not keep, and every application version could rename a
+cookie. No other server has such a guard: nginx, Apache, lighttpd, Caddy, h2o, LiteSpeed, IIS,
+HAProxy, Envoy, Traefik and the CDNs compress for everyone (nginx and Apache put one sentence of
+warning in their documentation), and the one precedent, Thruster's `GZIP_COMPRESSION_DISABLE_ON_AUTH`,
+counts any cookie and is off by default. The frameworks took the problem on their own side: Django
+and Rails mask their CSRF tokens per response, so a compressed page leaks nothing useful; Laravel
+does not (section 2), and WordPress's nonces were not examined. `SameSite=Lax` cookies, the
+browsers' default since 2020 and set by Laravel, Django and Rails, keep the session off most of the
+cross-site requests the attack forges. So agensio compresses an application's pages for every
+visitor and does two things no mainstream server does by default:
 
-`signed_in = "on"` compresses signed-in answers too. It suits sites whose framework masks its
-tokens and whose pages reflect no input (Django, Rails). It adds up to 32 random bytes of padding
-per compressed answer, as Rails' Thruster does (Django adds up to 100): cheap, and honestly a
-raise of the attack's cost, not its removal. The `off` paths cover what is left (`/my-account/`).
-The application can always opt out with the standard `Cache-Control: no-transform`, which
-Cloudflare honours too, so no new header is invented.
+- **Every answer compressed per request is padded** with a length drawn per answer, up to 32
+  bytes, where the coding's decoders skip it (gzip's FEXTRA field, RFC 1952 2.3.1.1; a zstd
+  skippable frame, RFC 8878 3.1.2; a brotli metadata meta-block, RFC 7932 9.2): the Heal the
+  Breach mitigation, as Rails' Thruster (32 bytes) and Django's GZipMiddleware (100) apply it by
+  default. What protects is the spread of the random part, not the bytes on the wire: an attacker
+  averaging the length pays with the square of it, so 32 costs him 1.7 times the samples of 24 and
+  hundreds of times those of no padding, for four more bytes on average per answer (the coding's
+  framing, 6 bytes for gzip, 8 for zstd, up to 4 for brotli, is constant and buys nothing). Not
+  Django's 100: on every answer, fifty bytes on average would be up to 15 % of the smallest ones.
+  Honestly a raise of the attack's cost, not its removal; the literature disagrees on how much (the
+  BREACH authors: it only multiplies the requests; Heal the Breach: about 500 times for 1 to 10
+  bytes). The copies of cached files made at fill are not padded: a file holds no secret and
+  reflects no input, and a constant padding would hide nothing.
+- The guard above, on the three credentials only agensio can see.
 
-The MCP bridge treats `signed_in = "on"` as `pip_install` treats a package: the user confirms in
-person (`user_confirmed`), after the agent has explained BREACH in a sentence. Health warns when
-`signed_in = "on"` is set on a preset whose framework does not mask its token (Laravel,
-WordPress, plain PHP).
+The `off` paths cover what is left (`/my-account/`, `/checkout/`: the pages of an unmasked
+framework where a form token sits beside what the visitor typed), and the application can always
+opt out with the standard `Cache-Control: no-transform`, which Cloudflare honours too, so no new
+header is invented. The guide names which presets mask their tokens (Django, Rails) and which do
+not (Laravel; WordPress's nonces unexamined), so a user with such a site knows what the `off` paths
+are for.
 
 ## 8. Validators, Vary, Range, HEAD, 304, no-transform
 
@@ -320,11 +352,12 @@ WordPress, plain PHP).
 
 - **`site_create`, `site_update`:** the `response_compression` field of section 3 (`ctl
   --compression on|off`, `--compression-off PATH`, `--compression-signed-in on|off`,
-  `--compression-cookie NAME`, `--compression-upstream pass|offload`, `--compression-events`);
-  `signed_in: "on"` needs `user_confirmed`.
-- **`site_show`:** the effective settings, with the preset's session-cookie names.
+  `--compression-upstream pass|offload`, `--compression-events`).
+- **`site_show`:** the effective settings.
 - **`path_check`:** two new arguments, `accept_encoding` (default: a current browser's `gzip,
-  deflate, br, zstd`) and `visitor` (`anonymous` | `signed_in`); the answer names the coding
+  deflate, br, zstd`) and `visitor` (`anonymous` | `signed_in`: as if the request carried a
+  browser-replayed credential; a path under the site's own password or address rules is seen from
+  the path itself); the answer names the coding
   agensio would apply, or the one reason it would not: `type`, `size`, `status`, `signed_in`,
   `already_encoded`, `no_transform`, `path_off`, `mode_off`, `budget`, `no_accept_encoding`,
   `build_lacks_coding`. This answers the second most-viewed question, "why isn't this URL
@@ -335,10 +368,8 @@ WordPress, plain PHP).
     (`compress: false` in Next.js, `"compress": false` in Ghost, `enable_gzip = false` in
     Grafana) or `upstream = "offload"`.
   - `compression_php_zlib` (warn): `zlib.output_compression` is on in the site's pool or
-    `.user.ini`: it compresses 304s and images, can compress twice, and defeats the guard;
-    the fix names the ini line, or `offload`.
-  - `compression_signed_in_unmasked` (warn): `signed_in = "on"` on a preset whose framework does
-    not mask its CSRF token.
+    `.user.ini`: it compresses 304s and images, can compress twice, and pads nothing; the fix
+    names the ini line, or `offload`.
   - `compression_budget_exhausted` (info): streams went out uncompressed because a worker's
     limit was reached, with the count.
   - `compression_unavailable` (info): the build lacks a coding a site asks for, with the package.
@@ -350,7 +381,10 @@ WordPress, plain PHP).
   saved per coding, counts per skip reason, the copies' bytes in the cache, the budget's refusals.
 - **The access log:** the JSON format gets `encoding` and `bytes_identity`; the combined format
   is unchanged, since fail2ban's filters read it.
-- **The MCP texts** say that `signed_in = "on"` is a security decision the user makes, that
+- **The MCP texts** say that compression is on for every visitor as on every server and every
+  per-request answer padded, that `signed_in` concerns only the site's own password and address
+  rules, that on a Laravel or plain-PHP site the pages where a form token sits beside typed input
+  are what the `off` paths are for, that
   turning compression off inside an application is the application's switch, that `path_check`
   is how to see why a URL is not compressed, and that a PageSpeed or Lighthouse "enable text
   compression" finding means `response_compression = "on"` on that site. Before turning it on,
@@ -369,7 +403,8 @@ against the GET's; `Vary` on identity and on 304; a weak ETag answered 304 by a 
 an exact-comparing application; Range on a compressible page answered with an identity 206 or a
 full 200, never a compressed 206; `no-transform` both ways; an upstream gzip passed through
 untouched with `Vary` merged; PHP's zlib layer on, detected by health and passed through; the
-guard's cookie, `Authorization` and address cases; HTTP/1.0 identity when the length is unknown;
+guard's password, `Authorization` and address cases and the padding on every answer; HTTP/1.0
+identity when the length is unknown;
 the first SSE event at once and events spaced as sent; a static copy's ranges and tags as a disk
 twin's; a disk twin kept over a copy; the copies' bytes in `cache.max_size`; the budget. h2spec
 and the HTTP/3 attack suite unchanged. The `Accept-Encoding` parser (now with zstd) and the type
@@ -415,8 +450,10 @@ Each step: unit and integration suites green, the A/B flat on the rows it touche
    Laravel and WordPress beds measured.
 4. **zstd and brotli** as optional dependencies (CMake, the packages, `-t`'s refusal, status's
    list), the capped windows, the padding for `signed_in = "on"`.
-5. **The signed-in guard** (section 7): the preset table, `session_cookies`, the `off` paths,
-   `user_confirmed` in the bridge, health's `compression_signed_in_unmasked`.
+5. **The signed-in guard** (section 7): the three credentials agensio itself sees (its password,
+   its address rules, a browser-replayed `Authorization`), the padding on every answer; the
+   preset cookie table, `session_cookies`, the confirmation dialog and the health finding of the
+   first design dropped (decision 9).
 6. **Streamed answers** (section 6): `CompressedBody`, flushes, the budget, SSE and
    `event_streams`, `offload`. The memory and streams rows measured.
 7. **The agent interface** (section 9): `path_check`'s arguments and reasons, health's findings
@@ -429,7 +466,7 @@ Each step: unit and integration suites green, the A/B flat on the rows it touche
 All taken by the owner on 2026-10-30:
 
 1. Off by default: no CPU spent unless a site asks.
-2. `signed_in = "off"` once a site is on; `on` is the user's decision in person.
+2. `signed_in = "off"` once a site is on; `on` is the user's decision in person. Narrowed by 9.
 3. libzstd and libbrotli as optional dependencies beside zlib.
 4. Static copies made by agensio in memory only, within `cache.max_size`, never on disk (an
    application's integrity check, Nextcloud's or WordPress's, must never see them).
@@ -445,6 +482,14 @@ All taken by the owner on 2026-10-30:
    limit and 0.35 ms by a zstd one; brotli 3 by default, since quality 4's reason (the flushed
    loss below it) was quality 1's alone and 4 buys 5 to 7 % fewer bytes for 1.5 to 1.8 times the
    CPU; gzip stays 5 (gzip 6's bytes at 0.6 of its cost, for the few clients that take gzip alone).
+9. 2026-10-31, on the owner's question how nginx, lighttpd and the other servers handle cookies
+   with compression on: no cookie-name guard (no server has one; the frameworks start sessions
+   for guests, so the table switched compression off for returning visitors of Laravel, Rails and
+   Symfony sites, and a table is per-application maintenance that fails silently both ways). The
+   guard counts only what agensio itself knows (its password, its address rules, a browser-replayed
+   `Authorization`), every answer compressed per request is padded (up to 32 bytes: the spread is
+   what protects, Thruster's number, not Django's 100 on every answer), no confirmation dialog for
+   `signed_in = "on"`, no health finding about unmasked frameworks, `session_cookies` gone.
 
 ## 13. Sources
 
