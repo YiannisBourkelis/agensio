@@ -189,6 +189,51 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-11-01, the release check of 0.1.0-alpha.118, before the tag. `scripts/fuzz-all.sh -t 300`,
+every target at once (twenty-two, one process each on 24 cores, five minutes): 526.6 M runs, no
+finding, no timeout. The fuzz build had stopped linking with response compression's step 2
+(2026-10-30: the fuzzing copy of the core took the core's definitions but not libzstd and
+libbrotlienc, so `fuzz_h2_conn` and `fuzz_response_headers` failed to link and the script ran
+nothing), fixed before this run. The sanitizer build (`build-asan`, GCC 14): unit, the integration
+suite (797 checks, the HTTP/3 attack suite with Retry auto and always among them; no sanitizer line in
+the 70 logs the run wrote), the Pebble suite (21): clean. The release build: unit, integration (797),
+reload (25), auth (50, with a network: `--network none` leaves loopback alone and two plain-HTTP rows
+skip), pools (26), control (27) and Pebble (21) pass; the builds without OpenSSL, without libxcrypt,
+without libbrotli and libzstd, and without zlib link and pass their unit tests, and the one without
+brotli and zstd refuses a `codings` list naming brotli with the package and offers gzip alone by
+default. The A/B against alpha.117: `bench/ab.sh v0.1.0-alpha.117 -P -A -2 -r 3` (`ab-20261031-221151.md`)
+ran beside KDE's file indexer and VS Code's C++ indexer, both kept busy by the A/B worktrees under
+bench/tmp, and put three rows at 1.07 to 1.12; on a quiet machine, by hand (`release-118-rows-20261101.md`),
+they are 1.005 to 1.013, and plain HTTP 1 KB is 1.022 with every new round above every base round: 36
+instructions more per request and 20 more L1 instruction-cache misses, the compression code's size and
+not its work, under the 3 % gate. The HTTP/3 rows (`ab-20261031-225221.md`, `-3 -r 3`): 1.001 to 1.021;
+that run's plain 100 KB row at 1.066 is 1.010 by hand.
+
+| target | runs | edges | result |
+|---|---|---|---|
+| fuzz_archive | 16.46 M | 646 | clean |
+| fuzz_auth_users | 25.18 M | 498 | clean |
+| fuzz_chunked | 97.24 M | 63 | clean |
+| fuzz_fcgi | 63.85 M | 96 | clean |
+| fuzz_fields | 3.83 M | 591 | clean |
+| fuzz_h2_conn | 0.71 M | 11760 | clean |
+| fuzz_hpack | 2.21 M | 528 | clean |
+| fuzz_hpack_roundtrip | 0.34 M | 466 | clean |
+| fuzz_http_head | 53.29 M | 152 | clean |
+| fuzz_json | 6.62 M | 550 | clean |
+| fuzz_log_line | 5.39 M | 725 | clean |
+| fuzz_parser | 44.13 M | 240 | clean |
+| fuzz_path | 7.64 M | 236 | clean |
+| fuzz_php_constraint | 12.96 M | 760 | clean |
+| fuzz_qpack | 7.52 M | 646 | clean |
+| fuzz_quic_conn | 0.48 M | 1551 | clean |
+| fuzz_quic_packet | 21.39 M | 217 | clean |
+| fuzz_redirect | 4.99 M | 1252 | clean |
+| fuzz_refuse | 3.27 M | 874 | clean |
+| fuzz_response_headers | 0.53 M | 3352 | clean |
+| fuzz_sql_scan | 2.95 M | 158 | clean |
+| fuzz_transport_params | 145.60 M | 211 | clean |
+
 2026-10-25, the release check of 0.1.0-alpha.116, before the tag. `scripts/fuzz-all.sh -t 300`,
 every target at once (twenty-two, one process each on 24 cores, five minutes): 553 M runs, no
 finding, no timeout. Before it, on their own: `fuzz_h2_conn` ten minutes on eight processes (26.7 M
