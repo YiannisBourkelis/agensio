@@ -244,10 +244,16 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
     const bool rewrite = proxied && loc.proxy.rewrite_redirects;
     std::string kept;  // the application's Cache-Control directives a protected answer keeps
     r.scratch.reserve(res.head.size() + 64);
+    // The application's Content-Length is the body's on a GET (written below from what was
+    // collected) and the GET's length on a HEAD, kept when it is a number (RFC 9110 8.6).
+    std::string_view app_length;
     for (const HeaderField& h : res.headers) {
-        if (Headers::iequals(h.name, "content-length") || Headers::iequals(h.name, "transfer-encoding") ||
-            Headers::iequals(h.name, "connection") || Headers::iequals(h.name, "keep-alive") ||
-            Headers::iequals(h.name, "server") || Headers::iequals(h.name, "date"))
+        if (Headers::iequals(h.name, "content-length")) {
+            if (ca.head && !h.value.empty() && h.value.find_first_not_of("0123456789") == std::string_view::npos) app_length = h.value;
+            continue;
+        }
+        if (Headers::iequals(h.name, "transfer-encoding") || Headers::iequals(h.name, "connection") ||
+            Headers::iequals(h.name, "keep-alive") || Headers::iequals(h.name, "server") || Headers::iequals(h.name, "date"))
             continue;
         // A field the proxy hides is gone before anything looks at it: no rule's default takes it for
         // the application's copy (before 2026-10-18 a hidden field and a default on it sent neither),
@@ -343,9 +349,18 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
         return;
     }
     if (!no_body_status) {
-        r.scratch.append("Content-Length: ");
-        append_number(r.scratch, res.body_size);
-        r.scratch.append("\r\n");
+        // A HEAD's collected body is empty (php-fpm runs the script and sends its headers alone, the
+        // HTTP client reads no body after a HEAD) and its length is not the GET's: the application's
+        // own Content-Length when it sent one, else none, as nginx does (RFC 9110 8.6). Until
+        // 2026-10-30 every HEAD answered here said Content-Length: 0, and a cache refreshing its
+        // copy of the page with a HEAD takes a differing length as an invalidation (RFC 9111 4.3.5).
+        if (!r.head) {
+            r.scratch.append("Content-Length: ");
+            append_number(r.scratch, res.body_size);
+            r.scratch.append("\r\n");
+        } else if (!app_length.empty()) {
+            r.scratch.append("Content-Length: ").append(app_length).append("\r\n");
+        }
     }
     r.prebuilt_headers = r.scratch;
     if (no_body_status) return;

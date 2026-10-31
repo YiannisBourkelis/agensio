@@ -743,6 +743,13 @@ check "php: Location alone means 302" "302 /php/index.php" "$(curl -sSi http://1
 check "php: http_response_code(404) with body" "404 custom 404" "$(curl -sS -w ' %{http_code}' http://127.0.0.1:8080/php/status404.php | awk '{print $NF, $1, $2}')"
 check "php: 3 MB response spilled to a temp file, intact" "$BIGMD5 3145728" "$(curl -sS -o bench/tmp/big.out -w '%{size_download}' http://127.0.0.1:8080/php/big.php | (read n; echo "$(md5sum < bench/tmp/big.out | cut -d' ' -f1) $n"))"
 check "php: HEAD answered without a body" "200 0" "$(curl -sSI -o /dev/null -w '%{http_code} %{size_download}' http://127.0.0.1:8080/php/big.php)"
+# php-fpm runs a script for a HEAD and sends its headers alone, so the collected body is empty and
+# its length is not the GET's: a HEAD carries no Content-Length unless the script sent one (RFC 9110
+# 8.6; nginx sends none), over HTTP/1.1 and HTTP/2 alike. Until 2026-10-30 every HEAD to a PHP site
+# said Content-Length: 0.
+cl() { tr -d '\r' | awk 'tolower($1)=="content-length:"{l=$2} END{print (l=="")?"-":l}'; }  # "0" is a value: compare the string
+check "php: a HEAD carries no Content-Length the script did not send, over h1 and h2; a script's own passes through, with no body" "- - 200 12345 0" \
+  "$(curl -sSI http://127.0.0.1:8080/php/big.php | cl) $(curl -sSk --http2 -I https://127.0.0.1:8443/php/big.php | cl) $(curl -sSI -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/php/length.php) $(curl -sSI http://127.0.0.1:8080/php/length.php | cl) $(curl -sSI -o /dev/null -w '%{size_download}' http://127.0.0.1:8080/php/length.php)"
 check "php: streaming location sends chunked" "yes" "$(curl -sSi http://127.0.0.1:8080/phpstream/stream.php | tr -d '\r' | grep -q '^Transfer-Encoding: chunked' && echo yes)"
 check "php: streaming body intact" "chunk0 chunk1 chunk2 chunk3 chunk4" "$(curl -sS http://127.0.0.1:8080/phpstream/stream.php | tr '\n' ' ' | sed 's/ $//')"
 check "php: streamed Content-Length enforced: surplus cut, connection reusable" "xxxxxHTTP/1.1 200 OK" "$(printf 'GET /phpstream/wronglen.php?m=long HTTP/1.1\r\nHost: l\r\n\r\nGET / HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | tr -d '\r' | grep -o 'x\+HTTP/1.1 200 OK')"
@@ -3230,6 +3237,9 @@ if [ -n "$UP_PID" ]; then
   check "proxy: upstream Connection: close answered, client kept" "200 1 200 0" "$(curl -sS -o /dev/null -o /dev/null -w '%{http_code} %{num_connects} ' $P/close $P/json | sed 's/ $//')"
   check "proxy: location prefix replaced by the upstream URI" "200" "$(code "$P/api/json")"
   check "proxy: HEAD has no body" "200 0" "$(curl -sS -I $P/json -o /dev/null -w '%{http_code} %{size_download}')"
+  # The origin's HEAD answer names the GET's length; it is passed through (RFC 9110 8.6), not
+  # replaced by the empty body's 0 as until 2026-10-30.
+  check "proxy: a HEAD carries the origin's Content-Length" "32" "$(curl -sS -I $P/json | cl)"
   check "proxy: upstream 404 passed through" "404" "$(code $P/nope)"
   check "proxy: upstream Server and Date replaced by ours" "1 1" "$(curl -sSi $P/json | tr -d '\r' | awk '/^Server:/{s++} /^Date:/{d++} END{print s, d}')"
   check "proxy: POST body forwarded (memory)" "hello proxy" "$(printf 'hello proxy' | curl -sS --data-binary @- $P/echo)"
@@ -3536,7 +3546,8 @@ FPMCONF
   # php-fpm's socket exists before it listens: wait for the page itself, not for the socket file.
   for _ in $(seq 1 50); do [ "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: c3.test' http://127.0.0.1:8065/small.php 2>/dev/null)" = 200 ] && break; sleep 0.1; done
   # The fields joined by "|": a Vary value holds a comma and a space.
-  c3fmt() { tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-encoding:"{e=$2} tolower($1)=="vary:"{v=$0; sub(/^[^:]*: /, "", v)} tolower($1)=="etag:"{t=$2} tolower($1)=="content-length:"{l=$2} END{printf "%s|%s|%s|%s|%s", c, e?e:"-", v?v:"-", t?t:"-", l?l:"-"}'; }
+  # A Content-Length of 0 is a value, not an absence: awk's "0" is false, so the test is on the string.
+  c3fmt() { tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-encoding:"{e=$2} tolower($1)=="vary:"{v=$0; sub(/^[^:]*: /, "", v)} tolower($1)=="etag:"{t=$2} tolower($1)=="content-length:"{l=$2} END{printf "%s|%s|%s|%s|%s", c, e?e:"-", v?v:"-", t?t:"-", (l=="")?"-":l}'; }
   c3() { curl -sS -D - -o /dev/null -H 'Host: c3.test' "${@:2}" "http://127.0.0.1:8065$1" | c3fmt; }
   c3h() { curl -sS -I -H 'Host: c3.test' "${@:2}" "http://127.0.0.1:8065$1" | c3fmt; }  # a HEAD: curl knows no body follows
   f() { cut -d'|' -f"$1"; }
@@ -3549,9 +3560,9 @@ FPMCONF
   check "compression of a PHP answer: zstd for a browser taking every coding, brotli for one without zstd, gzip for a tool, each with Vary and the application's ETag weakened, each shorter than the page and decoding to it with the reference tool" \
     "200|zstd|Accept-Encoding|W/\"page-v1\" 200|br|Accept-Encoding|W/\"page-v1\" 200|gzip|Accept-Encoding|W/\"page-v1\" yes yes yes yes" \
     "$(c3 /page.php -H 'Accept-Encoding: gzip, deflate, br, zstd' | f 1-4) $(c3 /page.php -H 'Accept-Encoding: gzip, deflate, br' | f 1-4) $(c3 /page.php -H 'Accept-Encoding: gzip' | f 1-4) $([ "$(zstd -dc bench/tmp/comp3/page.zst | wc -c)" = "$IDLEN" ] && echo yes) $([ "$(brotli -dc bench/tmp/comp3/page.br | wc -c)" = "$IDLEN" ] && echo yes) $([ "$(gzip -dc bench/tmp/comp3/page.gz | wc -c)" = "$IDLEN" ] && echo yes) $(smaller bench/tmp/comp3/page.zst bench/tmp/comp3/page.br bench/tmp/comp3/page.gz)"
-  check "compression: the weak tag gets a 304 from the application; a HEAD carries the GET's negotiation (the coding the GET would get, Vary, the weak tag) and no Content-Length; a client sending no Accept-Encoding gets identity with Vary" \
-    "304|- ; 200|br|Accept-Encoding|W/\"page-v1\"|- ; 200|-|Accept-Encoding|$IDLEN" \
-    "$(c3 /page.php -H 'Accept-Encoding: gzip' -H 'If-None-Match: W/"page-v1"' | f 1,2) ; $(c3h /page.php -H 'Accept-Encoding: gzip, br' | f 1-5) ; $(c3 /page.php | f 1,2,3,5)"
+  check "compression: the weak tag gets a 304 from the application; a HEAD carries the GET's negotiation (the coding the GET would get, Vary, the weak tag) and no Content-Length, nor one without Accept-Encoding; a client sending no Accept-Encoding gets identity with Vary" \
+    "304|- ; 200|br|Accept-Encoding|W/\"page-v1\"|- ; 200|-|- ; 200|-|Accept-Encoding|$IDLEN" \
+    "$(c3 /page.php -H 'Accept-Encoding: gzip' -H 'If-None-Match: W/"page-v1"' | f 1,2) ; $(c3h /page.php -H 'Accept-Encoding: gzip, br' | f 1-5) ; $(c3h /page.php | f 1,2,5) ; $(c3 /page.php | f 1,2,3,5)"
   # signed_in = "on" (docs/design-compression.md 7): every compressed answer padded by a length drawn
   # per answer, where the coding's decoders skip it; six zstd fetches show at least two lengths and
   # each decodes to the page, padded brotli and gzip decode with their tools, and curl's own decoders

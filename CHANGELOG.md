@@ -125,6 +125,21 @@
   tables cold), the next thing to profile on this path. `bench/wordpress/.ddev/bench.sh`'s
   repository root was one directory short; `bench/ab.sh`'s row comment says what the 100 KB
   body measures now. The static handler's twin switch names zstd (a warning since step 1).
+- **A HEAD to a PHP, proxied or CGI site no longer says `Content-Length: 0`.** php-fpm runs the
+  script for a HEAD and sends its headers alone, and the HTTP client reads no body after a HEAD,
+  so the collected body is empty; the answer path wrote that body's length, 0, on every HEAD
+  since the FastCGI phase, and replaced a proxied origin's own Content-Length (the GET's length)
+  with it. RFC 9110 8.6 allows a Content-Length on a HEAD only when it is the GET's; a cache
+  refreshing its copy of a page with a HEAD takes a differing length as an invalidation (RFC 9111
+  4.3.5), and `curl -I` and monitoring tools saw an empty page. Now a HEAD carries the
+  application's own Content-Length when it sent one (a download script's, a proxied origin's) and
+  none otherwise, as nginx does; a HEAD whose GET would be compressed carries none, as before.
+  The suite checks it over HTTP/1.1 and HTTP/2 on a PHP site (`tests/php/length.php` sends its
+  own), through the proxy (the origin's 32) and on a site with compression on; its format helper
+  took a Content-Length of 0 for an absence (awk's "0" is false) and could not have caught this.
+  A/B against the defaults commit (`bench/results/ab-20261030-165424.md`, five rounds on a quiet
+  box, after `ab-20261030-163149.md` and `ab-20261030-163903.md` on a busy one): every row within
+  noise, proxy /json 1.005.
 ## 0.1.0-alpha.117 (2026-10-26)
 
 - **An HTTP/3 attempt refused at the connection ceiling counts once** (the alpha.116 report). A
