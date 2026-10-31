@@ -209,6 +209,10 @@
   staging site, a type the built-in list leaves out, the levels), and `bench/ab.sh -C` offers the
   site in either spelling, so a base from before this change still gets the compression rows. The
   step 5 and heap entries above had been filed under alpha.117 by mistake.
+- **The fuzz build links again.** The fuzzing copy of the core took the core's definitions but not
+  libzstd and libbrotlienc, so from step 2 on two targets failed to link and `scripts/fuzz-all.sh`
+  ran nothing; found by this release's check, which then ran every target clean
+  (`docs/security-control-plane.md`).
 
 ## 0.1.0-alpha.117 (2026-10-26)
 
