@@ -14,7 +14,7 @@ struct ControlReply {
 
 // False with `error` set when the socket cannot be reached or the reply is not HTTP.
 bool control_request(const std::string& socket_path, const std::string& method, const std::string& path,
-                     const std::string& body, ControlReply& reply, std::string& error);
+                     const std::string& body, ControlReply& reply, std::string& error, const std::string& headers = {});
 
 // The platform's default socket path (what the server uses when [control] sets none).
 std::string default_control_socket();

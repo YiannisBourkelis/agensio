@@ -187,6 +187,9 @@ set(AGENSIO_CORE_SOURCES
   src/services/install.cpp
   src/services/tasks.cpp
   src/services/appenv.cpp
+  src/services/totp.cpp
+  src/services/approvers.cpp
+  src/control/approvals.cpp
   src/control/handler.cpp
   src/control/commands.cpp
   src/control/loglines.cpp
@@ -392,7 +395,7 @@ install(FILES packaging/firewall/agensio.nft DESTINATION ${CMAKE_INSTALL_DATADIR
 install(DIRECTORY packaging/fail2ban/ DESTINATION ${CMAKE_INSTALL_DATADIR}/agensio/fail2ban)
 install(FILES packaging/agensio-firewall.service DESTINATION /usr/lib/systemd/system)
 install(FILES README.md CHANGELOG.md LICENSE docs/configuration.md docs/keys.md docs/install.md docs/mcp.md
-              docs/security-control-plane.md docs/fail2ban.md docs/mariadb.md docs/auth.md docs/tls.md docs/redirects.md docs/headers.md docs/online-checks.md docs/examples.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+              docs/security-control-plane.md docs/approvals.md docs/fail2ban.md docs/mariadb.md docs/auth.md docs/tls.md docs/redirects.md docs/headers.md docs/online-checks.md docs/examples.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(DIRECTORY docs/examples DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 set(CPACK_PACKAGE_NAME agensio)

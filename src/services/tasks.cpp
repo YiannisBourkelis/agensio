@@ -394,13 +394,14 @@ const std::vector<Row>& rows() {
          {{"{venv}/bin/pip", "the virtualenv has no pip: the Python of [control] runtimes cannot make virtualenvs (python3-venv)"}},
          nullptr, nullptr, 0640, {}, false, nullptr, true},
         // Any package the site's account may install (the owner's decision, 2026-09-28), named by
-        // the caller: every run is confirmed by the user in person (user_confirm), and the value
-        // can only be requirement specifiers, after `--`, one argument each.
+        // the caller: every run waits for a person's approval with a code (user_confirm; the gate of
+        // docs/design-site-operations.md 27), and the value can only be requirement specifiers, after
+        // `--`, one argument each.
         {"django", "pip_install",
          "Installs the packages named into the site's virtualenv from the Python Package Index (pip install -- PACKAGES), as the site's "
          "account: the framework before startproject (wagtail, django), the application server (gunicorn), a database driver (psycopg[binary]), "
-         "a plugin. Their code runs as the site's account, so the user confirms every run in person: the MCP bridge asks in the client's own "
-         "dialog, agensio ctl in the terminal. Downloads.",
+         "a plugin. Their code runs as the site's account, so every run waits for a person's approval with the code from their authenticator "
+         "app (agensio ctl approve, or approvals_ask in an MCP client that can ask). Downloads.",
          "python3", "python3", {{"-m"}, {"pip"}, {"install"}, {"--"}, {"{packages}", nullptr, nullptr, true}},
          {{"packages", "One to ten requirement specifiers separated by spaces: a name (wagtail), with extras (psycopg[binary]), with a "
                        "version (wagtail==8.0, django>=6.1,<6.2). No URL, path or option.",
@@ -507,7 +508,7 @@ std::string confirmation_warning(std::string_view site, std::string_view package
            "? pip downloads them from the Python Package Index, and their code runs as the site's account" +
            (account.empty() ? std::string() : " " + std::string(account)) +
            ": while they install and whenever the application loads them. A mistyped or look-alike name is a common way to get malicious "
-           "code: check each name first (" + names + "). Nothing is installed unless you confirm.";
+           "code: check each name first (" + names + "). Nothing is installed unless you approve it.";
 }
 
 // Presets built on another: their own rows plus the base's, except the new-application ones.
@@ -605,8 +606,8 @@ json::Value catalog(std::string_view app, const CatalogContext* ctx) {
         }
         if (r.user_confirm) {
             item.set("user_confirmation", true)
-                .set("confirmation", "the user confirms every run in person: the MCP bridge asks in the client's own dialog (an agent's confirm "
-                                     "is not enough), agensio ctl in the terminal; a client that cannot ask gets the terminal command for the user");
+                .set("confirmation", "every run waits for the person's approval with the code from their authenticator app (agensio ctl "
+                                     "approve, or approvals_ask in an MCP client that can ask); an agent's confirm is not enough");
         }
         list.push(std::move(item));
     }

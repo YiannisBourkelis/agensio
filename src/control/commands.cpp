@@ -2523,6 +2523,41 @@ std::vector<Finding> auth_findings(const Config& cfg, std::time_t now) {
     return out;
 }
 
+std::vector<Finding> approval_findings(const ApprovalHealth& a) {
+    std::vector<Finding> out;
+    std::size_t usable = 0;
+    for (const auto& ap : a.approvers["approvers"].items()) {
+        if (ap.get("problem").empty()) {
+            ++usable;
+            continue;
+        }
+        out.push_back({"error", "approver_file_unsafe", "",
+                       "The approver file " + std::string(ap.get("problem")) + ", so its codes approve nothing; anyone who could read it may know its secret.",
+                       "as root: agensio approver-add " + std::string(ap.get("name")) + " --replace, and add the new secret to the authenticator app (docs/approvals.md 2)"});
+    }
+    const std::string dir_problem(a.approvers.get("dir_problem"));
+    if (!dir_problem.empty() && dir_problem != "missing")
+        out.push_back({"error", "approver_file_unsafe", "", "The approvers' directory " + std::string(a.approvers.get("dir")) + " is " + dir_problem + ", so no approver is used.",
+                       "as root: chmod 700 " + std::string(a.approvers.get("dir")) + " (owned by root), then agensio approvers"});
+    if (usable == 0)
+        out.push_back({"info", "approvals_not_set_up", "",
+                       "No approver is set up, so the changes that wait for a person's approval (pip_install, docs/approvals.md 1) cannot be made.",
+                       "as root on the server: agensio approver-add NAME, then add the secret it prints to an authenticator app"});
+    if (!a.helper)
+        out.push_back({"warn", "approvals_without_helper", "",
+                       "Approval codes are checked by the server itself, against approver files of the server's own account: an agent running as that account could read them.",
+                       "start the server as root, so its root helper checks the codes against root's files ([control] provision = true, the default; docs/approvals.md 4)"});
+    if (a.refused_last_hour >= 3)
+        out.push_back({"warn", "approval_code_failures", "",
+                       std::to_string(a.refused_last_hour) + " approval codes were refused in the last hour: a mistyped code now and then is normal, more is a sign that something is guessing.",
+                       "read the audit log's approvals lines for the uid that sent them; five in ten minutes stop approvals for ten minutes"});
+    if (a.bridge_as_root)
+        out.push_back({"error", "approvals_forgeable", "",
+                       "The MCP bridge connects as root: an agent with root's account can read the approvers' secrets, so the code no longer keeps a change from it.",
+                       "give the agent a plain account in the control plane's admins group and its own SSH key limited to command=\"agensio mcp\" (docs/mcp.md)"});
+    return out;
+}
+
 std::vector<Finding> env_findings(const json::Value& inspected) {
     std::vector<Finding> out;
     if (inspected["busy"].boolean()) {

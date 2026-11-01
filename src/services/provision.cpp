@@ -31,6 +31,7 @@
 #include "control/protection.hpp"
 #include "control/sites.hpp"
 #include "services/appenv.hpp"
+#include "services/approvers.hpp"
 #ifdef AGENSIO_HAS_AUTH
 #include "services/authusers.hpp"
 #endif
@@ -233,8 +234,15 @@ std::string validate(const json::Value& req, const Config& cfg) {
         if (!phase.empty() && phase != "full" && phase != "up" && phase != "start") return "pools_apply: phase must be full, up or start";
         return "";
     }
+    if (op == "approval_check") {
+        // A code and nothing else (docs/design-site-operations.md 27.5): the helper reads root's approver
+        // files itself, and answers whose code it was, never a secret.
+        const std::string code(req.get("code"));
+        if (code.size() != 6 || code.find_first_not_of("0123456789") != std::string::npos) return "approval_check: code is six digits";
+        return "";
+    }
     if (op == "service_restart" || op == "ping" || op == "env_check" || op == "app_check" || op == "trash_list" ||
-        op == "trash_expire" || op == "host_protection" || op == "php_runtimes")
+        op == "trash_expire" || op == "host_protection" || op == "php_runtimes" || op == "approvers_list")
         return "";
     return "unknown operation '" + op + "'";
 }
@@ -1887,6 +1895,9 @@ void helper_loop(int fd, const Config& cfg) {
     if (!cfg.user.empty())
         if (const struct passwd* pw = ::getpwnam(cfg.user.c_str())) server_uid = pw->pw_uid;
     auto last_restart = std::chrono::steady_clock::time_point{};
+    // Approval codes are checked here, against root's files, with the wrong codes counted in this
+    // process, which the server cannot reset (docs/design-site-operations.md 27.5).
+    approvers::Checker approval_checker;
     std::string in;
     char buf[4096];
     for (;;) {
@@ -1974,6 +1985,17 @@ void helper_loop(int fd, const Config& cfg) {
                 } else if (op == "auth_users_read" || op == "auth_users_write") {
                     reply = auth_users_op(req, cfg);
 #endif
+                } else if (op == "approval_check") {
+                    const auto r = approval_checker.check(approvers::dir_of(cfg), 0, req.get("code"), static_cast<std::int64_t>(std::time(nullptr)));
+                    reply.set("ok", r.ok).set("approver", r.approver).set("error", r.error).set("locked_until", static_cast<double>(r.locked_until))
+                        .set("failures", r.failures);
+                } else if (op == "approvers_list") {
+                    std::string problem;
+                    json::Value list = json::Value::array();
+                    for (const auto& a : approvers::list(approvers::dir_of(cfg), 0, problem))
+                        list.push(json::Value::object().set("name", a.name).set("created", a.created).set("last_used_step", static_cast<double>(a.last_step))
+                                      .set("problem", a.problem));
+                    reply.set("ok", true).set("approvers", std::move(list)).set("dir", approvers::dir_of(cfg).string()).set("dir_problem", problem);
                 } else if (op == "app_status" || op == "app_logs") {
                     reply = app_op(req, cfg);
                 } else if (op == "app_check") {

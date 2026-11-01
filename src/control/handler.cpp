@@ -37,10 +37,21 @@
 #include "services/pools.hpp"
 #include "services/provision.hpp"
 #include "services/tasks.hpp"
+#include "services/totp.hpp"
 
 namespace agensio {
 
 void ControlHandler::reply(Stream& s, int status, const json::Value& body) {
+    // A dry run of a change the gate holds back says so in its answer (docs/design-site-operations.md 27.2).
+    if (const auto it = notes_.find(&s); it != notes_.end()) {
+        json::Value merged = body;
+        if (merged.is_object())
+            merged.set("needs_approval", it->second)
+                .set("approval_note", "done for real, this change waits for a person's approval with a code from their authenticator app (agensio ctl approve)");
+        notes_.erase(it);
+        reply(s, status, merged);
+        return;
+    }
     Response& r = s.response;
     r.status = status;
     r.buffer = body.dump();
@@ -143,12 +154,15 @@ void ControlHandler::handle(Stream& s, WorkerState& ws) {
 bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<void()>& done) {
     const Request& req = s.request;
     const std::string_view path = ws.path;
+    notes_.erase(&s);  // a note belongs to the request that made it, never to a later one on the connection
+    if (s.conn.peer_uid == 0 && s.request.headers.get("x-agensio-client").starts_with("mcp")) bridge_root_seen_ = std::time(nullptr);
     if (req.method == Method::post) return mutate(s, ws, path, done);
     // The read commands (F2): every one is a GET, every one needs the viewer role.
     const bool read_command = path == "/v1/status" || path == "/v1/sites" || path.starts_with("/v1/sites/") ||
                               path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health" ||
                               path == "/v1/presets" || path == "/v1/uploads" || path == "/v1/settings" || path == "/v1/config/reference" ||
-                              path == "/v1/trash" || path == "/v1/protection" || path == "/v1/php";
+                              path == "/v1/trash" || path == "/v1/protection" || path == "/v1/php" || path == "/v1/approvals" ||
+                              path.starts_with("/v1/approvals/");
     if (!read_command) {
         reply(s, 404, json::Value::object().set("error", "unknown command").set("path", std::string(path)));
         return false;
@@ -161,6 +175,12 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
     if (!require(s, Role::viewer, path.substr(4))) return false;
     if (!backend_) {
         reply(s, 503, json::Value::object().set("error", "no backend"));
+        return false;
+    }
+    if (path == "/v1/approvals" || path.starts_with("/v1/approvals/")) {
+        // What waits for approval shows the changes themselves (a file's text, a site file's diff): admin.
+        if (!require(s, Role::admin, path.substr(4))) return false;
+        approvals_get(s, path == "/v1/approvals" ? std::string_view() : path.substr(14));
         return false;
     }
     if (path.starts_with("/v1/sites/") && path.ends_with("/env") && path.size() > 14) {
@@ -629,6 +649,17 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         reply(s, 405, json::Value::object().set("error", "method not allowed"));
         return false;
     }
+    if (path == "/v1/approvals" || path.starts_with("/v1/approvals/")) {
+        // The code is the confirmation here; no confirm field is asked for (docs/design-site-operations.md 27.4).
+        if (!require(s, Role::admin, path.substr(4))) return false;
+        json::Value body = json::Value::object();
+        std::string err;
+        if (!s.response.buffer.empty() && (!json::parse(s.response.buffer, body, err) || !body.is_object())) {
+            reply(s, 400, json::Value::object().set("error", "body must be a JSON object: " + err));
+            return false;
+        }
+        return approvals_post(s, ws, path == "/v1/approvals" ? std::string_view() : path.substr(14), body, done);
+    }
     const bool known = path == "/v1/reload" || path == "/v1/sites" || path == "/v1/logs/reopen" ||
                        (site_path && !name.empty() && (action.empty() || action == "disable" || action == "enable" ||
                                                        action == "delete" || action == "renew" || action == "install" || action == "copy" ||
@@ -657,6 +688,19 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
     if (!backend_) {
         reply(s, 503, json::Value::object().set("error", "no backend"));
         return false;
+    }
+    // The gate (docs/design-site-operations.md 27.2): a change that can run code, move a secret or data
+    // off the host, grant access or destroy beyond undo is stored, not run, until a person approves it
+    // with a code from their authenticator app; a dry run runs and says it would wait. Only the approved
+    // change run_approved runs passes (approving_), whatever the request says about itself.
+    if (!approving_) {
+        std::vector<std::string> why = control::approval_reasons(path, action, body);
+        if (!why.empty()) {
+            if (!body["dry_run"].boolean()) return queue_for_approval(s, ws, path, action, body, reason, std::move(why), done);
+            json::Value list = json::Value::array();
+            for (const auto& w : why) list.push(w);
+            notes_[&s] = std::move(list);
+        }
     }
     if (path == "/v1/reload") {
         // The reload with the PHP pools around it (docs/design-php-versions.md 6.1), the answer waiting for
@@ -2051,28 +2095,18 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
                                .set("hint", "the site's root is the project directory tasks run in; site_update sets it"));
     const bool dry_run = body["dry_run"].boolean();
     const std::string key = site->server_names.front();
-    // A task whose caller names what gets installed (pip_install) runs only when the user confirmed
-    // it in person (2026-09-28, the owner's decision): the MCP bridge after the client's own dialog
-    // (user_confirmed "mcp"), agensio ctl in a terminal ("terminal"). An agent's confirm is not
-    // enough, and the bridge never passes one of its arguments as this field.
+    // A task whose caller names what gets installed (pip_install) runs only once a person approved it
+    // with a code from their authenticator app (docs/design-site-operations.md 27, the owner's decision
+    // of 2026-11-01): the gate in mutate holds it back, and only the approved change it runs gets here
+    // with approving_ set. Before alpha.120 a user_confirmed field of the request was believed, which any
+    // process of the agent's own account could send.
     std::string confirmed_how;
     if (row->user_confirm && !dry_run) {
-        const std::string how(body.get("user_confirmed"));
-        if (how != "mcp" && how != "terminal") {
-            std::string given;
-            for (const auto& m : params.members()) given += " --param " + shell_word(m.first + "=" + m.second.str());
+        if (!approving_)
             return answer(428, json::Value::object()
-                                   .set("error", "task " + task + " runs only when the user confirms it in person: the MCP bridge asks in the client's own dialog, "
-                                                 "agensio ctl in the terminal")
-                                   .set("warning", tasks::confirmation_warning(key, params.get("packages"), site->user, ""))
-                                   .set("run_in_terminal", "agensio ctl site-task " + key + " " + task + given + " --yes --reason \"...\""));
-        }
-        std::string client(body.get("client"));
-        client = tasks::clean_text(client.substr(0, 80));
-        for (char& c : client)
-            if (c == '\n' || c == '\r') c = ' ';
-        confirmed_how = how == "mcp" ? "confirmed by the user in the MCP client's dialog" + (client.empty() ? std::string() : " (" + client + ")")
-                                     : std::string("confirmed by the user in a terminal (agensio ctl)");
+                                   .set("error", "task " + task + " waits for a person's approval with a code from their authenticator app")
+                                   .set("warning", tasks::confirmation_warning(key, params.get("packages"), site->user, "")));
+        confirmed_how = "approved by " + approving_->approver + " with an authenticator code (approval " + approving_->id + ")";
     }
     if (!dry_run)
         if (const auto it = running_tasks_.find(key); it != running_tasks_.end())
@@ -2628,6 +2662,266 @@ void ControlHandler::site_auth_user_change(Stream& s, std::string_view name, con
     reply(s, 501, json::Value::object().set("error", "this build has no password support (it needs libxcrypt and OpenSSL)"));
     done();
 #endif
+}
+
+
+// ---- approvals (docs/design-site-operations.md 27) ----
+
+namespace {
+constexpr const char* kApproveHow =
+    "A person approves it on the server: agensio ctl approve shows every change waiting and asks for the code from their "
+    "authenticator app (one code approves them all); approvals_ask shows the same in an MCP client's own dialog where the client "
+    "can ask. No agent can approve it, and no argument of any tool does. approvals_list (GET /v1/approvals) shows what waits and, "
+    "once it ran, its answer.";
+
+std::string clean_line(std::string_view text, std::size_t max) {
+    std::string out = tasks::clean_text(std::string(text.substr(0, max)));
+    for (char& c : out)
+        if (c == '\n' || c == '\r') c = ' ';
+    return out;
+}
+}  // namespace
+
+std::string ControlHandler::approval_preview(std::string_view path, const json::Value& body) {
+    std::string_view name, action;
+    if (path.starts_with("/v1/sites/")) {
+        name = path.substr(10);
+        if (const std::size_t slash = name.find('/'); slash != std::string_view::npos) {
+            action = name.substr(slash + 1);
+            name = name.substr(0, slash);
+        }
+    }
+    const SiteConfig* site = backend_ ? control::find_site(backend_->running(), name) : nullptr;
+    if (action == "task") {
+        const std::string task(body.get("task"));
+        std::string t = "task " + task + " on " + std::string(name) + (site && !site->user.empty() ? ", as the account " + site->user : std::string()) + "\n";
+        for (const auto& m : body["params"].members()) t += m.first + " = " + std::string(m.second.str()) + "\n";
+        t += tasks::confirmation_warning(std::string(name), body["params"].get("packages"), site ? site->user : std::string(), "");
+        return control::escape_for_terminal(t);
+    }
+    // Any other change: the request as it would run, without the fields every request carries.
+    json::Value shown = json::Value::object();
+    for (const auto& [k, v] : body.members())
+        if (k != "confirm" && k != "reason") shown.set(k, v);
+    return control::escape_for_terminal("POST " + std::string(path) + "\n" + shown.dump());
+}
+
+bool ControlHandler::queue_for_approval(Stream& s, WorkerState& ws, std::string_view path, std::string_view action, const json::Value& body,
+                                        std::string_view reason, std::vector<std::string> why, std::function<void()>& done) {
+    auto c = std::make_shared<control::PendingChange>();
+    c->id = control::new_approval_id();
+    if (c->id.empty() || !totp::available()) {
+        reply(s, 503, json::Value::object().set("error", "this change waits for a person's approval, and this agensio was built without OpenSSL, which approvals need"));
+        return false;
+    }
+    c->path = std::string(path);
+    c->body = body.dump();
+    c->uid = s.conn.peer_uid;
+    c->gid = s.conn.peer_gid;
+    c->role = s.conn.role;
+    c->client = clean_line(s.request.headers.get("x-agensio-client"), 80);
+    c->reason = clean_line(reason, 300);
+    c->reasons = std::move(why);
+    c->preview = approval_preview(path, body);
+    // Stored only once it is known to be one that would run: a person is never asked about a change
+    // that fails anyway (design 27.3). The dry run's answer goes with it: for a task, the exact argv.
+    auto store = [this, &s, c](const json::Value& checked) {
+        const std::time_t now = std::time(nullptr);
+        if (checked.is_object() && checked["argv"].is_array()) {
+            std::string argv;
+            for (const auto& a : checked["argv"].items()) argv += (argv.empty() ? "" : " ") + shell_word(a.str());
+            c->preview += control::escape_for_terminal("\nruns: " + argv + (checked.get("as").empty() ? std::string() : " as " + std::string(checked.get("as"))));
+        }
+        const std::string id = c->id, first = c->reasons.front(), what = c->path.substr(4) + (c->reason.empty() ? "" : " (" + c->reason + ")");
+        json::Value answer = control::pending_json(*c, now, false);
+        if (!approvals_.add(*c, now)) {
+            reply(s, 429, json::Value::object().set("error", std::to_string(control::ApprovalStore::kMaxWaiting) +
+                                                                  " changes already wait for approval: a person approves or rejects them first (agensio ctl approve)"));
+            return;
+        }
+        audit_peer(s, what, "waits for approval " + id + ": " + first);
+        answer.set("ok", true).set("pending", true).set("approve", kApproveHow);
+        reply(s, 202, answer);
+    };
+    if (action != "task" || !done) {
+        store(json::Value());
+        return false;
+    }
+    auto rs = std::make_shared<Stream>();
+    rs->request.method = Method::post;
+    rs->conn.peer_uid = s.conn.peer_uid;
+    rs->conn.peer_gid = s.conn.peer_gid;
+    rs->conn.role = s.conn.role;
+    json::Value dry = body;
+    dry.set("dry_run", true);
+    rs->response.buffer = dry.dump();
+    auto finish = done;
+    auto once = std::make_shared<bool>(false);
+    std::function<void()> after = [this, &s, rs, store, finish, once]() {
+        if (*once) return;
+        *once = true;
+        std::string text = rs->response.buffer;
+        if (!text.empty() && text.back() == '\n') text.pop_back();
+        json::Value v;
+        std::string err;
+        if (!json::parse(text, v, err)) v = json::Value::object().set("error", text);
+        if (rs->response.status != 200) reply(s, rs->response.status, v);  // refused as it would be: nothing stored
+        else store(v);
+        finish();
+    };
+    std::function<void()> d = after;
+    if (!mutate(*rs, ws, path, d)) after();
+    return true;
+}
+
+void ControlHandler::approvals_get(Stream& s, std::string_view id) {
+    const std::time_t now = std::time(nullptr);
+    if (id.empty()) {
+        json::Value list = json::Value::array();
+        std::size_t waiting = 0;
+        for (const control::PendingChange* c : approvals_.all(now)) {
+            if (c->state == control::PendingChange::State::waiting) ++waiting;
+            list.push(control::pending_json(*c, now, true).set("text", control::pending_text(*c, now)));
+        }
+        reply(s, 200, json::Value::object().set("waiting", static_cast<double>(waiting)).set("approvals", std::move(list)).set("approve", kApproveHow));
+        return;
+    }
+    const control::PendingChange* c = approvals_.find(id, now);
+    if (!c) {
+        reply(s, 404, json::Value::object().set("error", "no approval " + std::string(id) + ": unknown, or older than ten minutes"));
+        return;
+    }
+    reply(s, 200, control::pending_json(*c, now, true).set("text", control::pending_text(*c, now)));
+}
+
+bool ControlHandler::approvals_post(Stream& s, WorkerState& ws, std::string_view rest, const json::Value& body, std::function<void()>& done) {
+    const std::time_t now = std::time(nullptr);
+    if (!rest.empty()) {
+        if (!rest.ends_with("/reject")) {
+            reply(s, 404, json::Value::object().set("error", "unknown command").set("path", "/v1/approvals/" + std::string(rest)));
+            return false;
+        }
+        const std::string id(rest.substr(0, rest.size() - 7));
+        if (!approvals_.reject(id, now)) {
+            reply(s, 404, json::Value::object().set("error", "no change " + id + " waits for approval"));
+            return false;
+        }
+        audit_peer(s, "approvals/" + id + "/reject", "rejected, nothing ran");
+        reply(s, 200, json::Value::object().set("ok", true).set("rejected", id));
+        return false;
+    }
+    if (!done || !backend_) {
+        reply(s, 503, json::Value::object().set("error", "approving needs an asynchronous caller"));
+        return false;
+    }
+    const std::string code(body.get("code"));
+    if (code.size() != totp::kDigits || code.find_first_not_of("0123456789") != std::string::npos) {
+        reply(s, 400, json::Value::object().set("error", "code is the six digits an authenticator app shows"));
+        return false;
+    }
+    // The changes approved: exactly those named, each still waiting. Never "whatever waits now": a change
+    // queued after the person read the list would ride on their code.
+    auto ids = std::make_shared<std::vector<std::string>>();
+    if (!body["ids"].is_array() || body["ids"].items().empty()) {
+        reply(s, 400, json::Value::object().set("error", "ids names the changes the person read (agensio ctl approve and approvals_ask send them)"));
+        return false;
+    }
+    {
+        for (const auto& e : body["ids"].items()) {
+            const control::PendingChange* c = e.is_string() ? approvals_.find(e.str(), now) : nullptr;
+            if (!c || c->state != control::PendingChange::State::waiting) {
+                reply(s, 409, json::Value::object().set("error", "no change " + (e.is_string() ? e.str() : std::string("?")) + " waits for approval: approved, rejected, or older than ten minutes"));
+                return false;
+            }
+            ids->push_back(c->id);
+        }
+    }
+    std::string list;
+    for (const auto& id : *ids) list += (list.empty() ? "" : ", ") + id;
+    auto proceed = [this, &s, &ws, ids, list, done](bool ok, std::string approver, std::string error, double locked_until) {
+        if (!ok) {
+            audit_peer(s, "approvals (" + list + ")", "refused: " + error);
+            refused_codes_.push_back(std::time(nullptr));
+            json::Value answer = json::Value::object().set("ok", false).set("error", error);
+            if (locked_until > 0) answer.set("locked_until", locked_until);
+            reply(s, 403, answer);
+            done();
+            return;
+        }
+        const std::time_t at = std::time(nullptr);
+        for (const auto& id : *ids)
+            if (control::PendingChange* c = approvals_.find(id, at); c && c->state == control::PendingChange::State::waiting) {
+                c->state = control::PendingChange::State::running;
+                c->approver = approver;
+            }
+        audit_peer(s, "approvals (" + list + ")", "approved by " + approver);
+        run_approved(ids, 0, ws, [this, &s, ids, approver, done]() {
+            const std::time_t end = std::time(nullptr);
+            json::Value results = json::Value::array();
+            for (const auto& id : *ids)
+                if (const control::PendingChange* c = approvals_.find(id, end)) results.push(control::pending_json(*c, end, true));
+            reply(s, 200, json::Value::object().set("ok", true).set("approved_by", approver).set("results", std::move(results)));
+            done();
+        });
+    };
+    if (backend_->provision_available()) {
+        backend_->provision_async(json::Value::object().set("op", "approval_check").set("code", code), [proceed](json::Value r) {
+            proceed(r["ok"].boolean(), std::string(r.get("approver")), std::string(r.get("error")), r["locked_until"].num());
+        });
+    } else {
+        const auto r = approval_checker_.check(approvers::dir_of(backend_->running()), ::geteuid(), code, static_cast<std::int64_t>(now));
+        proceed(r.ok, r.approver, r.error, static_cast<double>(r.locked_until));
+    }
+    return true;
+}
+
+ControlHandler::ApprovalFacts ControlHandler::approval_facts(std::time_t now) {
+    std::erase_if(refused_codes_, [&](std::time_t at) { return now - at > 3600; });
+    ApprovalFacts f;
+    f.refused_last_hour = static_cast<int>(refused_codes_.size());
+    f.bridge_as_root = bridge_root_seen_ != 0 && now - bridge_root_seen_ < 7 * 86400;
+    return f;
+}
+
+void ControlHandler::run_approved(std::shared_ptr<std::vector<std::string>> ids, std::size_t next, WorkerState& ws, std::function<void()> finished) {
+    for (; next < ids->size(); ++next) {
+        control::PendingChange* c = approvals_.find((*ids)[next], std::time(nullptr));
+        if (!c || c->state != control::PendingChange::State::running) continue;
+        // The stored request, as its requester sent it, through the same code path: a stream of its
+        // own carries the requester's identity and the body, and receives the answer.
+        auto rs = std::make_shared<Stream>();
+        rs->request.method = Method::post;
+        rs->conn.peer_uid = c->uid;
+        rs->conn.peer_gid = c->gid;
+        rs->conn.role = c->role;
+        rs->response.buffer = c->body;
+        const std::string id = c->id, path = c->path;
+        auto once = std::make_shared<bool>(false);
+        std::function<void()> after = [this, rs, id, ids, next, &ws, finished, once]() {
+            if (*once) return;
+            *once = true;
+            const std::time_t at = std::time(nullptr);
+            if (control::PendingChange* p = approvals_.find(id, at)) {
+                p->status = rs->response.status;
+                std::string text = rs->response.buffer;
+                if (!text.empty() && text.back() == '\n') text.pop_back();
+                json::Value v;
+                std::string err;
+                if (!json::parse(text, v, err)) v = json::Value::object().set("answer", text);
+                p->result = std::move(v);
+                p->state = p->status >= 200 && p->status < 300 ? control::PendingChange::State::done : control::PendingChange::State::failed;
+                p->finished = at;
+            }
+            run_approved(ids, next + 1, ws, finished);
+        };
+        approving_ = c;
+        std::function<void()> d = after;
+        const bool deferred = mutate(*rs, ws, path, d);
+        approving_ = nullptr;
+        if (!deferred) after();
+        return;
+    }
+    finished();
 }
 
 }  // namespace agensio

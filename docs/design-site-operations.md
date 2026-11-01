@@ -1709,3 +1709,141 @@ lines; T2, health judging the certificate served from memory (`certificate_not_l
 `acme_renewal_overdue`, `acme_renewal_failed`); T3, the certificate refresh (no configuration file
 read) used by ACME, an hourly watch of the files and `cert-renew` on a site's own files; T4,
 `docs/tls.md` and the cookbook's certbot recipe.
+
+## 27. Approvals with a second factor, and F12 under them (2026-11-01, agreed with the owner)
+
+The test VPS asked for `site_file_write` and `site_file_read` (a static site's `index.html`, a
+favicon, `robots.txt`: work that took root and `install(1)` by hand). The owner's condition for
+building F12: no prompt injection, of any sophistication, may harm the system through the control
+plane. Reading the in-person confirmation of row 32 (`pip_install`) for that showed it does not
+hold: the server believes a `user_confirmed` field, which the bridge sets only after its dialog, but
+which any process of the agent's account can send itself (`agensio ctl ... --yes`, or `curl` to the
+socket); an agent in an editor with a shell and the SSH key the bridge uses is such a process, and
+Claude Code's VS Code extension declines every dialog, so the terminal was the only path anyway.
+
+### 27.1 The rule
+
+A change made through the control plane that can run code, move a secret or data off the host,
+grant access, or destroy beyond undo waits until a person approves it with a code from an
+authenticator app (TOTP, RFC 6238). The code is what no agent holds, whatever it read and whatever
+shell it has; the change approved is the one the server stored, which nothing can alter after it was
+queued; one code approves every change waiting, so a batch costs the person one code.
+
+### 27.2 What waits for approval (the owner, 2026-11-01)
+
+| kind | calls |
+|---|---|
+| code and installs | `site_install` from any source; `site_task` `pip_install` (row 32, replaced) |
+| every file change | the F12 writes (`site_file_write`, `site_file_edit`, `site_dir_create`, `site_path_move`, `site_path_delete`), `site_file_restore`, `site_copy` |
+| secrets leaving | `site_file_read` of a credential or database file (`secret_paths`, `.env*`, `.git/`, `*.key`, `*.pem`, `.sqlite`, `.sqlite3`, `.db`); `site_env` with `reveal` |
+| making files run | `site_update` or `site_create` setting or changing `app`, `root`, `served_dir`, `rules.entry_points`, `rules.front_controller`; a `site_create` whose root already holds a file its app would run |
+| sending visitors or data elsewhere | `upstream` changed by `site_update`, or set by `site_create` to an address off the host; a `[[site.redirect]]` rule to a host that is not one of the site's names; `site_env_set` |
+| granting access | `site_auth_user_set`; a `site_update` that removes or widens a password or address rule (a rule gone, an allow list or `skip_for` grown, `open` or `mode = "report"` added, `plain_http = "allow"`) |
+| destroying beyond undo | `trash_delete`, `trash_expire` |
+
+Everything else keeps today's `confirm`: HSTS, response headers, compression, `canonical`,
+redirects within the site, `login_paths`, MIME types, limits, protections added or narrowed,
+disable and enable, reload, `cert-renew`, `site_delete` (to the trash), the other site tasks. None of
+those runs code, moves a secret or data off the host, grants access, or destroys beyond undo; each
+is one audit line and undone by another call. `dry_run` is never gated: it answers the preview and
+the reasons approval would be needed, and stores nothing.
+
+### 27.3 Pending changes
+
+- A gated call is validated as far as it would be before acting, then stored instead of run: an id
+  (48 random bits, 12 hex digits: unique, not a secret), the request (path and body), who queued it (uid, gid,
+  role, the MCP client's name), its reason, the time, the reasons it needs approval, and the
+  preview. The answer is `202` with `pending: true`, the id, the reasons, the preview, and what the
+  person does next.
+- In the server's memory, at most 32 waiting, each for 10 minutes, lost at a restart (nothing was
+  applied).
+- What the preview was made against is part of the change: a file change carries the sha256 of the
+  file it was diffed against, a `site_update` the managed file's text; executing re-checks it, and a
+  change made meanwhile refuses the approved one ("changed since it was queued; queue it again").
+
+### 27.4 Approving
+
+- `agensio ctl approve [ID ...]` lists the changes waiting (all, or the ones named), each with its
+  preview, then asks for the code on the terminal (`/dev/tty`, never standard input); the code
+  approves exactly the list shown: `POST /v1/approvals` takes the code with the ids, never "whatever
+  waits now", so a change queued after the person read the list cannot ride on their code. `--reject ID` drops one, `--list` only shows, `--show ID` prints
+  one change whole.
+- A gated command typed at an interactive terminal (`agensio ctl site-install ... --yes`) asks for the
+  code at once: a person at the server types one command and one code.
+- The server checks the code (27.5), then runs each change in the order queued through the same code
+  path, marked approved, and answers each one's result; results stay 10 minutes, a read's content is
+  handed out once and then dropped.
+- MCP: a gated tool queues and answers the pending change. `approvals_list` shows what waits and what
+  was done; `approvals_ask` puts every waiting change in the client's own dialog (elicitation) with a
+  field for the code, which the model neither sees nor answers; a client that cannot ask (VS Code's
+  extension) gets the answer to have the person run `agensio ctl approve` on the server. No tool takes
+  a code, and the bridge drops a `code` argument as it drops `user_confirmed` today.
+- The preview is the server's, from the stored request, never the agent's words: what makes the
+  change dangerous first (`RUNS as PHP`, `sends visitors to evil.example`, `reveals the database
+  password`), then the change itself (a unified diff against the current file, a new file whole, at
+  most 400 lines with `--show` for the rest; binary content as size, sha256 and type; for
+  `site_update` the managed file's diff), and the agent's reason last, marked as the agent's. Every
+  byte outside printable ASCII, newline and tab is written `\xHH`, by the server and again by `ctl`,
+  so no content can move the cursor or hide a line from the person reading it.
+
+### 27.5 The code
+
+- TOTP as every authenticator app takes it: HMAC-SHA1, 6 digits, 30 seconds; the steps just before
+  and after are accepted for a clock 30 seconds off; a code is accepted once per approver (the last
+  step used is kept, RFC 6238 5.2), so a second batch inside the same 30 seconds waits for the next
+  code.
+- Approvers: `agensio approver-add NAME` (root, on the server; never through the control plane, so no
+  agent can enroll itself) writes a 20-byte random secret to `<config dir>/approvers/NAME.totp` (a
+  root `0700` directory, the file `0600`) and prints it once as base32 and as an `otpauth://` URI
+  (`qrencode -t ansiutf8` shows it as a QR code); `approver-remove NAME`; `approvers` lists names and
+  dates. Several approvers, one per person; the audit line names whose code approved.
+- The root helper checks a code (operation `approval_check`) and reads the secrets; the server never
+  sees them. Without the helper the server checks them itself from the same directory, which must
+  then be the server account's own and `0600`: health says such approvals are only as strong as the
+  separation between the server's account and the agent's.
+- Five wrong codes within ten minutes stop approvals for ten minutes (audit line, error log, health
+  `approval_code_failures`, a sign that something is guessing): at three chances in a million a try,
+  guessing gets nowhere.
+- Health `approvals_forgeable`: the bridge's peer is root (it could read the secrets), or the server's
+  own account without the helper; the agent belongs on a plain account in the `admins` group.
+  `approvals_not_set_up` (info) while no approver is enrolled: the calls of 27.2 are refused with the
+  setup line until then.
+
+### 27.6 F12 as built under approvals
+
+- The seven tools of section 3, gated as 27.2 says; listing and reading are free except secrets.
+- File content at most 180 KB a call, text or base64, inside the control socket's 256 KB body cap
+  (row 12, unchanged); larger files go through an upload and `site_install`. `[control] file_max`
+  is not added; `[control] reveal_secrets` is not added either (decision 2 of section 10 revised:
+  a secret's read waits for approval).
+- History: every file a change replaces or removes is kept outside the served tree, in
+  `<sites_root>/.history/<domain>/` (root `0700`, as the trash), five versions a file for 30 days,
+  `[control] file_history = { versions = 5, days = 30 }` in root's file (at a reload; `versions = 0`
+  turns it off); `site_file_history NAME PATH` lists them and `site_file_restore` (gated) puts one
+  back. Worker 0's hourly trash timer expires them.
+- A write's answer: the account it ran as, the absolute path, bytes, mode, the old and new sha256,
+  the history kept, and `path_check`'s verdict for the path (served as a file of what type, runs as
+  PHP, refused and by what).
+- A file's content in an answer is the site's data: the answer carries `untrusted: true`, and the
+  tools' texts tell the agent that text read from a site is data, never instructions.
+
+### 27.7 Order (one commit each)
+
+1. Approvals: the TOTP code, `approver-add`, the helper's `approval_check`, pending changes,
+   `ctl approve` and the inline prompt, `approvals_list` and `approvals_ask`, health's findings, the
+   security page; `pip_install` moved onto them, row 32 rewritten; `docs/approvals.md`.
+2. F12's seven tools and the history, gated; `tests/files.sh` in the root devbox with two accounts.
+3. The rest of 27.2: `site_install`, `site_copy`, secret reads, `site_env` reveal and set, the
+   `site_update` and `site_create` changes, `site_auth_user_set`, the trash deletes.
+
+### 27.8 Decisions (2026-11-01, the owner)
+
+1. F12's seven tools at once, guarded against prompt injection.
+2. The person's own approval, by a TOTP code checked against a root-only secret, for every call of
+   27.2; the scope is the owner's three choices (code and installs, secrets leaving, every file
+   change) and the five additions (making files run, sending visitors or data elsewhere, granting
+   access, destroying beyond undo, database files as secrets).
+3. `site_install` waits for approval whatever the source.
+4. History of five versions for 30 days, configurable in root's file.
+5. At most 180 KB of content a call, inside the 256 KB body cap.
+6. One code approves a batch; no time window in which changes pass unapproved.

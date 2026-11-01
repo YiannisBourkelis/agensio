@@ -557,10 +557,10 @@ agent has that account's role and every change it makes is an audit line with th
 reason it gave. A viewer's session does not even list the tools that change anything; each
 change needs a confirmation and a reason, and the agent host asks you before running it. What
 needs root on a server without the helper comes back as commands for you to run. The forced
-command matters: the confirmations the bridge asks of you in person (a `pip_install` of
-packages the agent named) bind only when the bridge is the agent's one way in, and a key that
-may run anything would let the agent call `agensio ctl` itself and answer for you. Keep your
-own key, without the restriction, for your terminal.
+command matters: a key that may run anything would let the agent run `agensio ctl` itself, for
+every change your account may make; the changes that wait for your approval (a `pip_install` of
+packages the agent named, `docs/approvals.md`) still need the code from your phone. Keep your own
+key, without the restriction, for your terminal.
 
 Easy to get wrong: files do not travel through the bridge; an archive on your machine goes up
 with `ssh anna@host1.example.com agensio ctl upload NAME < FILE`, with your own key, and the

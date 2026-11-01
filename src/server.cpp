@@ -16,6 +16,7 @@
 #include "services/pools.hpp"
 #include "services/provision.hpp"
 #include "services/appenv.hpp"
+#include "services/approvers.hpp"
 #ifdef AGENSIO_HAS_AUTH
 #include "services/authusers.hpp"
 #endif
@@ -1101,6 +1102,28 @@ json::Value Server::health_with(const std::vector<control::Finding>& more) {
     const auto noticed = control::notice_findings(cfg, site_notices().snapshot(), std::time(nullptr));  // what requests saw
     extra.insert(extra.end(), noticed.begin(), noticed.end());
     if (auto f = control::http3_finding(control::build_facts(), cfg)) extra.push_back(std::move(*f));  // HTTP/3 the system could serve
+    if (cfg.control.enabled) {  // approvals (docs/approvals.md): who can approve, how codes are checked, what was refused
+        control::ApprovalHealth ah;
+        ah.helper = provisioner_.available();
+        if (ah.helper) {
+            ah.approvers = provisioner_.try_request(json::Value::object().set("op", "approvers_list"));
+        } else {
+#ifndef _WIN32
+            std::string problem;
+            json::Value list = json::Value::array();
+            for (const auto& a : approvers::list(approvers::dir_of(cfg), ::geteuid(), problem))
+                list.push(json::Value::object().set("name", a.name).set("problem", a.problem));
+            ah.approvers = json::Value::object().set("approvers", std::move(list)).set("dir", approvers::dir_of(cfg).string()).set("dir_problem", problem);
+#endif
+        }
+        if (!ah.approvers["busy"].boolean()) {  // the helper running a task: say nothing rather than something wrong
+            const auto facts = control_handler_.approval_facts(std::time(nullptr));
+            ah.refused_last_hour = facts.refused_last_hour;
+            ah.bridge_as_root = facts.bridge_as_root;
+            const auto found = control::approval_findings(ah);
+            extra.insert(extra.end(), found.begin(), found.end());
+        }
+    }
     for (const auto& w : h3_waiting_) extra.push_back(control::h3_bind_finding(w));  // h3 a reload could not open (the alpha.110 and .112 reports)
     const control::TlsFacts tls = tls_facts();
     return control::health(cfg, cfg_, as_root, std::time(nullptr), extra, &tls);

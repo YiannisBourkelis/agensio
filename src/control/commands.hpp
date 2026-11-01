@@ -240,6 +240,21 @@ std::vector<Finding> root_file_findings(const std::vector<std::string>& files, c
 // environment files, through the helper), appended as they are.
 json::Value health(const Config& running, const Config& boot, bool as_root, std::time_t now, const std::vector<Finding>& extra = {},
                    const TlsFacts* tls = nullptr);
+// Approvals (docs/approvals.md): what health says of them while [control] is on. `approvers` is the
+// helper's approvers_list answer (or the same made by the server from its own files): approvers
+// [{name, problem}], dir, dir_problem.
+struct ApprovalHealth {
+    bool helper = false;            // the root helper checks codes
+    json::Value approvers;
+    int refused_last_hour = 0;      // codes refused (ControlHandler::approval_facts)
+    bool bridge_as_root = false;    // a request through the MCP bridge came from root this week
+};
+// approvals_not_set_up (info: no usable approver, the changes that wait cannot be made),
+// approver_file_unsafe (error, each file never used), approvals_without_helper (warn: codes checked
+// against the server account's own files), approval_code_failures (warn: three or more codes refused
+// in the last hour, a sign of guessing), approvals_forgeable (error: the bridge runs as root, which
+// can read the secrets).
+std::vector<Finding> approval_findings(const ApprovalHealth& a);
 // appenv::inspect's answer as findings: a file a task would refuse (warn), one the next task
 // tightens (info), a deleted site's file (info), or that the check could not run.
 std::vector<Finding> env_findings(const json::Value& inspected);

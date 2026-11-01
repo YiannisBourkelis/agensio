@@ -17,13 +17,14 @@ std::string default_control_socket() {
 }
 
 bool control_request(const std::string& socket_path, const std::string& method, const std::string& path,
-                     const std::string& body, ControlReply& reply, std::string& error) {
+                     const std::string& body, ControlReply& reply, std::string& error, const std::string& headers) {
 #ifdef ASIO_HAS_LOCAL_SOCKETS
     try {
         asio::io_context io;
         asio::local::stream_protocol::socket sock(io);
         sock.connect(asio::local::stream_protocol::endpoint(socket_path));
         std::string req = method + " " + path + " HTTP/1.1\r\nHost: control\r\nConnection: close\r\n";
+        req += headers;  // whole lines, each ending in CRLF (the bridge's X-Agensio-Client)
         if (!body.empty())
             req += std::string("Content-Type: ") + (method == "PUT" ? "application/octet-stream" : "application/json") +
                    "\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";

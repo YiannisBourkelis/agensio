@@ -845,27 +845,24 @@ as the interpreter rule requires. Debian and Ubuntu ship venv's `ensurepip` apar
 `python3-venv` the task list marks the interpreter and names
 `apt-get install -y python3-venv` for root, and `venv_create` is refused before it runs.
 
-**`pip_install` needs the user's own confirmation.** It installs whatever packages it is
-given (one to ten requirement specifiers: a name, extras, version clauses; no URL, path or
-option, each passed to pip after `--`), and their code runs as the site's account, so every
-run is confirmed by the user in person, never by an agent's `confirm`. Through MCP the bridge
-asks in the client's own dialog (MCP elicitation) before it sends the task: the packages, the
-site, the account, the virtualenv, and a warning to check each name on pypi.org, since a
-look-alike name is a common way to get malicious code. A client that cannot show the dialog,
-or a user who declines, gets a refusal carrying the `agensio ctl` command for the user to run
-in a terminal on the server, where the same warning is printed and `--yes` is the
-confirmation. The control API refuses the task without one of the two (428, with the warning
-and the command), and the audit log says how the user confirmed. `pip_install_requirements`
-needs no confirmation: the project's own file names the packages. That the agent cannot run
-`agensio ctl` itself depends on how it reaches the server: give its SSH key
-`command="agensio mcp"` (docs/mcp.md).
+**`pip_install` waits for a person's approval.** It installs whatever packages it is given (one
+to ten requirement specifiers: a name, extras, version clauses; no URL, path or option, each passed
+to pip after `--`), and their code runs as the site's account, so no run is made on an agent's
+`confirm`: the task is checked by a dry run, then stored, and runs only once a person approves it
+with the code from their authenticator app (`docs/approvals.md`; `agensio ctl approve` on the
+server, or `approvals_ask` in an MCP client that can ask). What waits names the packages, the site,
+the account, the exact command, and a warning to check each name on pypi.org, since a look-alike
+name is a common way to get malicious code. Typed by you at a terminal, `agensio ctl site-task ...
+pip_install ... --yes` asks for the code at once. Until 0.1.0-alpha.120 the confirmation was a field
+of the request, which any process of the agent's account could send. `pip_install_requirements`
+waits for nothing: the project's own file names the packages.
 
 **The tasks**, in the order a new Wagtail site takes them:
 
 | task | runs | notes |
 |---|---|---|
 | `venv_create` | `python3 -m venv <venv>` | again keeps what is installed |
-| `pip_install` | `pip install -- PACKAGES` | any packages, `--param "packages=wagtail gunicorn"`; the user confirms every run in person (below); downloads |
+| `pip_install` | `pip install -- PACKAGES` | any packages, `--param "packages=wagtail gunicorn"`; every run waits for a person's approval with a code (below); downloads |
 | `startproject` | wagtail: `wagtail start PROJECT .`; django: `django-admin startproject PROJECT .` | the directory must be empty; needs the framework from `pip_install` |
 | `pip_install_requirements` | `pip install -r requirements.txt` | after a new project, an install, a change; downloads |
 | `django_settings` | no program: writes `agensio_settings.py` | a fixed template, `0640`, only when missing; needs `DJANGO_SECRET_KEY` |

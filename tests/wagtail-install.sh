@@ -56,8 +56,15 @@ CS=$T/run/control.sock
 ctl() { "$BIN" ctl "$@" --socket $CS; }
 j() { python3 -c "import json,sys; d=json.load(open('$T/out')); print($1)"; }
 APP=$T/www/w8.test/app
-task() {  # task NAME [--param k=v]: runs it, prints ok exit seconds, keeps the answer in $T/out
-    ctl site-task w8.test "$@" --yes --reason live > $T/out
+# Approvals (docs/approvals.md): root's approver, and the code its app would show (tests/approve-code.py).
+"$BIN" approver-add suite -c $T/agensio.toml > /dev/null
+task() {  # task NAME [--param k=v]: runs it (approved with the code when it waits), prints ok exit seconds, keeps the answer in $T/out
+    ctl site-task w8.test "$@" --yes --reason live > $T/out < /dev/null
+    if python3 -c "import json,sys; sys.exit(0 if json.load(open('$T/out')).get('pending') else 1)"; then
+        cp $T/out $T/pending-$1.json
+        python3 "$(dirname "$0")/approve-code.py" $CS $T/approvers/suite.totp > $T/approved
+        python3 -c "import json; print(json.dumps(json.load(open('$T/approved'))['results'][0]['result']))" > $T/out
+    fi
     cp $T/out $T/out-$1.json
     j 'd["ok"], d.get("exit"), int(d.get("duration_ms", 0) / 1000)'
     python3 -c "import json; d=json.load(open('$T/out')); o=d.get('output', ''); print(d.get('error', '')); print(d.get('hint', '')); print(o)" > $T/last-$1.txt
@@ -67,7 +74,7 @@ out=$(ctl site-create --domain w8.test --app wagtail --project mysite --root $AP
 check "site-create: app = wagtail, project mysite, its own account" "yes w8" "$(echo "$out" | grep -q '"ok":true' && echo yes) $(stat -c %U $APP)"
 check "site-tasks: the interpreter can make virtualenvs, nothing for root to install" "True no" "$(ctl site-tasks w8.test > $T/out; j '[t for t in d["tasks"] if t["task"] == "venv_create"][0]["interpreter"]["ok"]') $(j '"yes" if "run_as_root" in d else "no"')"
 r=$(task venv_create); check "venv_create: the site's virtualenv" "True 0" "$(echo $r | cut -d' ' -f1-2)"
-r=$(task pip_install --param "packages=wagtail==$VERSION gunicorn" 2> $T/pip-warning); check "pip_install wagtail==$VERSION and gunicorn from pypi.org into it, the warning on the terminal" "True 0 yes" "$(echo $r | cut -d' ' -f1-2) $(grep -q '^WARNING: Install wagtail' $T/pip-warning && echo yes)"
+r=$(task pip_install --param "packages=wagtail==$VERSION gunicorn"); check "pip_install wagtail==$VERSION and gunicorn from pypi.org into it, after the approval with a code; the server's warning in what waited" "True 0 yes" "$(echo $r | cut -d' ' -f1-2) $(grep -q 'Install wagtail' $T/pending-pip_install.json && echo yes)"
 echo "     pip_install took $(echo $r | cut -d' ' -f3) s"
 r=$(task startproject); check "startproject (wagtail start): the project mysite in the site's directory" "True 0 yes" "$(echo $r | cut -d' ' -f1-2) $([ -f $APP/mysite/settings/production.py ] && echo yes)"
 r=$(task pip_install_requirements); check "pip_install_requirements" "True 0" "$(echo $r | cut -d' ' -f1-2)"
@@ -109,7 +116,7 @@ check "the admin logs in over https: Django's CSRF check accepts the origin (X-F
 check "signed in: the admin dashboard answers 200" "200" "$(curl -sS $H -c $J -b $J -o /dev/null -w '%{http_code}' https://w8.test:18843/admin/)"
 mkdir -p $APP/media/documents; echo private > $APP/media/documents/private.pdf; chown -R w8:agensio $APP/media; chmod 2750 $APP/media $APP/media/documents; chmod 640 $APP/media/documents/private.pdf
 check "the project's files and Wagtail's documents are refused at the edge" "404 404 404 404" "$(for p in /media/documents/private.pdf /manage.py /agensio_settings.py /db.sqlite3; do curl -sS $H -o /dev/null -w '%{http_code} ' https://w8.test:18843$p; done | sed 's/ $//')"
-check "pip_install is recorded as the user's confirmation in a terminal" "1" "$(grep -c "sites/w8.test/task (live): running task pip_install packages=wagtail==$VERSION gunicorn in .*, confirmed by the user in a terminal (agensio ctl)" $T/logs/audit.log)"
+check "pip_install is recorded as approved by the approver with a code" "1" "$(grep -c "sites/w8.test/task (live): running task pip_install packages=wagtail==$VERSION gunicorn in .*, approved by suite with an authenticator code" $T/logs/audit.log)"
 check "every task and the template are in the audit log" "9" "$(grep -c 'sites/w8.test/task (live): \(ran as w8 .* -> exit 0\|wrote \)' $T/logs/audit.log)"
 
 echo "wagtail: $pass passed, $fail failed"

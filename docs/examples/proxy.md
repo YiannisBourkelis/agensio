@@ -212,14 +212,14 @@ agensio ctl site-create --domain cms.example.com --app wagtail --project mysite 
 agensio ctl upload mysite.tar.gz < mysite.tar.gz                                    # the archive on standard input
 agensio ctl site-install cms.example.com --file mysite.tar.gz --yes --reason "wagtail site"    # generates DJANGO_SECRET_KEY
 for t in venv_create pip_install_requirements; do agensio ctl site-task cms.example.com $t --yes --reason "wagtail site"; done
-agensio ctl site-task cms.example.com pip_install --param "packages=gunicorn" --yes --reason "wagtail site"   # prints a warning; your --yes confirms it
+agensio ctl site-task cms.example.com pip_install --param "packages=gunicorn" --yes --reason "wagtail site"   # shows what it installs, asks for your app's code
 for t in django_settings migrate collectstatic; do agensio ctl site-task cms.example.com $t --yes --reason "wagtail site"; done
 agensio ctl site-unit cms.example.com --out /etc/systemd/system/agensio-app-cms.service   # as root, then enable it
 ```
 
 **MCP:** `site_create` with `app` "wagtail", `project` and `settings`
-`{"max_body_size": "50MB"}`; `site_install`; `site_task` for each task; for "pip_install" the
-bridge asks the user in the client's own dialog, an agent's `confirm` is not enough;
+`{"max_body_size": "50MB"}`; `site_install`; `site_task` for each task; "pip_install" waits for
+the person's approval with a code (`approvals_ask`, or `agensio ctl approve` on the server);
 `site_service_unit` for root's unit.
 
 **Reference:** [Django and Wagtail](../configuration.md#4e-django-and-wagtail-app--django-app--wagtail).

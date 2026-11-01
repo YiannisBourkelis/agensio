@@ -39,13 +39,16 @@
 #include "control/reference.hpp"
 #include "control/mcp.hpp"
 #include "control/settings.hpp"
+#include "control/approvals.hpp"
 #include "control/sites.hpp"
 #include "services/provision.hpp"
 #include "services/archive.hpp"
 #include "services/fetch.hpp"
 #include "services/install.hpp"
 #include "services/json.hpp"
+#include "services/approvers.hpp"
 #include "services/tasks.hpp"
+#include "services/totp.hpp"
 #include "http/request_assembly.hpp"
 #include "services/appenv.hpp"
 #include <chrono>
@@ -3250,6 +3253,12 @@ static void test_tasks() {
     // The helper's validation: names and short string parameters only.
     CHECK(provision::validate(js(R"({"op":"task_run","site":"r.test","task":"rails_new","params":{"name":"blog"},"dry_run":true})"), Config{}).empty());
     CHECK(provision::validate(js(R"({"op":"task_run","site":"r.test","task":"db_prepare"})"), Config{}).empty());
+    // approval_check takes six digits and nothing else (docs/design-site-operations.md 27.5); approvers_list nothing.
+    CHECK(provision::validate(js(R"({"op":"approval_check","code":"012345"})"), Config{}).empty());
+    CHECK(provision::validate(js(R"({"op":"approvers_list"})"), Config{}).empty());
+    for (const char* bad : {R"({"op":"approval_check"})", R"({"op":"approval_check","code":"12345"})", R"({"op":"approval_check","code":"1234567"})",
+                            R"({"op":"approval_check","code":"12345a"})", R"({"op":"approval_check","code":"../../x"})", R"({"op":"approval_check","code":123456})"})
+        CHECK(provision::validate(js(bad), Config{}).find("six digits") != std::string::npos);
     for (const char* bad : {R"({"op":"task_run","site":"../etc","task":"db_prepare"})", R"({"op":"task_run","site":"r.test","task":"Rails-New"})",
                             R"({"op":"task_run","site":"r.test","task":""})", R"({"op":"task_run","site":"r.test","task":"db_prepare","params":"name=x"})",
                             R"({"op":"task_run","site":"r.test","task":"db_prepare","params":{"name":5}})", R"({"op":"task_run","site":"r.test","task":"db_prepare","dry_run":"yes"})"})
@@ -7694,6 +7703,157 @@ static void test_managed_response_headers() {
         CHECK(plain.find("[[site.response_headers]]") == std::string::npos && plain.find("response_headers_baseline") == std::string::npos);
     }
     fs::remove_all(dir);
+}
+
+// Approval codes (docs/design-site-operations.md 27.5): HOTP and TOTP as RFC 4226 and RFC 6238 give
+// them, base32 as RFC 4648, the window of one step each way, a code accepted once.
+static void test_totp() {
+    if (!totp::available()) return;  // a build without OpenSSL: approvals are refused, nothing to compute
+    const std::string key = "12345678901234567890";
+    const char* hotp_vectors[] = {"755224", "287082", "359152", "969429", "338314", "254676", "287922", "162583", "399871", "520489"};
+    for (std::uint64_t c = 0; c < 10; ++c) CHECK(totp::hotp(key, c) == hotp_vectors[c]);  // RFC 4226 appendix D
+    // RFC 6238 appendix B (SHA1), the six digits of each eight-digit value.
+    const std::pair<std::int64_t, const char*> totp_vectors[] = {{59, "287082"}, {1111111109, "081804"}, {1111111111, "050471"},
+                                                                 {1234567890, "005924"}, {2000000000, "279037"}, {20000000000, "353130"}};
+    for (const auto& [at, code] : totp_vectors) CHECK(totp::hotp(key, static_cast<std::uint64_t>(totp::step_of(at))) == code);
+    // RFC 4648 section 10, without padding.
+    const std::pair<const char*, const char*> b32[] = {{"", ""}, {"f", "MY"}, {"fo", "MZXQ"}, {"foo", "MZXW6"}, {"foob", "MZXW6YQ"},
+                                                       {"fooba", "MZXW6YTB"}, {"foobar", "MZXW6YTBOI"}};
+    for (const auto& [plain, enc] : b32) {
+        CHECK(totp::base32_encode(plain) == enc);
+        CHECK(totp::base32_decode(enc) == std::optional<std::string>(plain));
+    }
+    CHECK(totp::base32_decode("mzxw 6ytb oi==") == std::optional<std::string>("foobar") && !totp::base32_decode("MZXW1"));
+    // The window: the step of now and one each way; above last_used only; six digits only.
+    const std::int64_t now = 1111111111, step = totp::step_of(now);
+    for (const std::int64_t s : {step - 1, step, step + 1}) CHECK(totp::match(key, totp::hotp(key, static_cast<std::uint64_t>(s)), now, -1) == std::optional<std::int64_t>(s));
+    CHECK(!totp::match(key, totp::hotp(key, static_cast<std::uint64_t>(step + 2)), now, -1));
+    CHECK(!totp::match(key, totp::hotp(key, static_cast<std::uint64_t>(step - 2)), now, -1));
+    CHECK(!totp::match(key, totp::hotp(key, static_cast<std::uint64_t>(step)), now, step));      // used once already
+    CHECK(totp::match(key, totp::hotp(key, static_cast<std::uint64_t>(step + 1)), now, step));    // the next one still works
+    for (const char* bad : {"", "12345", "1234567", "12345a", " 12345", "-12345"}) CHECK(!totp::match(key, bad, now, -1));
+    CHECK(totp::new_secret().size() == totp::kSecretBytes && totp::new_secret() != totp::new_secret());
+    CHECK(totp::otpauth_uri("ann@host one", "foobar") == "otpauth://totp/agensio:ann@host%20one?secret=MZXW6YTBOI&issuer=agensio&algorithm=SHA1&digits=6&period=30");
+}
+
+// The approvers' files and the checker (design 27.5): 0700 and 0600, the owner's, never a symlink; a
+// code once; five wrong codes stop approvals for ten minutes; nothing set up says how to set it up.
+static void test_approvers() {
+    if (!totp::available()) return;
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-approvers-" + std::to_string(::getpid())) / "approvers";
+    fs::remove_all(dir.parent_path());
+    fs::create_directories(dir.parent_path());
+    const uid_t me = ::geteuid();
+    CHECK(!approvers::check_name("ann").size() && approvers::check_name("Ann").size() && approvers::check_name("-a").size() && approvers::check_name("a/b").size() &&
+          approvers::check_name(std::string(33, 'a')).size());
+    approvers::Checker checker;
+    std::int64_t now = 1700000000;
+    {
+        const auto r = checker.check(dir, me, "123456", now);  // no directory yet: says how, counts no failure
+        CHECK(!r.ok && r.error.find("approver-add") != std::string::npos && r.failures == 0);
+    }
+    const std::string secret = totp::new_secret();
+    std::string why;
+    CHECK(approvers::add(dir, "ann", secret, false, why) && why.empty());
+    CHECK(!approvers::add(dir, "ann", secret, false, why) && why.find("exists") != std::string::npos);
+    struct stat st{};
+    CHECK(::stat(dir.c_str(), &st) == 0 && (st.st_mode & 0777) == 0700);
+    CHECK(::stat((dir / "ann.totp").c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+    std::string problem;
+    auto all = approvers::list(dir, me, problem);
+    CHECK(problem.empty() && all.size() == 1 && all[0].name == "ann" && all[0].problem.empty() && all[0].last_step == -1 && !all[0].created.empty());
+    // The right code once; the same code again is refused; the next step's code works.
+    const std::string c1 = totp::hotp(secret, static_cast<std::uint64_t>(totp::step_of(now)));
+    auto r = checker.check(dir, me, c1, now);
+    CHECK(r.ok && r.approver == "ann");
+    r = checker.check(dir, me, c1, now);
+    CHECK(!r.ok && r.error.find("already used") != std::string::npos);
+    r = checker.check(dir, me, totp::hotp(secret, static_cast<std::uint64_t>(totp::step_of(now) + 1)), now);
+    CHECK(r.ok);
+    CHECK(approvers::list(dir, me, problem)[0].last_step == totp::step_of(now) + 1);
+    // A file others may read is listed with its problem and never used.
+    ::chmod((dir / "ann.totp").c_str(), 0644);
+    all = approvers::list(dir, me, problem);
+    CHECK(all.size() == 1 && all[0].problem.find("chmod 600") != std::string::npos);
+    r = checker.check(dir, me, totp::hotp(secret, static_cast<std::uint64_t>(totp::step_of(now + 60))), now + 60);
+    CHECK(!r.ok && r.error.find("no approver is set up") != std::string::npos);
+    ::chmod((dir / "ann.totp").c_str(), 0600);
+    // A symlink in its place is refused; a directory open to others is refused.
+    fs::rename(dir / "ann.totp", dir / "real");
+    fs::create_symlink(dir / "real", dir / "ann.totp");
+    CHECK(approvers::list(dir, me, problem)[0].problem.find("symlink") != std::string::npos);
+    fs::remove(dir / "ann.totp");
+    fs::rename(dir / "real", dir / "ann.totp");
+    ::chmod(dir.c_str(), 0755);
+    approvers::list(dir, me, problem);
+    CHECK(problem.find("chmod 700") != std::string::npos);
+    ::chmod(dir.c_str(), 0700);
+    // Five wrong codes within ten minutes stop approvals for ten minutes, the right code included.
+    now += 120;
+    const std::string right = totp::hotp(secret, static_cast<std::uint64_t>(totp::step_of(now)));
+    const std::string wrong = right == "000000" ? "111111" : "000000";
+    for (int i = 1; i <= approvers::Checker::kMaxFailures; ++i) {
+        r = checker.check(dir, me, wrong, now);
+        CHECK(!r.ok && r.failures == i);
+    }
+    CHECK(r.locked_until == now + approvers::Checker::kWindow);
+    r = checker.check(dir, me, right, now + 1);
+    CHECK(!r.ok && r.error.find("stopped") != std::string::npos);
+    r = checker.check(dir, me, totp::hotp(secret, static_cast<std::uint64_t>(totp::step_of(now + 601))), now + 601);
+    CHECK(r.ok);
+    CHECK(approvers::remove(dir, "ann", why) && approvers::list(dir, me, problem).empty() && !approvers::remove(dir, "ann", why));
+    fs::remove_all(dir.parent_path());
+}
+
+// Waiting changes (design 27.3, 27.4): what a terminal would act on is shown as \xHH; the store's
+// limits and lifetimes; the person's text leads with the server's reasons and ends with the
+// requester's words; the gate holds pip_install back, dry run or not, and nothing else yet.
+static void test_pending_changes() {
+    CHECK(control::escape_for_terminal(std::string("a\x1b[2Kb\r\n\tc\x7f\xc3\xa9", 13)) == "a\\x1b[2Kb\\x0d\n\tc\\x7f\\xc3\\xa9");
+    CHECK(control::escape_for_terminal("plain text\nline two") == "plain text\nline two");
+    if (totp::available()) {
+        const std::string a = control::new_approval_id(), b = control::new_approval_id();
+        CHECK(a.size() == 12 && a.find_first_not_of("0123456789abcdef") == std::string::npos && a != b);
+    }
+    control::ApprovalStore store;
+    const std::time_t t0 = 1700000000;
+    for (std::size_t i = 0; i < control::ApprovalStore::kMaxWaiting; ++i) {
+        control::PendingChange c;
+        c.id = "id" + std::to_string(i);
+        CHECK(store.add(c, t0));
+    }
+    control::PendingChange extra;
+    extra.id = "extra";
+    CHECK(!store.add(extra, t0));
+    CHECK(store.reject("id0", t0) && !store.reject("id0", t0) && store.waiting(t0).size() == control::ApprovalStore::kMaxWaiting - 1);
+    CHECK(store.add(extra, t0));
+    control::PendingChange* running = store.find("id1", t0);
+    running->state = control::PendingChange::State::running;
+    CHECK(store.all(t0 + control::ApprovalStore::kTtl).size() == 1 && store.find("id1", t0 + control::ApprovalStore::kTtl) == running);  // a running change stays
+    running->state = control::PendingChange::State::done;
+    running->finished = t0 + control::ApprovalStore::kTtl;
+    CHECK(store.find("id1", t0 + 2 * control::ApprovalStore::kTtl - 1) && !store.find("id1", t0 + 2 * control::ApprovalStore::kTtl));
+    control::PendingChange c;
+    c.id = "abc123abc123";
+    c.path = "/v1/sites/dj.test/task";
+    c.uid = 1000;
+    c.client = "mcp test 1.0";
+    c.reasons = {"installs the Python packages it names"};
+    c.preview = "task pip_install\npackages = evil\x1b[8m";
+    c.reason = "a harmless fix\x1b]0;x\x07";
+    const std::string text = control::pending_text(c, 1700000000);
+    CHECK(text.find("  !! installs the Python packages it names\n") < text.find("  | task pip_install\n") &&
+          text.find("  | task pip_install\n") < text.find("the requester's own words (not checked)") && text.find('\x1b') == std::string::npos &&
+          text.find("\\x1b[8m") != std::string::npos && text.find("via mcp test 1.0") != std::string::npos);
+    json::Value body;
+    std::string err;
+    CHECK(json::parse(R"J({"task": "pip_install", "params": {"packages": "x"}})J", body, err));
+    CHECK(control::approval_reasons("/v1/sites/dj.test/task", "task", body).size() == 1);
+    CHECK(json::parse(R"J({"task": "pip_install", "params": {"packages": "x"}, "dry_run": true})J", body, err));
+    CHECK(control::approval_reasons("/v1/sites/dj.test/task", "task", body).size() == 1);  // the handler runs it and says it would wait
+    CHECK(json::parse(R"J({"task": "venv_create"})J", body, err));
+    CHECK(control::approval_reasons("/v1/sites/dj.test/task", "task", body).empty());
 }
 
 // Response compression on managed sites (docs/design-compression.md 9, alpha.119; the test VPS could
@@ -13223,6 +13383,9 @@ int main() {
     test_security_baseline();
     test_managed_response_headers();
     test_managed_response_compression();
+    test_totp();
+    test_approvers();
+    test_pending_changes();
     test_header_suggestions();
     test_archives_in_root();
     test_root_files();

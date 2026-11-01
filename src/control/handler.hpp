@@ -4,6 +4,7 @@
 // commands (F3) and refusals are written to the audit log, one line each.
 #pragma once
 
+#include <ctime>
 #include <functional>
 #include <map>
 #include <memory>
@@ -11,11 +12,13 @@
 #include <string_view>
 
 #include "config.hpp"
+#include "control/approvals.hpp"
 #include "control/probe.hpp"
 #include "control/roles.hpp"
 #include "control/sites.hpp"
 #include "core/stream.hpp"
 #include "core/worker_state.hpp"
+#include "services/approvers.hpp"
 #include "services/json.hpp"
 #include "services/log.hpp"
 
@@ -148,6 +151,14 @@ public:
     // One audit line: who (uid, gid, role), what, and the outcome.
     void audit(long uid, long gid, Role role, std::string_view what, std::string_view result);
 
+    // What health says of approvals (docs/approvals.md 4): codes refused in the last hour, and whether a
+    // request through the MCP bridge came from root, which could read the approvers' secrets.
+    struct ApprovalFacts {
+        int refused_last_hour = 0;
+        bool bridge_as_root = false;
+    };
+    ApprovalFacts approval_facts(std::time_t now);
+
 private:
     void reply(Stream& s, int status, const json::Value& body);
     bool require(Stream& s, Role needed, std::string_view command);
@@ -199,6 +210,17 @@ private:
     void pool_report(Stream& s, const ReloadOutcome& o, std::string_view site, std::string_view what, json::Value& done, std::vector<std::string>& steps);
     void upload_delete(Stream& s, std::string_view name, std::string_view reason);
     void audit_peer(const Stream& s, std::string_view what, std::string_view result);
+    // Approvals (docs/design-site-operations.md 27): a change the gate holds back is stored and
+    // answered 202; GET /v1/approvals[/ID] shows them (admin); POST /v1/approvals {code, ids} checks
+    // the code (the helper's approval_check, else the server's own approvers) and runs each approved
+    // change through mutate, in the order queued; POST /v1/approvals/ID/reject drops one.
+    // True when the answer comes later (a task's dry run checks the change before it is stored).
+    bool queue_for_approval(Stream& s, WorkerState& ws, std::string_view path, std::string_view action, const json::Value& body, std::string_view reason,
+                            std::vector<std::string> why, std::function<void()>& done);
+    std::string approval_preview(std::string_view path, const json::Value& body);
+    void approvals_get(Stream& s, std::string_view id);
+    bool approvals_post(Stream& s, WorkerState& ws, std::string_view rest, const json::Value& body, std::function<void()>& done);
+    void run_approved(std::shared_ptr<std::vector<std::string>> ids, std::size_t next, WorkerState& ws, std::function<void()> finished);
     // A site environment's value others could read, reported by the helper under tightened:
     // a warning in the error log too, so it outlives the answer it came in.
     void log_exposures(const json::Value& r);
@@ -219,6 +241,18 @@ private:
         bool cut = false;  // the task kept less than it printed
     };
     std::map<std::string, TaskOutput> last_output_;
+    // The changes waiting for a person's approval and what became of them (worker 0; gone at a
+    // restart, nothing of a waiting change applied).
+    control::ApprovalStore approvals_;
+    // The approved change mutate runs now: set only around that synchronous call, so the gate lets
+    // exactly it through and site_task can name its approver.
+    const control::PendingChange* approving_ = nullptr;
+    // What a dry run of a held-back change adds to its answer (needs_approval), by stream.
+    std::map<const Stream*, json::Value> notes_;
+    // Without the helper the server checks codes itself, against its own approver files.
+    approvers::Checker approval_checker_;
+    std::vector<std::time_t> refused_codes_;  // when a code was refused, for health (the last hour kept)
+    std::time_t bridge_root_seen_ = 0;        // the last request through the bridge from uid 0
 };
 
 }  // namespace agensio

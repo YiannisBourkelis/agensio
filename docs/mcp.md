@@ -97,41 +97,45 @@ takes `--socket PATH`.
 
 ### Give the agent's key the bridge and nothing else
 
-What the bridge asks the user in person (the confirmation of `pip_install`, below) binds
-only when the bridge is the agent's one way in. A key that may run any command lets an
-agent that also has a shell on your laptop call `agensio ctl` on the server itself and
-answer for you. Give the agent its own key and limit it in the server account's
-`~/.ssh/authorized_keys`:
+A key that may run any command lets an agent that also has a shell on your laptop run `agensio ctl`
+on the server as you. It still cannot approve a change that waits for approval (below), but it can
+make every other change your account may make, outside the tools' descriptions. Give the agent its
+own key and limit it in the server account's `~/.ssh/authorized_keys`:
 
 ```
 command="agensio mcp",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... agent@laptop
 ```
 
 The MCP entry then needs no `agensio mcp` of its own (the server runs it for that key
-whatever is asked), and your own key, used in a terminal, keeps `agensio ctl`.
+whatever is asked), and your own key, used in a terminal, keeps `agensio ctl`. Never give the agent
+root's key: root can read the approvers' secrets.
 
-### Confirmations the user gives in person
+### Changes that wait for your approval
 
-`pip_install` (Django and Wagtail sites) installs any package the site's account may
-install, named by the agent, so the agent's `confirm` is not enough: before it sends the
-task the bridge asks you in the MCP client's own dialog (MCP elicitation), which the model
-neither sees nor answers. The dialog names the packages, the site, the account and the
-virtualenv, links each name on pypi.org and warns that a look-alike name is a common way to
-get malicious code; you tick "Install these packages" to go ahead. A client that cannot show
-the dialog (no elicitation; at the time of writing Claude Code's CLI shows it, its VS Code
-extension declines every question without showing it and its desktop app does not offer it)
-or a decline gets a refusal carrying the `agensio ctl` command for you to run in a terminal
-on the server, where the same warning is printed and `--yes` is your confirmation. The audit
-log records which of the two it was.
+Some changes are not made on the agent's word, whatever it read and whatever shell it has: since
+0.1.0-alpha.120, `pip_install` (Django and Wagtail sites: it installs any package the site's account
+may install, named by the agent), and with the next releases the site's files, installs, secret reads
+and the rest of `docs/approvals.md` 1. The tool answers `pending: true` with an id, the server's
+reasons and its own description of the change (for `pip_install` the packages, the site, the account,
+the exact command, and a warning to check each name on pypi.org, since a look-alike name is a common
+way to get malicious code). Nothing runs until you approve it with the code from an authenticator
+app: `agensio ctl approve` on the server shows every change waiting and asks for the code, one code
+for them all; in an MCP client that can put a question to you, `approvals_ask` shows the same in the
+client's own dialog, which the model neither sees nor answers (at the time of writing Claude Code's
+CLI shows it, its VS Code extension declines every question without showing it and its desktop app
+does not offer it). No tool takes a code; never give it to the agent. Root sets up an approver with
+`agensio approver-add NAME` (`docs/approvals.md`); the audit log records each waiting change, each
+approval with the approver's name, and each refused code.
 
 ## Tools
 
 Every tool's arguments are its schema's and no other (`additionalProperties: false`): an argument a
 tool does not list is refused, naming the nearest (`unknown argument 'public_archive' (did you mean
 'public_archives'?)`), and nothing is done, so a misspelt or renamed field never passes for a change
-made (0.1.0-alpha.99). `user_confirmed`, `client` and an agent's password `hash` are refused for what
-they are: the bridge sets the first two after the user's own answer, a hash comes from the user's
-terminal.
+made (0.1.0-alpha.99). `code`, `user_confirmed`, `client` and an agent's password `hash` are refused
+for what they are: an approval code is typed by the person into `agensio ctl approve` or the client's
+own dialog, the next two mean nothing (a change waits for the person's approval whatever the request
+says), a hash comes from the user's terminal.
 
 | tool | role | what it does |
 |---|---|---|
@@ -154,6 +158,8 @@ terminal.
 | `trash_list`, `site_restore`, `trash_delete` | admin | what the trash holds (site, account and whether it is still in use, size, expiry, pieces); a site brought back into an empty place, its configuration with it; an entry removed for good |
 | `site_install` | admin | on a PHP site, a release its PHP cannot run (outside the range its `composer.json` or `version.php` declares, a required extension missing) is refused and taken out again unless `ignore_requirements`, `facts.php` saying what it declares; put an application's files into a site's empty directory as the site's account: the preset's official archive (`version` optional), any https `url`, or a stored upload (`file`); a plugin or theme goes into `path` with `create_path: true`; `sha256`, `strip`, `dry_run`; the server enforces the fences and reports the source, digest and what it created. For a Rails site the next steps are the bundle tasks, with the Ruby the application pins; a Rails archive without credentials gets its `SECRET_KEY_BASE` generated into the site's environment; every site but a static one is told its request-body limit; for a PHP or static site the facts name the directories the archive's own `.htaccess` files deny whole (`htaccess_denied`) and the next steps carry the matching `rules`, a suggestion the server never applies by itself |
 | `site_copy` | admin | copy one regular file of a site to another path of the same site, as the site's account: the drop-ins applications ship as templates (WordPress's `wp-content/db.php` from the SQLite plugin, Drupal's `settings.php`); `overwrite`, `dry_run`; never across sites, never caller content, never a directory. Like `site_install`, credential files come out `0600` and the configuration is validated before the answer |
+| `approvals_list` | admin | what waits for the person's approval and what became of it: each change with its id, state (`waiting`, `running`, `done`, `failed`, `rejected`), the server's reasons (`needs_approval`), its preview and the requester's words, and once it ran its `status` and `result` (`docs/approvals.md`) |
+| `approvals_ask` | admin | puts every change waiting into the MCP client's own dialog with a field for the code from the person's authenticator app, one code for them all; the model never sees the code; a client that cannot ask gets the line for the person, `agensio ctl approve` |
 | `site_tasks_list` | viewer | the named tasks of the site's preset (`app = "rails"`: `gem_install_rails`, `rails_new`, `bundle_install`, `db_prepare`, `db_migrate`, `assets_precompile`; `"django"` and `"wagtail"`: `venv_create`, `pip_install` (any packages, confirmed by the user in person), `startproject`, `pip_install_requirements`, `django_settings`, `migrate`, `collectstatic`, `createsuperuser`, `check_deploy`; `"node"`: `npm_ci`, `npm_run`) with their parameters, whether each downloads, its effective time limit, whether its interpreter is in place (`run_as_root` lists every missing package once, before the first task), the account that runs them and the directory; other presets have none |
 | `site_task` | admin | runs one of them as the site's account in the site's directory: a fixed command from the table, typed parameters, never a command line; the answer carries the exact argv, the exit status, a summary (migrations applied, `Bundle complete!`, the files in `public/assets`) and a part of the output (its last 4 KB on success, its first 4 KB and last 12 KB on a failure), and after a task that changes a running application the root line that restarts its service; the credential files are made the site's alone and the configuration is validated; `dry_run` shows the command without running it and meets the same refusals (a missing interpreter as `run_as_root`, a missing result of an earlier task naming the task to run); a task that exits 0 without what the next one needs is a 409; a failure with a known cause carries `hint` (Rails' missing `secret_key_base`, a Gemfile pinning another Ruby); the site's environment reaches the task and shows as `NAME=<site environment>`. Marked destructive, so the host asks |
 | `site_service_unit` | viewer | the systemd unit that runs a Rails or Redmine site's Puma, a Django or Wagtail site's Gunicorn, or a Node site's node, rendered from the site (account, directory, loopback port, a Django site's project and names) and `[control] runtimes`, with the root commands that install it; the agent shows them, root runs them |

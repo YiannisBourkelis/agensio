@@ -648,9 +648,24 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   through it and reports `done`; `[control] provision = false` hands commands back
   instead. Its threat analysis is in `docs/security-control-plane.md`; every change to it
   updates that section. `tests/provision.sh` runs it as root in the devbox.
-  `agensio mcp` (F5, `control/mcp.*`): stdio JSON-RPC MCP server, 39 tools with
+  `agensio mcp` (F5, `control/mcp.*`): stdio JSON-RPC MCP server, 41 tools with
   annotations gated by the caller's role, prompts, meant to be spawned over SSH by the
   agent host (`docs/mcp.md`). `agensio ctl` (F6) is the same client for shells.
+- **Approvals** (alpha.120, design `docs/design-site-operations.md` 27, `docs/approvals.md`): a
+  change that can run code, move a secret or data off the host, grant access or destroy beyond undo
+  waits for a person's code from an authenticator app (TOTP, `services/totp.*`). The gate at the top
+  of `ControlHandler::mutate` (`control::approval_reasons`) stores such a request (`queue_for_approval`,
+  a task dry-run first so a failing change is never stored; `control/approvals.*`: `ApprovalStore`, 32
+  waiting, ten minutes, memory only) and answers 202 `pending`; `POST /v1/approvals {code, ids?}` checks
+  the code (the root helper's `approval_check` against `<config dir>/approvers/NAME.totp`, root `0600`
+  in a root `0700` directory, `services/approvers.*`; without the helper the server's own files) and
+  `run_approved` replays each stored request through `mutate` with `approving_` set around that call
+  only. Approvers only through `agensio approver-add` (local, root's), never the control plane; `ctl
+  approve` shows the server's escaped previews and asks the code on `/dev/tty`; a gated `ctl` command
+  at a terminal asks at once; MCP `approvals_list`, `approvals_ask` (elicitation); no tool takes a
+  code. Health `approvals_not_set_up`, `approver_file_unsafe`, `approvals_without_helper`,
+  `approval_code_failures`, `approvals_forgeable`. Step 1 gates `pip_install` (security rows 32,
+  50 to 52); F12's file tools and the rest of design 27.2 follow.
 - **Site tasks** (F13, `src/services/tasks.*`, design `docs/design-site-operations.md`
   section 4): `agensio ctl site-task NAME TASK [--param k=v]` and MCP `site_task` run one
   named task of the site's preset as the site's account in its directory: a row with a

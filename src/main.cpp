@@ -3,7 +3,11 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
+#include <ctime>
+#include <vector>
 #ifndef _WIN32
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/types.h>
 #include <termios.h>
@@ -19,9 +23,12 @@
 #include "control/client.hpp"
 #include "control/mcp.hpp"
 #include "control/protection.hpp"
+#include "control/approvals.hpp"
 #include "control/reference.hpp"
+#include "services/approvers.hpp"
 #include "services/json.hpp"
 #include "services/tasks.hpp"
+#include "services/totp.hpp"
 #include "server.hpp"
 #include "services/pools.hpp"
 #include "upstream/fcgi_client.hpp"
@@ -38,6 +45,9 @@ void usage(std::ostream& out = std::cout) {
                  "                                      and who may change it (docs/keys.md is this output)\n"
                  "       agensio ctl <command> [--socket PATH] [-c config.toml]\n"
                  "       agensio mcp [--socket PATH] [-c config.toml]\n"
+                 "       agensio approver-add NAME [--replace] [-c config.toml]   root, on the server: a person who approves the changes\n"
+                 "                                      that wait (docs/approvals.md); prints the authenticator app's secret once\n"
+                 "       agensio approver-remove NAME [-c config.toml] | agensio approvers [-c config.toml]\n"
                  "  -c, --config FILE   configuration file (default: ./agensio.toml, ./config/agensio.toml,\n"
                  "                      /etc/agensio/agensio.toml, /usr/local/etc/agensio/agensio.toml)\n"
                  "  -t, --test          check the configuration (FastCGI upstreams, certificate and key\n"
@@ -168,6 +178,212 @@ bool read_password(const std::string& user, std::string& password) {
 }
 #endif
 
+#ifndef _WIN32
+// The code from an authenticator app, asked on the terminal itself (/dev/tty), never on standard
+// input, so nothing piped into agensio can answer it (docs/design-site-operations.md 27.4). False
+// without a terminal; an empty answer is a cancel.
+bool ask_code(std::size_t changes, std::string& code) {
+    code.clear();
+    const int fd = ::open("/dev/tty", O_RDWR | O_CLOEXEC | O_NOCTTY);
+    if (fd < 0) {
+        std::cerr << "no terminal to ask for the code on: run agensio ctl approve in a terminal on the server\n";
+        return false;
+    }
+    const std::string prompt = "Code from your authenticator app for " +
+                               (changes == 1 ? std::string("this change") : "these " + std::to_string(changes) + " changes") + " (empty to cancel): ";
+    (void)!::write(fd, prompt.data(), prompt.size());
+    std::string line;
+    char buf[64];
+    while (line.size() < 64 && line.find('\n') == std::string::npos) {
+        const ssize_t n = ::read(fd, buf, sizeof buf);
+        if (n <= 0) break;
+        line.append(buf, static_cast<std::size_t>(n));
+    }
+    ::close(fd);
+    for (const char c : line)
+        if (c >= '0' && c <= '9') code.push_back(c);
+        else if (c == '\n') break;
+    return true;
+}
+
+// Approves `ids` (every change waiting when empty) with a code asked on the terminal; prints what ran.
+int approve_with_code(const std::string& socket, const std::vector<std::string>& ids) {
+    std::string code;
+    if (!ask_code(ids.size(), code)) return 1;
+    if (code.empty()) {
+        std::cout << "nothing approved\n";
+        return 1;
+    }
+    agensio::json::Value list = agensio::json::Value::array();
+    for (const auto& id : ids) list.push(id);
+    const agensio::json::Value body = agensio::json::Value::object().set("code", code).set("ids", list);
+    agensio::ControlReply reply;
+    std::string error;
+    if (!agensio::control_request(socket, "POST", "/v1/approvals", body.dump(), reply, error)) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    agensio::json::Value v;
+    std::string perr;
+    if (!agensio::json::parse(reply.body, v, perr) || reply.status != 200) {
+        std::cerr << "not approved: " << (v.is_object() && !v.get("error").empty() ? std::string(v.get("error")) : reply.body) << "\n";
+        return 1;
+    }
+    bool all_done = true;
+    std::cout << "approved by " << v.get("approved_by") << "\n";
+    for (const auto& r : v["results"].items()) {
+        const std::string state(r.get("state"));
+        all_done = all_done && state == "done";
+        std::cout << "[" << r.get("id") << "] " << state << " (" << static_cast<int>(r["status"].num()) << "): "
+                  << agensio::control::escape_for_terminal(r["result"].dump()) << "\n";
+    }
+    return all_done ? 0 : 1;
+}
+
+// agensio ctl approve [ID ...] [--list | --show ID | --reject ID]: the changes waiting for approval as
+// the server describes them, then one code for exactly the list shown.
+int ctl_approve(const std::string& socket, const std::vector<std::string>& ids, bool list_only, const std::string& show, const std::string& reject) {
+    agensio::ControlReply reply;
+    std::string error;
+    if (!reject.empty()) {
+        if (!agensio::control_request(socket, "POST", "/v1/approvals/" + reject + "/reject", "{}", reply, error)) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+        std::cout << reply.body;
+        return reply.status == 200 ? 0 : 1;
+    }
+    if (!agensio::control_request(socket, "GET", "/v1/approvals", "", reply, error)) {
+        std::cerr << error << "\n";
+        return 1;
+    }
+    agensio::json::Value v;
+    std::string perr;
+    if (reply.status != 200 || !agensio::json::parse(reply.body, v, perr)) {
+        std::cerr << reply.body << "\n";
+        return 1;
+    }
+    std::vector<std::string> chosen;
+    std::string text;
+    for (const auto& a : v["approvals"].items()) {
+        const std::string id(a.get("id"));
+        if (!show.empty()) {
+            if (id != show) continue;
+            std::cout << agensio::control::escape_for_terminal(std::string(a.get("text")));
+            return 0;
+        }
+        if (a.get("state") != "waiting") continue;
+        if (!ids.empty() && std::find(ids.begin(), ids.end(), id) == ids.end()) continue;
+        chosen.push_back(id);
+        text += agensio::control::escape_for_terminal(std::string(a.get("text"))) + "\n";
+    }
+    if (!show.empty()) {
+        std::cerr << "no change " << show << " (agensio ctl approve --list shows what waits)\n";
+        return 1;
+    }
+    for (const auto& id : ids)
+        if (std::find(chosen.begin(), chosen.end(), id) == chosen.end()) {
+            std::cerr << "no change " << id << " waits for approval\n";
+            return 1;
+        }
+    if (chosen.empty()) {
+        std::cout << "nothing waits for approval\n";
+        return 0;
+    }
+    std::cout << chosen.size() << (chosen.size() == 1 ? " change waits" : " changes wait") << " for approval:\n\n" << text;
+    if (list_only) return 0;
+    return approve_with_code(socket, chosen);
+}
+#endif
+
+// agensio approver-add NAME [--replace] | approver-remove NAME | approvers, each with [-c FILE]: the
+// approver files beside the main configuration (services/approvers.hpp), written here and nowhere
+// else: the control plane has no way to enroll an approver.
+int approver_command(int argc, char** argv, int i) {
+    const std::string cmd = argv[i];
+    std::string name, config = "/etc/agensio/agensio.toml";
+    bool replace = false;
+    for (int j = i + 1; j < argc; ++j) {
+        const std::string b = argv[j];
+        if (b == "-c" || b == "--config") {
+            if (!flag_value(argc, argv, j, config, cmd, true)) return 2;
+        } else if (b == "--replace") replace = true;
+        else if (name.empty() && !b.empty() && b[0] != '-' && cmd != "approvers") name = b;
+        else {
+            std::cerr << cmd << ": unexpected argument " << b << "\n";
+            return 2;
+        }
+    }
+    const std::filesystem::path dir = std::filesystem::path(config).parent_path() / "approvers";
+#ifndef _WIN32
+    const uid_t me = ::geteuid();
+#else
+    const uid_t me = 0;
+#endif
+    if (cmd == "approvers") {
+        std::string problem;
+        const auto all = agensio::approvers::list(dir, me, problem);
+        if (!problem.empty()) std::cout << dir.string() << ": " << problem << "\n";
+        for (const auto& a : all) {
+            std::cout << a.name << "  created " << (a.created.empty() ? "?" : a.created);
+            if (a.last_step >= 0) {
+                const std::time_t t = static_cast<std::time_t>(a.last_step * agensio::totp::kPeriod);
+                char buf[32];
+                std::tm tm{};
+                ::gmtime_r(&t, &tm);
+                std::strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm);
+                std::cout << "  last code " << buf;
+            }
+            if (!a.problem.empty()) std::cout << "  NOT USED: " << a.problem;
+            std::cout << "\n";
+        }
+        if (all.empty() && problem.empty()) std::cout << "no approver in " << dir.string() << " (agensio approver-add NAME)\n";
+        return 0;
+    }
+    if (name.empty()) {
+        std::cerr << "usage: agensio " << cmd << " NAME [-c config.toml]\n";
+        return 2;
+    }
+    std::string why;
+    if (cmd == "approver-remove") {
+        if (!agensio::approvers::remove(dir, name, why)) {
+            std::cerr << cmd << ": " << why << "\n";
+            return 1;
+        }
+        std::cout << "approver " << name << " removed: codes from that app no longer approve anything\n";
+        return 0;
+    }
+    if (!agensio::totp::available()) {
+        std::cerr << cmd << ": this agensio was built without OpenSSL, which approval codes need\n";
+        return 2;
+    }
+    const std::string secret = agensio::totp::new_secret();
+    if (!agensio::approvers::add(dir, name, secret, replace, why)) {
+        std::cerr << cmd << ": " << why << (why.find("exists") != std::string::npos ? " (--replace gives the approver a new secret)" : "") << "\n";
+        return 1;
+    }
+    char host[256] = "server";
+#ifndef _WIN32
+    ::gethostname(host, sizeof host - 1);
+#endif
+    const std::string b32 = agensio::totp::base32_encode(secret);
+    std::string grouped;
+    for (std::size_t k = 0; k < b32.size(); ++k) grouped += (k && k % 4 == 0 ? " " : "") + std::string(1, b32[k]);
+    const std::string uri = agensio::totp::otpauth_uri(name + "@" + host, secret);
+    std::cout << "approver " << name << " added: " << (dir / (name + ".totp")).string() << " (0600)\n\n"
+              << "Add it to an authenticator app on your phone (any TOTP app: Aegis, 2FAS, Google Authenticator, 1Password):\n"
+              << "  secret:  " << grouped << "\n"
+              << "  or scan: qrencode -t ansiutf8 '" << uri << "'\n\n"
+              << "This is the only time the secret is shown; it never leaves this server otherwise. A change made through the\n"
+              << "control plane that waits for approval is approved with agensio ctl approve and a code from that app.\n";
+#ifndef _WIN32
+    if (me != 0)
+        std::cout << "\nNote: not root. Only a server running without the root helper, as uid " << me
+                  << ", checks this approver; with the helper the files must be root's (docs/approvals.md).\n";
+#endif
+    return 0;
+}
+
 }  // namespace
 
 // NOLINTNEXTLINE(bugprone-exception-escape): everything that can throw is inside the try blocks below.
@@ -190,6 +406,9 @@ int main(int argc, char** argv) {
         else if (a == "--strict") strict = true;
         else if (a == "pools" && i == 1) pools = true;
         else if (a == "reload" && i == 1) reload = true;
+        else if ((a == "approver-add" || a == "approver-remove" || a == "approvers") && i == 1) {  // root's, on the server
+            return approver_command(argc, argv, i);
+        }
         else if (a == "keys" && i == 1) {  // the configuration reference, no server needed
             const bool markdown = i + 1 < argc && std::string(argv[i + 1]) == "--markdown";
             if (markdown) std::cout << agensio::control::reference_markdown();
@@ -503,6 +722,11 @@ int main(int argc, char** argv) {
                              "        site-auth-user-delete NAME USER | site-auth-users NAME (names, methods, expiry, notes;\n"
                              "                    never a hash; admin)\n"
                              "        uploads-delete NAME\n"
+                             "approve: approve [ID ...] [--list | --show ID | --reject ID]   the changes that wait for a person's approval\n"
+                             "                    (an install a caller names, ...; docs/approvals.md): each as the server describes it, then\n"
+                             "                    the code from your authenticator app, asked on this terminal; one code approves the list\n"
+                             "                    shown; no --yes, the code is the confirmation (admin; root sets an app up with\n"
+                             "                    agensio approver-add NAME). A change that waits, typed here at a terminal, asks at once\n"
                              "upload: upload NAME [FILE]   stores FILE (or stdin) on the server for site-install --file NAME;\n"
                              "                    needs the operator role, no --yes\n"
                              "Answers are the control API's JSON; exit 1 on any refusal. Without --yes a change is\n"
@@ -549,6 +773,9 @@ int main(int argc, char** argv) {
             bool yes = false;
             bool prompt = false;  // site-auth-user-set --prompt: the password asked and hashed here
             bool missing_value = false;  // a flag without its value, said by flag_value
+            std::vector<std::string> approve_ids;  // ctl approve ID ...
+            bool approve_list = false;
+            std::string approve_show, approve_reject;
             for (int j = i + 1; j < argc && !missing_value; ++j) {
                 std::string b = argv[j];
                 // A flag without its value is a usage error (the alpha.95 report: `--out "$F"` with F unset
@@ -901,7 +1128,11 @@ int main(int argc, char** argv) {
                     st.set(v.substr(0, eq), v.substr(eq + 1));
                     body.set("settings", st);
                 }
+                else if (command == "approve" && b == "--list") approve_list = true;
+                else if (command == "approve" && b == "--show") value(approve_show);
+                else if (command == "approve" && b == "--reject") value(approve_reject);
                 else if (command.empty()) command = b;
+                else if (command == "approve" && !b.empty() && b[0] != '-') approve_ids.push_back(b);
                 else if (site_name.empty() && command.starts_with("site") && command != "sites") site_name = b;
                 else if (command == "site-task" && body["task"].is_null()) body.set("task", b);
                 else if ((command == "site-auth-user-set" || command == "site-auth-user-delete") && body["user"].is_null()) body.set("user", b);
@@ -975,6 +1206,7 @@ int main(int argc, char** argv) {
                 }
             }
             else if (command == "validate") path = "/v1/config/validate";
+            else if (command == "approve") path = "/v1/approvals";
             else if (command == "logs") path = "/v1/logs" + query;
             else if (command == "reload") path = "/v1/reload";
             else if (command == "logs-reopen") path = "/v1/logs/reopen";
@@ -1034,12 +1266,6 @@ int main(int argc, char** argv) {
                 std::cerr << "ctl: --prompt needs a build with password support (libxcrypt and OpenSSL)\n";
                 return 2;
 #endif
-            }
-            // pip_install names what gets installed: the user reads the warning here, and the --yes
-            // they typed is their confirmation (the control API refuses the task without one).
-            if (command == "site-task" && agensio::tasks::needs_user_confirmation(body.get("task")) && !body["dry_run"].boolean()) {
-                std::cerr << "WARNING: " << agensio::tasks::confirmation_warning(site_name, body["params"].get("packages"), "", "") << "\n";
-                if (yes) body.set("user_confirmed", "terminal");
             }
             std::string upload_bytes;
             if (upload) {
@@ -1154,12 +1380,34 @@ int main(int argc, char** argv) {
                 std::cerr << "ctl: --out FILE goes with protection --nft, --jail, --unit or --filter NAME, or with site-unit NAME\n";
                 return 2;
             }
+#ifndef _WIN32
+            if (command == "approve") return ctl_approve(socket_path, approve_ids, approve_list, approve_show, approve_reject);
+#endif
             agensio::ControlReply reply;
             std::string error;
             if (!agensio::control_request(socket_path, method, path, upload ? upload_bytes : mutation ? body.dump() : std::string(), reply, error)) {
                 std::cerr << error << "\n";
                 return 1;
             }
+#ifndef _WIN32
+            // A change that waits for approval, typed by a person at a terminal: shown, and the code asked
+            // at once, so one command and one code do it (docs/design-site-operations.md 27.4). Without a
+            // terminal (an agent's shell, a script) the change waits for agensio ctl approve.
+            if (reply.status == 202 && ::isatty(STDIN_FILENO)) {
+                agensio::json::Value pending;
+                std::string perr;
+                if (agensio::json::parse(reply.body, pending, perr) && pending["pending"].boolean()) {
+                    agensio::ControlReply one;
+                    std::string text;
+                    if (agensio::control_request(socket_path, "GET", "/v1/approvals/" + std::string(pending.get("id")), "", one, error) && one.status == 200) {
+                        agensio::json::Value c;
+                        if (agensio::json::parse(one.body, c, perr)) text = c.get("text");
+                    }
+                    std::cout << "This change waits for approval:\n\n" << agensio::control::escape_for_terminal(text) << "\n";
+                    return approve_with_code(socket_path, {std::string(pending.get("id"))});
+                }
+            }
+#endif
             if (reply.status == 428 && !yes) {
                 std::cerr << "this command changes the server: add --yes (and --reason \"why\") to confirm\n";
                 return 1;

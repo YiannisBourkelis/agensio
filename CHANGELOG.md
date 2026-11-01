@@ -2,6 +2,36 @@
 
 ## 0.1.0-alpha.120
 
+- **Approvals: a change no agent can make on its own word.** The owner's condition for letting the
+  agent change a site's files (F12, the next step) was that no prompt injection, however clever, may
+  harm the server through the control plane. The in-person confirmation `pip_install` had (row 32)
+  did not hold: the server believed a `user_confirmed` field, which any process of the agent's own
+  account could send through `agensio ctl` or the socket. Now a change that can run code, move a
+  secret or data off the host, grant access or destroy beyond undo is stored instead of run, answered
+  `202` with `pending: true`, an id, the server's reasons and its own description of the change, and
+  runs only once a person approves it with the six-digit code of an authenticator app on their
+  phone (TOTP, RFC 6238).
+  - `agensio approver-add NAME` (root, on the server, the only way: the control plane cannot enroll
+    an approver) writes the secret to `<config dir>/approvers/NAME.totp` (root's, `0600`) and prints
+    it once with its `otpauth://` URI; `approver-remove`, `approvers`. The root helper checks the
+    codes (`approval_check`); the server never reads a secret. A code works once; five wrong codes
+    in ten minutes stop approvals for ten minutes.
+  - `agensio ctl approve [ID ...] [--list | --show ID | --reject ID]` shows every change waiting as
+    the server describes it (every byte a terminal could act on written `\xHH`) and asks for the code
+    on the terminal itself; one code approves the list shown. A change that waits, typed by a person
+    at a terminal, asks for the code at once. MCP: `approvals_list`, and `approvals_ask`, which puts
+    the changes into the client's own dialog with a field for the code the model never sees; no tool
+    takes a code, and the bridge refuses a `code`, `user_confirmed` or `client` argument.
+  - A change is checked before it waits (a task's dry run), so the person is never asked about one
+    that fails anyway; a dry run is never held and says it would wait (`needs_approval`).
+  - In this release `pip_install` waits; F12's file tools, installs, secret reads and the rest of
+    `docs/design-site-operations.md` 27.2 follow. Health: `approvals_not_set_up`,
+    `approver_file_unsafe`, `approvals_without_helper`, `approval_code_failures`,
+    `approvals_forgeable`. `docs/approvals.md` is the administrator's guide; security rows 32 and 50
+    to 52.
+  - Upgrading: run `agensio approver-add NAME` as root before the first `pip_install`, which until
+    then is refused with the setup line.
+
 - **Fix: a broken chunked request body is answered 400 over HTTP/1.1, and three loose ends of
   alpha.119.** Found by the test VPS's check of alpha.119.
   - A chunked body whose framing is broken (a chunk size that is not hex) got its `400` in the

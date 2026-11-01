@@ -1065,8 +1065,8 @@ print(len(run["task"]["enum"]), ",".join(sorted(run["params"]["properties"])), t
       tools["site_create"]["inputSchema"]["properties"]["project"]["pattern"])
 PYT
 )"
-# pip_install names any package, so the bridge asks the user in the client's own dialog (MCP
-# elicitation) before it sends the task, and the control API refuses it without that (2026-09-28).
+# pip_install names any package, so it waits for a person's approval with a code (alpha.120; the
+# client's dialog alone could be answered by any process of the agent's account before).
 mkdir -p bench/tmp/sites/dj.test/app
 check "a django site: created with its project" "201" "$(cpost /v1/sites "{\"domain\":\"dj.test\",\"https\":\"none\",\"user\":null,\"app\":\"django\",\"project\":\"blog\",\"root\":\"$ROOT/bench/tmp/sites/dj.test/app\",\"upstream\":\"http://127.0.0.1:18099\",\"listen_plain\":\"127.0.0.1:8096\",\"confirm\":true,\"reason\":\"django\"}")"
 mkdir -p bench/tmp/sites/nd.test/app
@@ -1098,52 +1098,93 @@ check "root additions: the site stays managed (site_update works, the additions 
 check "root additions: a disabled site leaves an orphan the load keeps with a warning; health says so with the fix; enabling brings it back" "200 yes yes 200 0" "$(cpost /v1/sites/frag.test/disable '{"confirm":true,"reason":"ra"}') $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[x for x in d["findings"] if x["code"] == "root_additions_orphan"]; print("yes" if len(f) == 1 and f[0]["site"] == "frag.test" and "disabled" in f[0]["message"] and "site-enable frag.test" in f[0]["fix"] else f)') $(t=$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null); grep -q 'frag.test.root.toml holds root additions for site frag.test' <<< "$t" && echo yes) $(cpost /v1/sites/frag.test/enable '{"confirm":true,"reason":"ra"}') $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len([x for x in d["findings"] if x["code"] == "root_additions_orphan"]))')"
 check "root additions: a plain delete sets the file aside as .bak beside the site file's .bak, still there to rename back, names it in the answer; no orphan warning follows" "200 yes yes yes yes 0" "$(cpost /v1/sites/frag.test/delete '{"confirm":true,"reason":"ra"}') $([ -f $RA.bak ] && [ ! -e $RA ] && echo yes) $([ -f bench/tmp/sites.d/frag.test.toml.bak ] && echo yes) $(python3 -c "import json; d=json.load(open('bench/tmp/ctl-reply.json')); print('yes' if d['root_additions_set_aside'] == ['$ROOT/$RA.bak'] and 'rename both back' in d['root_additions_note'] else d)") $(grep -q "sites/frag.test/delete (ra): delete .*; root additions set aside: $ROOT/$RA -> $ROOT/$RA.bak" bench/tmp/audit.log && echo yes) $("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -c 'holds root additions')"
 rm -f $RA.bak
-check "mcp: pip_install asks the user in the client's dialog; no dialog, a decline or an unticked box is a refusal with the terminal command; an agent's user_confirmed is refused; a message during the dialog waits its turn" "agentrefused refused elicitation/create warn declined unticked 3 9 yes nodialog" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
-import json, subprocess, sys
+# Approvals (docs/design-site-operations.md 27): pip_install waits for a person's approval with a code
+# from an authenticator app. This server runs without the root helper, so it checks codes itself
+# against its own approver files (bench/tmp/approvers, this account's, 0600); the codes are computed
+# here from the secret, as the app would.
+rm -rf bench/tmp/approvers
+"$BIN" approver-add tester -c bench/tmp/agensio-test.toml > bench/tmp/approver-add.out 2>&1
+check "approver-add: the secret once, as base32 and an otpauth URI; the directory 0700 and the file 0600, this account's; approvers lists it; a second add is refused" "yes 700 600 tester 1" \
+  "$(grep -q 'otpauth://totp/agensio:tester@' bench/tmp/approver-add.out && grep -q 'secret:' bench/tmp/approver-add.out && echo yes) $(stat -c %a bench/tmp/approvers) $(stat -c %a bench/tmp/approvers/tester.totp) $("$BIN" approvers -c bench/tmp/agensio-test.toml | cut -d' ' -f1) $("$BIN" approver-add tester -c bench/tmp/agensio-test.toml > /dev/null 2>&1; echo $?)"
+# The site's virtualenv as pip_install's dry run needs it (the change is checked before it waits).
+V=bench/tmp/state/$(id -un)/venvs/dj.test; mkdir -p $V/bin; touch $V/pyvenv.cfg; printf '#!/bin/sh\necho pip "$@"\n' > $V/bin/pip; chmod 755 $V/bin/pip
+check "approvals: pip_install through MCP waits (pending, the server's reasons and warning), a code or user_confirmed argument is refused, a forged user_confirmed through the API waits all the same, a dry run says it would wait and stores nothing; approvals_ask without a dialog hands the person ctl approve, with one a wrong code approves nothing; the right code approves the change named and only it; a code without the ids it approves is refused, and the same code twice; ctl approve --list shows the reasons, without a terminal it asks nothing; --reject drops one" \
+  "pending code-refused uc-refused 202 dry-noted 0 terminal-line elicit wrong-refused 200 done-or-failed 1 reused-refused listed no-terminal rejected" \
+  "$(python3 - "$BIN" "$CS" bench/tmp/approvers/tester.totp <<'PYT'
+import base64, hashlib, hmac, json, struct, subprocess, sys, time
+binary, sock, secret_file = sys.argv[1], sys.argv[2], sys.argv[3]
+secret = [l.split("=", 1)[1].strip() for l in open(secret_file) if l.startswith("secret")][0]
+def code(at):
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8))
+    h = hmac.new(key, struct.pack(">Q", int(at // 30)), hashlib.sha1).digest()
+    o = h[-1] & 15
+    return "%06d" % ((struct.unpack(">I", h[o:o + 4])[0] & 0x7fffffff) % 1000000)
+def api(method, path, body=None):
+    args = ["curl", "-sS", "-o", "/dev/stdout", "-w", "\n%{http_code}", "--unix-socket", sock, "-X", method, "http://control" + path]
+    if body is not None: args += ["-H", "Content-Type: application/json", "-d", json.dumps(body)]
+    out = subprocess.run(args, capture_output=True, text=True).stdout.rsplit("\n", 1)
+    return int(out[1]), (json.loads(out[0]) if out[0].strip() else {})
 def start(caps):
-    p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    p = subprocess.Popen([binary, "mcp", "--socket", sock], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": caps, "clientInfo": {"name": "test", "version": "1.0"}}})
     read(p)
     return p
 def send(p, m): p.stdin.write(json.dumps(m) + "\n"); p.stdin.flush()
 def read(p): return json.loads(p.stdout.readline())
 def text(r): return " ".join(c["text"] for c in r["result"]["content"])
-def call(i, **extra):
-    args = {"name": "dj.test", "task": "pip_install", "params": {"packages": "wagtail"}, "confirm": True, "reason": "t"}
+def call(i, tool="site_task", **extra):
+    args = {"name": "dj.test", "task": "pip_install", "params": {"packages": "wagtail"}, "confirm": True, "reason": "t"} if tool == "site_task" else {}
     args.update(extra)
-    return {"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": "site_task", "arguments": args}}
+    return {"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": tool, "arguments": args}}
 out = []
-p = start({"elicitation": {}})
-send(p, call(2, user_confirmed="mcp")); r = read(p)  # the agent cannot confirm for the user: refused, no dialog (until alpha.99 dropped)
-out.append("agentrefused" if r["id"] == 2 and r["result"]["isError"] and "the bridge's to set" in text(r) else r)
-p.stdin.close(); p.wait()
 p = start({})
 send(p, call(2)); r = read(p)
-out.append("refused" if r["result"]["isError"] and "cannot ask them" in text(r) and "agensio ctl site-task dj.test pip_install --param 'packages=wagtail' --yes" in text(r) else text(r)[:300])
+sc = r["result"].get("structuredContent", {})
+first = sc.get("id", "")
+out.append("pending" if not r["result"]["isError"] and sc.get("pending") and "Python packages" in " ".join(sc.get("needs_approval", [])) and "pypi.org" in sc.get("preview", "") else text(r)[:300])
+send(p, call(3, code="123456")); r = read(p)
+out.append("code-refused" if r["result"]["isError"] and "typed by the person" in text(r) else text(r)[:200])
+send(p, call(4, user_confirmed="mcp")); r = read(p)
+out.append("uc-refused" if r["result"]["isError"] and "no argument" in text(r) else text(r)[:200])
+st, forged = api("POST", "/v1/sites/dj.test/task", {"task": "pip_install", "params": {"packages": "wagtail"}, "confirm": True, "reason": "forged", "user_confirmed": "terminal"})
+out.append(str(st) if forged.get("pending") else str(st) + str(forged)[:200])
+waiting = len([a for a in api("GET", "/v1/approvals")[1]["approvals"] if a["state"] == "waiting"])
+st, dry = api("POST", "/v1/sites/dj.test/task", {"task": "pip_install", "params": {"packages": "wagtail"}, "confirm": True, "dry_run": True})
+after = len([a for a in api("GET", "/v1/approvals")[1]["approvals"] if a["state"] == "waiting"])
+out.append("dry-noted" if dry.get("needs_approval") and "approval_note" in dry else str(dry)[:200])
+out.append(str(after - waiting))
+send(p, call(5, tool="approvals_ask")); r = read(p)
+out.append("terminal-line" if "agensio ctl approve" in text(r) and "Never ask the person for the code" in text(r) else text(r)[:200])
 p.stdin.close(); p.wait()
 p = start({"elicitation": {}})
-send(p, call(2)); q = read(p)
-out.append(q.get("method", "?"))
-out.append("warn" if "https://pypi.org/project/wagtail/" in q["params"]["message"] and q["params"]["requestedSchema"]["properties"]["install"]["type"] == "boolean" else q)
-send(p, {"jsonrpc": "2.0", "id": q["id"], "result": {"action": "decline"}}); r = read(p)
-out.append("declined" if r["id"] == 2 and r["result"]["isError"] and "declined" in text(r) and "agensio ctl site-task" in text(r) else text(r)[:300])
-send(p, call(4)); q = read(p)
-send(p, {"jsonrpc": "2.0", "id": q["id"], "result": {"action": "accept", "content": {"install": False}}}); r = read(p)
-out.append("unticked" if r["result"]["isError"] and "unticked" in text(r) else text(r)[:300])
-send(p, call(3)); q = read(p)
-send(p, {"jsonrpc": "2.0", "id": 9, "method": "ping"})
-send(p, {"jsonrpc": "2.0", "id": q["id"], "result": {"action": "accept", "content": {"install": True}}})
-r = read(p); r2 = read(p)
-out.append(f'{r["id"]} {r2["id"]}')
-out.append("yes" if "task" in text(r) else text(r)[:300])
-send(p, call(5, dry_run=True)); r = read(p)
-out.append("nodialog" if r["id"] == 5 and "result" in r else r)
+send(p, call(6, tool="approvals_ask")); q = read(p)
+out.append("elicit" if q.get("method") == "elicitation/create" and "pypi.org" in q["params"]["message"] and q["params"]["requestedSchema"]["properties"]["code"]["type"] == "string" else str(q)[:200])
+send(p, {"jsonrpc": "2.0", "id": q["id"], "result": {"action": "accept", "content": {"code": "000000" if code(time.time()) != "000000" else "111111"}}}); r = read(p)
+out.append("wrong-refused" if r["result"]["isError"] and "matches no approver" in text(r) else text(r)[:200])
 p.stdin.close(); p.wait()
+now = time.time()
+st, ok = api("POST", "/v1/approvals", {"code": code(now), "ids": [first]})
+out.append(str(st))
+res = ok.get("results", [{}])[0]
+out.append("done-or-failed" if res.get("id") == first and res.get("state") in ("done", "failed") and ok.get("approved_by") == "tester" else str(ok)[:300])
+out.append(str(len(ok.get("results", []))))
+still = [a["id"] for a in api("GET", "/v1/approvals")[1]["approvals"] if a["state"] == "waiting"]
+st, noids = api("POST", "/v1/approvals", {"code": code(now)})  # never "whatever waits now"
+st2, again = api("POST", "/v1/approvals", {"code": code(now), "ids": still[:1]})
+out.append("reused-refused" if st == 400 and "ids" in noids.get("error", "") and st2 == 403 and "matches no approver" in again.get("error", "") else str(st) + str(noids)[:100] + str(st2) + str(again)[:200])
+lst = subprocess.run([binary, "ctl", "approve", "--list", "--socket", sock], capture_output=True, text=True).stdout
+out.append("listed" if "!! installs the Python packages" in lst and "forged" in lst else lst[:300])
+na = subprocess.run([binary, "ctl", "approve", "--socket", sock], capture_output=True, text=True, stdin=subprocess.DEVNULL, start_new_session=True)
+out.append("no-terminal" if na.returncode == 1 and "no terminal" in na.stderr else na.stderr[:200])
+pend = [a["id"] for a in api("GET", "/v1/approvals")[1]["approvals"] if a["state"] == "waiting"]
+rj = subprocess.run([binary, "ctl", "approve", "--reject", pend[0], "--socket", sock], capture_output=True, text=True)
+st = [a["state"] for a in api("GET", "/v1/approvals")[1]["approvals"] if a["id"] == pend[0]]
+out.append("rejected" if rj.returncode == 0 and st == ["rejected"] else rj.stdout[:200] + str(st))
 print(" ".join(out))
 PYT
 )"
-check "the audit log: the accepted run is recorded as the user's confirmation in the client's dialog, the declined ones are not there" "1" "$(grep -c 'sites/dj.test/task (t): running task pip_install packages=wagtail in .*, confirmed by the user in the MCP client.s dialog (test 1.0)' bench/tmp/audit.log)"
-check "the control API refuses pip_install without the user's own confirmation, even with confirm; a dry run through ctl warns of nothing" "428 yes" "$(cpost /v1/sites/dj.test/task '{"task":"pip_install","params":{"packages":"wagtail"},"confirm":true,"reason":"agent"}') $(t=$("$BIN" ctl site-task dj.test pip_install --param packages=wagtail --dry-run --yes --socket $CS 2>&1 >/dev/null); grep -q 'WARNING' <<< "$t" && echo no || echo yes)"
+check "the audit log: the queued change and the approval, by the approver's name; the run recorded as approved with a code" "yes yes yes" \
+  "$(grep -q 'sites/dj.test/task (t): waits for approval [0-9a-f]\{12\}: installs the Python packages' bench/tmp/audit.log && echo yes) $(grep -q 'approvals ([0-9a-f]\{12\}): approved by tester' bench/tmp/audit.log && echo yes) $(grep -q 'running task pip_install packages=wagtail in .*, approved by tester with an authenticator code (approval [0-9a-f]\{12\})' bench/tmp/audit.log && echo yes)"
 # Without the helper, as the server's own account: the template row needs the application's
 # Gemfile first; the unit is refused for a site without an account of its own.
 check "database_config needs the application first; site-unit refuses a site without its own account" "409 yes 409 yes" "$(cpost /v1/sites/rails.test/task '{"task":"database_config","confirm":true,"reason":"t"}') $(grep -q 'Gemfile, which does not exist' bench/tmp/ctl-reply.json && echo yes) $(curl -sS -o bench/tmp/unit.json -w '%{http_code}' --unix-socket $CS http://control/v1/sites/rails.test/unit) $(grep -q 'no account of its own' bench/tmp/unit.json && echo yes)"
@@ -2614,7 +2655,7 @@ print(b.get("server"), "0.0.1-other" in b.get("note", ""), r["content"][0]["text
 PYT
 )
 check "mcp: a server of another build: the note leads the text and sits in structuredContent.bridge" "0.0.1-other True True" "$MCPN"
-check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 39 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 41 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
 check "mcp: site_install and the upload tools are exposed with their arguments" "file url,file,version,sha256 True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
