@@ -161,7 +161,7 @@ public:
     // A body source failed or ended short: the client sees the stream cut, not a false end.
     void on_stream_failed(H2Stream& s) {
         if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
-            log->info("http2 " + remote_text() + " stream " + std::to_string(s.id) + ": response body failed mid-stream");
+            log->info("http2 " + remote_text() + " " + stream_text(s) + ": response body failed mid-stream");
         send_rst(s.id, ErrorCode::internal_error, "");
         log_request(s);
         close_stream(s);
@@ -207,7 +207,7 @@ public:
                 s->upstream->cancel();
                 s->upstream.reset();
             }
-            if (s->responded && !s->logged) log_request(*s);  // the client went away mid-response
+            if (s->dispatched && !s->logged) log_request(*s);  // the client went away, answered or not
             if (s->pending_handler) {
                 auto h = std::move(s->pending_handler);
                 s->pending_handler = nullptr;
@@ -520,9 +520,7 @@ private:
         const ErrorCode code = static_cast<ErrorCode>(read_u32(p));
         if (!s->responded) count_reset();  // cancelled before we answered: the Rapid Reset shape
         if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
-            log->info("http2 " + remote_text() + " stream " + std::to_string(s->id) + ": reset by the client (" +
-                      std::string(error_name(code)) + ")");
-        if (s->responded && !s->logged) log_request(*s);
+            log->info("http2 " + remote_text() + " " + stream_text(*s) + ": reset by the client (" + std::string(error_name(code)) + ")");
         close_stream(*s);
         maybe_finish();
     }
@@ -703,6 +701,10 @@ private:
     void close_stream(H2Stream& s) {
         if (s.state == StreamState::closed) return;
         s.state = StreamState::closed;
+        // One line for every request that reached routing, however its stream ended: before
+        // 0.1.0-alpha.119 one reset or cut before its HEADERS went out had none (the test VPS's report:
+        // a POST to a login path reset before its answer was invisible to the jails).
+        if (s.dispatched && !s.logged) log_request(s);
         if (s.upstream) {
             s.upstream->cancel();
             s.upstream.reset();
@@ -793,6 +795,7 @@ private:
     }
 
     void dispatch(H2Stream& s) {
+        s.dispatched = true;
         WorkerState& ws = worker_.state;
         ws.site = nullptr;
         fill_connection_info(s);
@@ -876,6 +879,7 @@ private:
     // A protocol-level answer (413, 431) with the canned page; the body, if any, is left
     // to the client's RST after the response.
     void fail_stream(H2Stream& s, int status) {
+        s.dispatched = true;  // answered by the server: its line is owed even if a reset comes first
         worker_.state.now = std::time(nullptr);
         worker_.state.site = nullptr;
         dispatcher_.static_handler().error(s.stream, status, true);
@@ -1124,7 +1128,7 @@ private:
     void stream_error(H2Stream& s, ErrorCode code, std::string_view reason) {
         send_rst(s.id, code, reason);
         if (!s.responded) count_reset();
-        if (s.responded && !s.logged) log_request(s);
+        s.unsent_status = 400;  // the client broke the protocol on this stream
         close_stream(s);
         glitch({});
     }
@@ -1321,18 +1325,23 @@ private:
                     if (closed_) return;
                     continue;
                 }
-                if (s.pending_handler && age >= body_timeout_) cut = true;             // a body that does not arrive
+                if (s.pending_handler && age >= body_timeout_) {  // a body that does not arrive
+                    cut = true;
+                    s.unsent_status = 408;
+                }
                 // A response the client does not take. One waiting for its application's next bytes
                 // (a pull in flight) is the application's to bound, by its read_timeout, as HTTP/1
                 // does: the client's idle clock does not cut it.
                 else if (s.responded && !s.finished && !s.pulling && age >= idle_timeout_) cut = true;
-                else if (!s.responded && !s.ready && !s.upstream && !s.has_body && age >= idle_timeout_ * 4) cut = true;  // stuck
+                else if (!s.responded && !s.ready && !s.upstream && !s.has_body && age >= idle_timeout_ * 4) {  // stuck
+                    cut = true;
+                    s.unsent_status = 503;  // the server gave up on its own work, not the client
+                }
                 if (cut) {
                     if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
-                        log->info("http2 " + remote_text() + " stream " + std::to_string(s.id) + ": no progress, cancelled");
+                        log->info("http2 " + remote_text() + " " + stream_text(s) + ": no progress, cancelled");
                     send_rst(s.id, ErrorCode::cancel, "");
                     count_reset();
-                    if (s.responded && !s.logged) log_request(s);
                     close_stream(s);
                     if (closed_) return;
                     continue;  // the slot was swapped
@@ -1344,6 +1353,19 @@ private:
     }
 
     // ---- access log ----
+
+    // "stream N", and once the request reached routing its site, method and path, so an info line
+    // can be matched to its access-log line; the query is left out, it may carry a token.
+    std::string stream_text(const H2Stream& s) const {
+        std::string t = "stream " + std::to_string(s.id);
+        if (!s.dispatched) return t;
+        const Request& req = s.stream.request;
+        const std::string_view path = req.target.substr(0, req.target.find('?'));
+        t += " (";
+        t += s.site && !s.site->server_names.empty() ? std::string_view(s.site->server_names.front()) : std::string_view("-");
+        t.append(" ").append(log_text(req.method_name)).append(" ").append(log_text(path)).append(")");
+        return t;
+    }
 
     void log_request(H2Stream& s) {
         if (s.logged) return;
@@ -1359,7 +1381,10 @@ private:
         rec.target = req.target;
         rec.version_minor = 1;
         rec.protocol = "HTTP/2.0";
-        rec.status = s.stream.response.status;
+        // The answer's status once its HEADERS were framed; before that, why the stream ended
+        // without them (unsent_status: 499 the client left, 408 its body stopped arriving, 400 it
+        // broke the protocol, 503 the server gave up), as HTTP/1 logs it.
+        rec.status = s.head_sent ? s.stream.response.status : s.unsent_status;
         rec.bytes = s.body_sent;
         rec.referer = req.headers.get("referer");
         rec.user_agent = req.headers.get("user-agent");

@@ -1454,6 +1454,20 @@ keeps well-formed UTF-8 and writes a stray byte as `\xHH` too (a TLS ClientHello
 port 80 used to land raw, 2026-10-02). `agensio ctl logs` and `logs_query` escape the same
 way when they read, so older files are answered as valid text as well.
 
+Every request that reached a site has one line, on HTTP/1.1, HTTP/2 and HTTP/3 alike, however it
+ended. When the answer's head went out (the status line, the HEADERS frame), the line has that
+status, also when the body was cut short; the bytes are the body bytes that left the server, what
+the socket took (HTTP/1.1, HTTP/2) or what went into packets (HTTP/3), so they can exceed what a
+client that left had read, as nginx counts them, but never more than the body. When no head went
+out, the status says why: `499` the client left first (closed the connection, reset or cancelled
+the stream: RST_STREAM, STOP_SENDING, RESET_STREAM; nginx's "client closed request", which log
+tools and fail2ban filters know), `408` its body stopped arriving for `body_timeout`, `400` it broke
+the body's framing or the protocol on that stream. The application may still have run the request:
+agensio closes its connection to PHP or the origin when the client leaves, but a PHP script runs on
+until it writes output, and on to its end with `ignore_user_abort` set. Before
+0.1.0-alpha.119 such a request was logged `200 0` over HTTP/1.1 and HTTP/3 and not at all over
+HTTP/2, and an HTTP/3 download cut short counted the whole file.
+
 A query whose `since` reaches back past the first line of the current file reads on into the
 rotated files as the shipped logrotate configuration leaves them (`packaging/agensio.logrotate`:
 daily, 14 kept, `delaycompress`, `nodateext` so that the names are numbered on RHEL and Fedora too,

@@ -601,6 +601,7 @@ private:
             } else if (std::holds_alternative<std::unique_ptr<StreamBody>>(r.body)) {
                 // A streamed body (an unbuffered upstream) is phase I1b: the stream is reset.
                 s.responded = true;
+                s.unsent_status = 500;  // the server's limit, not the client's leaving
                 quic_.stream_reset(q, err::internal);
                 return;
             }
@@ -613,7 +614,6 @@ private:
         q.total = q.head.size() + body_len;
         q.fin = true;
         s.responded = true;
-        s.body_sent = body_len;
         quic_.stream_ready(q);
     }
 
@@ -699,6 +699,7 @@ private:
         quic::QuicStream& q = s.q;
         s.headers_done = true;
         s.responded = true;
+        s.unsent_status = 400;
         if (!q.stop_sending_received && !q.at_end()) quic_.stream_stop_sending(q, err::message_error);
         quic_.stream_reset(q, err::message_error);
         q.fin_delivered = true;
@@ -1007,8 +1008,16 @@ private:
         rec.target = req.target;
         rec.version_minor = 1;
         rec.protocol = "HTTP/3.0";
-        rec.status = s.stream.response.status;
-        rec.bytes = s.body_sent;
+        // The answer's status once a byte of its stream went into a packet; before that, why the
+        // request ended without one (unsent_status: 499 the client left, by STOP_SENDING, RESET_STREAM
+        // or the connection's close, 400 malformed, 500 a streamed body), as HTTP/1 and HTTP/2 log it.
+        // The bytes are the body's put into packets (next, past the HEADERS frame and the DATA frame's
+        // header), as HTTP/1 and HTTP/2 count what the socket took. Before 0.1.0-alpha.119 the status
+        // was the default 200 and the bytes the body's whole length, set when the answer was queued
+        // (the test VPS's report: a download cut after 209 KB logged as 20,000,000).
+        const quic::QuicStream& q = s.q;
+        rec.status = q.next > 0 ? s.stream.response.status : s.unsent_status;
+        rec.bytes = q.next > q.head_end() ? std::min(q.next - q.head_end(), q.body_len()) : 0;
         rec.referer = req.headers.get("referer");
         rec.user_agent = req.headers.get("user-agent");
         rec.user = s.stream.auth.user;  // verified by [[site.auth]], never the name a refused request claimed

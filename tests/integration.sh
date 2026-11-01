@@ -2970,6 +2970,17 @@ else
   echo "skip timeout regressions (Linux and python3-h2 required; run in the devbox)"
 fi
 
+# Requests the client abandons (alpha.118 VPS report): one access line each on h1, h2 and h3,
+# 499 / 408 / the status sent, bytes no more than the body; the h3 rows need aioquic.
+if [ "$(uname -s)" = Linux ] && python3 -c 'import h2' 2>/dev/null; then
+  python3 tests/abandoned-requests.py "$BIN" > bench/tmp/abandoned-requests.log 2>&1
+  abandoned_result=$?
+  cat bench/tmp/abandoned-requests.log
+  check "abandoned requests: one access-log line each over HTTP/1.1, HTTP/2 and HTTP/3, 499 before the answer, 408 for a body that stops, the bytes that left" "0" "$abandoned_result"
+else
+  echo "skip abandoned requests (Linux and python3-h2 required; run in the devbox)"
+fi
+
 # Conformance: h2spec against both listeners. Every case must pass.
 if command -v h2spec >/dev/null; then
   h2spec -h 127.0.0.1 -p 8080 -o 5 > bench/tmp/h2spec-h2c.txt 2>&1 || true

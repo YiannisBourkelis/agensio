@@ -96,7 +96,7 @@ struct H3Stream {
     bool finished = false;  // every byte acknowledged, or the reset sent
     bool logged = false;
     bool closed = false;
-    std::uint64_t body_sent = 0;
+    std::uint16_t unsent_status = 499;  // the access log's status when no byte of the answer went out
     std::size_t slot = 0;
 
     void reset() {
@@ -124,7 +124,7 @@ struct H3Stream {
         pending_len = 0;
         pending_handler = nullptr;
         responded = finished = logged = closed = false;
-        body_sent = 0;
+        unsent_status = 499;
         slot = 0;
     }
 };

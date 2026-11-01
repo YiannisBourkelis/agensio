@@ -277,7 +277,10 @@ public:
             if (ec) {
                 body_pending_ = false;
                 if (ec == make_error_code(BodyError::too_large)) refuse_body();
-                else close();
+                else {
+                    unsent_status_ = 400;  // the chunked framing is broken: the client's error, answered by a close
+                    close();
+                }
                 handler(ec, 0);
                 return;
             }
@@ -355,7 +358,11 @@ private:
         rec.method = req.method_name;
         rec.target = req.target;
         rec.version_minor = req.version_minor;
-        rec.status = stream_.response.status;
+        // The answer's status once its head went to the writer; before that, why the request ended
+        // without one (unsent_status_: 499 the client left, as nginx logs it, 408 its body stopped
+        // arriving, 400 its body's framing was broken). Before 0.1.0-alpha.119 such a request was
+        // logged with the default 200 (the test VPS's report: an abandoned long-poll as "200 0").
+        rec.status = head_out_ ? stream_.response.status : unsent_status_;
         rec.bytes = writer_.body_bytes_sent();
         rec.referer = req.headers.get("referer");
         rec.user_agent = req.headers.get("user-agent");
@@ -401,6 +408,7 @@ private:
                     self->arm_timer(self->timeout_);
                     return;
                 }
+                if (self->body_reading_) self->unsent_status_ = 408;  // body_timeout: nginx's 408 too
                 self->close();
                 return;
             }
@@ -602,6 +610,8 @@ private:
         }
         consumed_ = req.length;
         request_logged_ = false;
+        head_out_ = false;
+        unsent_status_ = 499;
         worker_.state.site = nullptr;
         site_ = nullptr;
         if (req.has_body) {
@@ -862,6 +872,7 @@ private:
         if (body_pending_ && expect_continue_ && !continue_sent_ && consumed_ >= in_len_) r.keep_alive = false;
         r.alt_svc_line = listener_->alt_svc_line;  // the way to HTTP/3 (design-http3 7.4), prebuilt for the writer
         responding_ = true;
+        head_out_ = true;
         writer_.write(stream_, worker_.state);
     }
 
@@ -968,6 +979,7 @@ private:
         worker_.state.now = std::time(nullptr);
         dispatcher_.static_handler().error(stream_, 413, false);
         responding_ = true;
+        head_out_ = true;
         writer_.write(stream_, worker_.state);
     }
     static std::string escape_line(std::string_view bytes) {
@@ -992,6 +1004,7 @@ private:
         dispatcher_.static_handler().error(stream_, status, false);
         consumed_ = in_len_;
         body_pending_ = false;
+        head_out_ = true;
         writer_.write(stream_, worker_.state);
     }
 
@@ -1127,6 +1140,8 @@ private:
     bool trusted_checked_ = false;
     bool trusted_peer_ = false;
     bool request_logged_ = false;
+    bool head_out_ = false;                  // the current request's answer went to the writer
+    int unsent_status_ = 499;                // the access log's status for a request ended before that
     const SiteConfig* site_ = nullptr;       // the current request's site (routing), for its access log line
     unsigned request_gen_ = 0;               // bumps per request and on close; guards late upstream callbacks
     std::shared_ptr<UpstreamRequest> upstream_;  // FastCGI/proxy exchange in flight, cancelled on close

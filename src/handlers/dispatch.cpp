@@ -52,8 +52,9 @@ const LocationConfig& auth_pending() {
     return loc;
 }
 
-// A user name as the log line writes it: quotes, backslashes and bytes outside printable ASCII
-// escaped, so a name a client chose cannot forge another field of the line.
+}  // namespace
+
+// dispatch.hpp: a client's text as an error-log line writes it.
 std::string log_text(std::string_view v) {
     static constexpr char kHex[] = "0123456789abcdef";
     std::string out;
@@ -69,8 +70,6 @@ std::string log_text(std::string_view v) {
     }
     return out;
 }
-
-}  // namespace
 
 // [[site.access]] (core/access.hpp, docs/configuration.md 19). The address is asked for only
 // when a rule covers some reading of the path, so a public page of a site with rules costs a

@@ -82,7 +82,10 @@ proxies renders no `ignoreip`, so the `[DEFAULT]` one holds.
 | `agensio-post` | POST requests to any path, the catch-all for a login nobody named | 120 in 2 min | 30 min |
 
 An access log cannot tell a failed login from a successful one, so `agensio-login` counts
-attempts: no person types ten passwords in ten minutes, every brute-force tool does. The
+attempts: no person types ten passwords in ten minutes, every brute-force tool does. An attempt
+the client abandons before its answer (closing the connection, resetting the HTTP/2 stream) is
+logged `499` and counted like the others, since the application checked the password anyway;
+before 0.1.0-alpha.119 an HTTP/2 one left no line (`docs/configuration.md` 8). The
 login paths come from the preset (`wordpress`: `/wp-login.php` and `/xmlrpc.php`, `drupal`:
 `/user/login`, `laravel`: `/login` and `/cp/auth/login`, `grav`: `/admin`, `redmine`:
 `/login`, `django` and `wagtail`: `/admin/login/`) and from each site's `login_paths`

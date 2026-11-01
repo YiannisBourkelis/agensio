@@ -2,6 +2,24 @@
 
 ## 0.1.0-alpha.119
 
+- **Fix: one access-log line for every request, however the client ends it, with a status that
+  says so.** Until this release an HTTP/2 request the client abandoned before its answer (the
+  connection closed, the stream reset) left no access-log line at all, so the login jails missed
+  a `POST /wp-login.php` reset before its answer while the application still checked the
+  password; HTTP/1.1 and HTTP/3 logged such a request `200 0` though no answer went out, and an
+  HTTP/3 download cut short was logged as the whole file. Now every request that reached a site has
+  one line on every protocol: the status sent once the answer's head went out (a body cut short
+  keeps it, with the body bytes that left the server), else `499` when the client left first
+  (nginx's "client closed request": a close, RST_STREAM, STOP_SENDING, RESET_STREAM, the QUIC
+  connection's close), `408` when its body stopped arriving for `body_timeout`, `400` when it broke
+  the body's framing or the stream's protocol. HTTP/3 counts the body bytes put into packets, as
+  HTTP/1.1 and HTTP/2 count what the socket took. The error log's info lines for an HTTP/2 stream
+  (reset by the client, cancelled for no progress, a body failed mid-stream) name the request's
+  site, method and path (the query left out), so they can be matched to the access line.
+  `docs/configuration.md` 8, `docs/fail2ban.md` 2a, the `logs_query` tool's text;
+  `tests/abandoned-requests.py` (thirteen rows over the three protocols, from the integration
+  suite). Found by the test VPS on alpha.116 behind Uptime Kuma, where abandoned engine.io
+  long-polls logged as `200 0` hid why WebSocket upgrades failed.
 - **Docs: what response compression leaves alone, as the build does it.** `docs/configuration.md`
   20, the cookbook's compression page and the design note said agensio's own error pages are
   compressed; they are not: each is a canned body of 150 to 230 bytes, under any useful `min_size`.

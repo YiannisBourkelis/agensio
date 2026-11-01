@@ -106,6 +106,8 @@ struct H2Stream {
     std::vector<char> chunk;       // file or source bytes waiting to be framed
     std::size_t chunk_len = 0, chunk_pos = 0;
     bool logged = false;
+    bool dispatched = false;       // the request reached routing: one access-log line is owed, however it ends
+    std::uint16_t unsent_status = 499;  // that line's status when no HEADERS went out (connection.hpp log_request)
     bool defer_release = false;    // closed while its bytes were in flight: released when the write ends
     bool in_ready = false;         // linked in the writer's ready list
     bool in_cycle = false;         // noted in the writer's cycle in flight (bytes of it are with the kernel)
@@ -134,7 +136,8 @@ struct H2Stream {
         ready = head_sent = finished = responded = pulling = source_done = source_sized = false;
         source_remaining = body_sent = body_offset = 0;
         chunk_len = chunk_pos = 0;
-        logged = defer_release = in_ready = in_cycle = false;
+        logged = dispatched = defer_release = in_ready = in_cycle = false;
+        unsent_status = 499;
         next_ready = nullptr;
         slot = 0;
     }

@@ -21,6 +21,10 @@
 
 namespace agensio {
 
+// A client's text (a user name, a method, a path) as an error-log line writes it: quotes, backslashes and
+// bytes outside printable ASCII as \xHH, at most 128 bytes, so it cannot forge another field.
+std::string log_text(std::string_view v);
+
 class Dispatcher {
 public:
     Dispatcher(StaticHandler& static_handler, FcgiHandler& fcgi, ProxyHandler& proxy, CgiHandler& cgi,
