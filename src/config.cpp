@@ -4644,6 +4644,25 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
             fail("control.task_limits must be a table: { timeout = 1200, processes = 512 }");
         }
         cfg.control.task_network = (*ct)["task_network"].value_or(true);
+        if (auto fh = (*ct)["file_history"].as_table()) {
+            for (const auto& [k, v] : *fh)
+                if (k.str() != "versions" && k.str() != "days")
+                    fail("control.file_history: unknown key \"" + std::string(k.str()) + "\" (versions, days)");
+            if (auto v = (*fh)["versions"].value<std::int64_t>()) {
+                if (*v < 0 || *v > 100) fail("control.file_history.versions must be 0 to 100 (0: nothing is kept, a delete removes for good)");
+                cfg.control.file_history_versions = static_cast<unsigned>(*v);
+            } else if ((*fh).contains("versions")) {
+                fail("control.file_history.versions must be a number");
+            }
+            if (auto v = (*fh)["days"].value<std::int64_t>()) {
+                if (*v < 1 || *v > 3650) fail("control.file_history.days must be 1 to 3650");
+                cfg.control.file_history_days = static_cast<unsigned>(*v);
+            } else if ((*fh).contains("days")) {
+                fail("control.file_history.days must be a number of days");
+            }
+        } else if ((*ct).contains("file_history")) {
+            fail("control.file_history must be a table: { versions = 5, days = 30 }");
+        }
         if (auto v = (*ct)["trash_keep"].value<std::int64_t>()) {
             if (*v < 0 || *v > 3650) fail("control.trash_keep must be 0 to 3650 days (0: entries stay until trash-delete)");
             cfg.control.trash_keep = static_cast<unsigned>(*v);

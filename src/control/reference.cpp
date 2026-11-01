@@ -75,6 +75,9 @@ const std::vector<KeyDef>& key_defs() {
         {"[control]", "runtimes", "table { ruby, node, php, python3 } of directories", "{ ruby = \"/usr/bin\", node = \"/usr/bin\", php = \"/usr/bin\", python3 = \"/usr/bin\" }", "Where site tasks find their interpreters (ruby, gem and bundle for app = \"rails\"). The program, the file it resolves to and every directory above both must be root's and writable by root alone, outside sites_root, or the task is refused: a site never supplies its own interpreter. Point it at a root-owned installation under /opt when the distribution's is too old or an application pins another version (a Gemfile with ruby file: \".ruby-version\"); docs/configuration.md 15 shows the build. A reload applies it.", "reload", "file", "15"},
         {"[control]", "task_limits", "table { timeout, processes }", "{ timeout = 1200, processes = 512 }", "The bounds of every site task; the two keys are below.", "reload", "file", "15"},
         {"[control]", "trash_keep", "days", "60", "How long a site deleted with its files (site-delete --files) stays in <sites_root>/.trash before the hourly expiry removes it; 0 keeps entries until trash-delete. The account is never removed.", "reload", "file", "15"},
+        {"[control]", "file_history", "table { versions, days }", "{ versions = 5, days = 30 }", "What a change to a site's files through the control plane (site_file_write, site_file_edit, site_path_move, site_path_delete, site_file_restore) replaced or removed, kept in <sites_root>/.history (root's alone, never served) for an undo: site_file_history lists a path's versions, site_file_restore puts one back. A replaced file is hard-linked there, a removed path renamed there whole, so nothing is copied. The two keys are below.", "reload", "file", "15"},
+        {"file_history = {}", "versions", "int", "5", "Versions of one path kept, the oldest going first; 0 keeps nothing, so a delete removes for good (at most 10,000 entries a call). 0 to 100.", "reload", "file", "15"},
+        {"file_history = {}", "days", "days", "30", "How long a version stays before the hourly expiry removes it. 1 to 3650.", "reload", "file", "15"},
         {"[control]", "host_protection", "enum: check | external | off", "check", "Whether health looks for the host's protection when a listener is public: per-address limits on the web ports in the kernel's firewall and a fail2ban jail over the access logs (agensio ctl protection and the MCP tool protection_show render both for this host and say what is in place). check warns when either is missing; external says a panel or the administrator manages them, so the findings are informational; off skips the probe.", "reload", "file", "18"},
         {"[control]", "task_network", "bool", "true", "Site tasks that download (gem_install_rails, rails_new, bundle_install) may run; false refuses them, for a host that installs archives carrying vendor/bundle instead.", "reload", "file", "15"},
         {"task_limits = {}", "timeout", "seconds", "1200", "Wall-clock limit of one site task: SIGTERM to its process group, SIGKILL ten seconds later; a task's own limit is capped by it. 5 to 86400.", "reload", "file", "15"},
@@ -348,7 +351,13 @@ json::Value running_value(const Config& c, const std::string& table, const std::
             return V::object().set("timeout", static_cast<double>(c.control.task_timeout)).set("processes", static_cast<double>(c.control.task_processes));
         if (key == "task_network") return V(c.control.task_network);
         if (key == "trash_keep") return V(static_cast<double>(c.control.trash_keep));
+        if (key == "file_history")
+            return V::object().set("versions", static_cast<double>(c.control.file_history_versions)).set("days", static_cast<double>(c.control.file_history_days));
         if (key == "host_protection") return V(c.control.host_protection);
+    } else if (table == "file_history = {}") {
+        if (!c.control.enabled) return V("(no [control] table)");
+        if (key == "versions") return V(static_cast<double>(c.control.file_history_versions));
+        if (key == "days") return V(static_cast<double>(c.control.file_history_days));
     } else if (table == "task_limits = {}") {
         if (!c.control.enabled) return V("(no [control] table)");
         if (key == "timeout") return V(static_cast<double>(c.control.task_timeout));

@@ -129,6 +129,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [Delete a site and get it back](examples/hosting.md#delete-a-site-and-get-it-back): disable, `site-delete --files`, the trash, `site-restore`, `trash_keep`.
 - [Who may do what: roles and the audit log](examples/hosting.md#who-may-do-what-roles-and-the-audit-log): admins, operators and viewers by group, the reads only an admin gets, and the audit line.
 - [Let an AI agent manage the host](examples/hosting.md#let-an-ai-agent-manage-the-host): `agensio mcp` over SSH on a key that may run the bridge and nothing else.
+- [Change a page of a site, the favicon or robots.txt](examples/hosting.md#change-a-page-of-a-site-the-favicon-or-robotstxt): `site-file-read`, `site-file-edit`, `site-file-write` as the site's account, one approval code for both changes, `site-file-history` to undo.
 - [A host a panel manages](examples/hosting.md#a-host-a-panel-manages): site files a panel writes in the recommended layout, and `host_protection = "external"`.
 
 ## Protocols and capacity: HTTP/2, HTTP/3, limits

@@ -188,6 +188,8 @@ set(AGENSIO_CORE_SOURCES
   src/services/tasks.cpp
   src/services/appenv.cpp
   src/services/totp.cpp
+  src/services/files.cpp
+  src/services/history.cpp
   src/services/approvers.cpp
   src/control/approvals.cpp
   src/control/handler.cpp

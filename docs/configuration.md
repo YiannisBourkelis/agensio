@@ -2764,6 +2764,7 @@ runtimes = { ruby = "/usr/bin" }       # where site tasks find ruby, gem and bun
 task_limits = { timeout = 1200, processes = 512 }   # a task's wall-clock seconds and the processes its account may have
 task_network = true                    # tasks that download (gem install, rails new, bundle install) may run
 trash_keep = 60                        # days a site deleted with its files stays in <sites_root>/.trash; 0 keeps entries until trash-delete
+file_history = { versions = 5, days = 30 }   # what the file tools replace or remove, kept in <sites_root>/.history for an undo
 ```
 
 The control API is how `agensio ctl`, the MCP bridge (`agensio mcp`) and any local tool
@@ -2830,6 +2831,12 @@ with `--out FILE`, never with `>` (section 18).
 | `site-restore ENTRY` | admin | brings an entry of the trash back: every piece to its original path, the site file from the manifest, a reload; only into an empty place (refused when the site exists again, its file is there, or any original path exists and is not empty), and only with the account at the uid the files carry (else the `useradd --uid` line for root). The application's service is not restored: `site-unit` renders it again |
 | `trash-delete ENTRY` | admin | removes one entry now, for good |
 | `trash-expire` | admin | removes the entries older than `trash_keep` now (worker 0 does it every hour) |
+| `site-files NAME [PATH]` | admin | the entries of one directory of the site, as its account (the site's files, below) |
+| `site-file-read NAME PATH [--offset N] [--tail N] [--base64]` | admin | one file, as its account, at most 180 KB a call; a credential or database file waits for approval |
+| `site-file-write NAME PATH [FILE] [--overwrite] [--executable]` | admin | writes the file whole from FILE or standard input; waits for approval |
+| `site-file-edit NAME PATH --old TEXT --new TEXT` | admin | replaces text that occurs once; waits for approval |
+| `site-dir-create NAME PATH [--parents]`, `site-path-move NAME FROM TO [--overwrite]`, `site-path-delete NAME PATH [--recursive]` | admin | a directory, a move within the site, a delete into the history; each waits for approval |
+| `site-file-history NAME PATH`, `site-file-restore NAME PATH VERSION [--overwrite]` | admin | the versions the history keeps of a path, and putting one back (waits for approval) |
 | `cert-renew NAME` | operator | orders the site's automatic certificate again now; for a site with its own certificate files, loads them now and answers what happened (section 14) |
 | `upload NAME [FILE]` | operator | stores FILE (stdin by default) as `<state_dir>/uploads/NAME`, the server's own directory (0700); `PUT /v1/uploads/NAME` with the raw bytes on the socket; no `--yes`; at most `upload_max`; names are plain file names (letters, digits, `.`, `_`, `-`, no leading dot); a partial transfer leaves nothing |
 | `uploads-delete NAME` | operator | removes a stored upload |
@@ -3099,6 +3106,30 @@ removed by worker 0's hourly check or `trash-expire`; `trash-delete ENTRY` remov
 Without `--files` `site-delete` removes the configuration alone and leaves every file where
 it is, as before. The whole is the provisioning helper's: a server started without it
 answers 409 and the files are removed by hand.
+
+**The site's files.** `agensio ctl site-files`, `site-file-read`, `site-file-write`, `site-file-edit`,
+`site-dir-create`, `site-path-move` and `site-path-delete` (MCP `site_files_list`, `site_file_read`,
+`site_file_write`, `site_file_edit`, `site_dir_create`, `site_path_move`, `site_path_delete`) do with
+one site's files what an SFTP login as the site's account would, without a shell (0.1.0-alpha.120;
+`docs/design-site-operations.md` 3 and 27.6). Every operation runs as the site's account, below the
+site's directory (its project root) and nowhere else; each path is walked component by component
+without following a symlink, every component the account's, so a link the application planted can
+never send a write elsewhere; a write goes to a temporary name and is linked or renamed into place,
+takes its directory's mode (an existing file keeps its own, a credential file is made `0600`), and
+never gets a set-uid or set-gid bit; nothing is ever run. Content travels through the control socket,
+at most 180 KB a call (text, or base64 for other bytes); larger files go up with `agensio ctl upload`
+and `site-install`. Listing and reading are made at once, except a credential or database file
+(the preset's credential files, `.env*`, `.git/`, `*.key`, `*.pem`, SQLite files), whose read waits
+for approval and is handed out once; every change waits for a person's approval with a code from
+their authenticator app (`docs/approvals.md`), and what waits shows the change itself: the diff
+against the file there, and what the site does with the path (served as a file of what type, or
+RUNS as a script). What a change replaces or removes goes into `<sites_root>/.history/<domain>/`
+(root's alone, never served): a replaced file by hard link, a deleted file or tree by rename, so
+nothing is copied whatever its size. `site-file-history NAME PATH` lists what is kept, and
+`site-file-restore NAME PATH VERSION` puts a version back (with `--overwrite` keeping what is there
+first). `[control] file_history = { versions = 5, days = 30 }`: the versions one path keeps, the
+oldest going first, and for how many days worker 0's hourly check leaves them; `versions = 0` keeps
+nothing, and a delete then removes for good, at most 10,000 entries a call.
 
 **The site's environment.** An application reads settings and secrets from its
 environment: a Rails application without credentials (every ONCE application such as

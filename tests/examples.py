@@ -156,7 +156,8 @@ ctl_help = ctl_help.stdout + ctl_help.stderr
 # The commands ctl sends as changes, refused with 428 without --yes: main.cpp's `mutation`, which
 # this mirrors (keep the two in step). A recipe's line for one carries --yes (the alpha.119 report:
 # the compression recipe's site-update without it failed as written).
-CTL_SITE_READS = {"site-tasks", "site-env", "site-unit", "site-auth-users", "site-service", "site-service-logs", "site-task-output"}
+CTL_SITE_READS = {"site-tasks", "site-env", "site-unit", "site-auth-users", "site-service", "site-service-logs", "site-task-output",
+                  "site-files", "site-file-read", "site-file-history"}
 
 
 def ctl_changes(command):

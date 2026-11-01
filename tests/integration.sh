@@ -1196,7 +1196,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 240 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 243 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -2655,7 +2655,7 @@ print(b.get("server"), "0.0.1-other" in b.get("note", ""), r["content"][0]["text
 PYT
 )
 check "mcp: a server of another build: the note leads the text and sits in structuredContent.bridge" "0.0.1-other True True" "$MCPN"
-check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 41 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 50 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
 check "mcp: site_install and the upload tools are exposed with their arguments" "file url,file,version,sha256 True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -3029,6 +3029,15 @@ if [ "$(uname -s)" = Linux ] && python3 -c 'import h2' 2>/dev/null; then
   check "abandoned requests: one access-log line each over HTTP/1.1, HTTP/2 and HTTP/3, 499 before the answer, 408 for a body that stops, the bytes that left" "0" "$abandoned_result"
 else
   echo "skip abandoned requests (Linux and python3-h2 required; run in the devbox)"
+fi
+
+# The site's files (F12): list, read, write, edit, mkdir, move, delete, history, restore on a private
+# server without the helper, every change approved with a code (tests/site-files.py).
+if [ "$(uname -s)" = Linux ]; then
+  python3 tests/site-files.py "$BIN" > bench/tmp/site-files.log 2>&1
+  files_result=$?
+  cat bench/tmp/site-files.log
+  check "the site's files: every operation as the site's account below its tree, each change approved with a code, a stale file refused, a secret handed out once, the history" "0" "$files_result"
 fi
 
 # Conformance: h2spec against both listeners. Every case must pass.

@@ -8,6 +8,8 @@
 // unit tested; `tests/install.sh` runs the whole thing as real users.
 #pragma once
 
+#include <sys/types.h>
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -79,6 +81,21 @@ struct CopyRequest {
 // {"ok", "error"?, "as", "from", "to", "bytes", "mode", "replaced"?: {"bytes", "mtime"}};
 // a dry run answers {"ok", "dry_run": true, "as", "from", "to", "would_replace"?}.
 json::Value copy_file(const CopyRequest& req);
+
+#ifndef _WIN32
+// The walk every write into a site uses (F9, F9b, F12): the directory `rel` (cleaned, "" for the root
+// itself) below an open site root, component by component, each opened O_NOFOLLOW | O_DIRECTORY and
+// required to be the executing account's (walk_dirs) or `owner`'s (walk_dirs_owned, root's walk to a
+// site account's path for the history); its descriptor, or -1 with `error`, `missing` set when a
+// component does not exist.
+int walk_dirs(int root_fd, const std::string& root_path, const std::string& rel, std::string& error, bool& missing);
+int walk_dirs_owned(int root_fd, const std::string& root_path, const std::string& rel, uid_t owner, std::string& error, bool& missing);
+// "a/b/c" into "a/b" and "c"; "c" into "" and "c".
+void split_leaf(const std::string& rel, std::string& dir, std::string& leaf);
+// The executing account's name, and a mode as 0640, for answers.
+std::string executing_account();
+std::string mode_string(unsigned mode);
+#endif
 
 // One path segment: letters, digits, ".", "_", "-", not starting with a dot, at most 128 bytes.
 bool valid_upload_name(std::string_view name) noexcept;

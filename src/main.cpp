@@ -26,6 +26,8 @@
 #include "control/approvals.hpp"
 #include "control/reference.hpp"
 #include "services/approvers.hpp"
+#include "services/files.hpp"
+#include "core/strings.hpp"
 #include "services/json.hpp"
 #include "services/tasks.hpp"
 #include "services/totp.hpp"
@@ -551,6 +553,9 @@ int main(int argc, char** argv) {
             auto ctl_usage = [] {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
                              "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] | reference | trash |\n"
+                             "        site-files NAME [PATH] | site-file-read NAME PATH [--offset N] [--tail N] [--base64] |\n"
+                             "        site-file-history NAME PATH (a site's files as its own account, admin; a credential or database\n"
+                             "                    file's read waits for approval, docs/approvals.md) |\n"
                              "        php (the PHP versions installed, their extensions, service and support status, and those the system's\n"
                              "                    repositories can install; installing is root's) |\n"
                              "        protection [--nft | --jail | --unit | --filter NAME] [--out FILE] (the firewall ruleset and the fail2ban jails rendered\n"
@@ -698,6 +703,14 @@ int main(int argc, char** argv) {
                              "                    On a PHP site a release the site's PHP cannot run (outside the range its composer.json\n"
                              "                    or version.php declares, a required extension missing) is refused and taken out again;\n"
                              "                    --ignore-requirements installs it anyway\n"
+                             "        site-file-write NAME PATH [FILE] [--overwrite] [--executable] | site-file-edit NAME PATH --old TEXT --new TEXT |\n"
+                             "        site-dir-create NAME PATH [--parents] | site-path-move NAME FROM TO [--overwrite] |\n"
+                             "        site-path-delete NAME PATH [--recursive] | site-file-restore NAME PATH VERSION [--overwrite]:\n"
+                             "                    the site's files as its own account, below its directory, never through a symlink (FILE or\n"
+                             "                    standard input, at most 180 KB; --dry-run shows the change); each waits for a person's\n"
+                             "                    approval with a code (agensio ctl approve, which shows the diff and what the site does with\n"
+                             "                    the path); what a change replaces or removes is kept in <sites_root>/.history ([control]\n"
+                             "                    file_history), and site-file-history and site-file-restore undo it\n"
                              "        site-copy NAME --from SUB --to SUB [--overwrite] [--dry-run]: copies one of the site's files\n"
                              "                    to another path of the same site, as the site's account (drop-ins such as\n"
                              "                    wp-content/db.php from a plugin's db.copy); the destination's directory must exist\n"
@@ -774,6 +787,7 @@ int main(int argc, char** argv) {
             bool prompt = false;  // site-auth-user-set --prompt: the password asked and hashed here
             bool missing_value = false;  // a flag without its value, said by flag_value
             std::vector<std::string> approve_ids;  // ctl approve ID ...
+            std::vector<std::string> file_args;    // the site's files (F12): PATH, then TO, VERSION or FILE
             bool approve_list = false;
             std::string approve_show, approve_reject;
             for (int j = i + 1; j < argc && !missing_value; ++j) {
@@ -1133,6 +1147,18 @@ int main(int argc, char** argv) {
                 else if (command == "approve" && b == "--reject") value(approve_reject);
                 else if (command.empty()) command = b;
                 else if (command == "approve" && !b.empty() && b[0] != '-') approve_ids.push_back(b);
+                else if (command.starts_with("site-file") || command.starts_with("site-dir") || command.starts_with("site-path")) {
+                    if (b == "--old") field("old");
+                    else if (b == "--new") field("new");
+                    else if (b == "--parents") body.set("parents", true);
+                    else if (b == "--recursive") body.set("recursive", true);
+                    else if (b == "--executable") body.set("executable", true);
+                    else if (b == "--tail") { std::string v; value(v); query += (query.empty() ? "?" : "&") + std::string("tail=") + v; }
+                    else if (b == "--base64") query += (query.empty() ? "?" : "&") + std::string("base64=1");
+                    else if (site_name.empty() && !b.empty() && b[0] != '-') site_name = b;
+                    else if (b == "-" || (!b.empty() && b[0] != '-')) file_args.push_back(b);
+                    else { std::cerr << "ctl: unexpected argument " << b << "\n"; return 2; }
+                }
                 else if (site_name.empty() && command.starts_with("site") && command != "sites") site_name = b;
                 else if (command == "site-task" && body["task"].is_null()) body.set("task", b);
                 else if ((command == "site-auth-user-set" || command == "site-auth-user-delete") && body["user"].is_null()) body.set("user", b);
@@ -1158,7 +1184,8 @@ int main(int argc, char** argv) {
             // tests/examples.py's ctl_changes mirrors this list (a recipe's line for a change carries --yes).
             const bool mutation = command == "reload" || command == "logs-reopen" ||
                                   (command.starts_with("site-") && command != "site-tasks" && command != "site-env" && command != "site-unit" && command != "site-auth-users" &&
-                                   command != "site-service" && command != "site-service-logs" && command != "site-task-output") ||
+                                   command != "site-service" && command != "site-service-logs" && command != "site-task-output" && command != "site-files" &&
+                                   command != "site-file-read" && command != "site-file-history") ||
                                   command == "cert-renew" || command == "uploads-delete" || command == "trash-delete" || command == "trash-expire";
             const bool upload = command == "upload";
             if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads" || command == "trash" || command == "protection" ||
@@ -1217,6 +1244,54 @@ int main(int argc, char** argv) {
             else if (command == "cert-renew" && !site_name.empty()) path = "/v1/sites/" + site_name + "/renew";
             else if (command == "site-install" && !site_name.empty()) path = "/v1/sites/" + site_name + "/install";
             else if (command == "site-copy" && !site_name.empty()) path = "/v1/sites/" + site_name + "/copy";
+            else if ((command == "site-files" || command == "site-file-read" || command == "site-file-history") && !site_name.empty()) {
+                if (command != "site-files" && file_args.empty()) {
+                    std::cerr << "ctl: " << command << " NAME PATH\n";
+                    return 2;
+                }
+                std::string q;
+                for (const char c : file_args.empty() ? std::string() : file_args[0]) {
+                    if (std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_' || c == '/') q.push_back(c);
+                    else { char h[4]; std::snprintf(h, sizeof h, "%%%02X", static_cast<unsigned char>(c)); q += h; }
+                }
+                path = "/v1/sites/" + site_name + (command == "site-file-history" ? "/history?path=" : "/files?path=") + q + (command == "site-file-read" ? "&read=1" : "");
+                if (command == "site-file-read" && !query.empty()) path += "&" + query.substr(1);
+            }
+            else if ((command == "site-file-write" || command == "site-file-edit" || command == "site-dir-create" || command == "site-path-move" ||
+                      command == "site-path-delete" || command == "site-file-restore") && !site_name.empty()) {
+                const std::size_t need = command == "site-path-move" || command == "site-file-restore" ? 2 : 1;
+                if (file_args.size() < need) {
+                    std::cerr << "ctl: " << command << " NAME PATH" << (command == "site-path-move" ? " TO" : command == "site-file-restore" ? " VERSION" : command == "site-file-write" ? " [FILE]" : "") << "\n";
+                    return 2;
+                }
+                const std::string op = command == "site-file-write" ? "write" : command == "site-file-edit" ? "edit" : command == "site-dir-create" ? "mkdir"
+                                     : command == "site-path-move" ? "move" : command == "site-path-delete" ? "delete" : "restore";
+                body.set("op", op).set("path", file_args[0]);
+                if (op == "move") body.set("to", file_args[1]);
+                if (op == "restore") body.set("version", file_args[1]);
+                if (op == "write") {  // the content from FILE, or standard input
+                    std::string bytes;
+                    if (file_args.size() > 1 && file_args[1] != "-") {
+                        std::ifstream in(file_args[1], std::ios::binary);
+                        if (!in) {
+                            std::cerr << "ctl: cannot read " << file_args[1] << "\n";
+                            return 2;
+                        }
+                        bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+                    } else {
+                        bytes.assign(std::istreambuf_iterator<char>(std::cin), std::istreambuf_iterator<char>());
+                    }
+                    bool text = true;
+                    for (std::size_t i = 0; i < bytes.size() && text;) {
+                        const std::size_t n = bytes[i] == '\0' ? 0 : agensio::utf8_sequence(bytes, i);
+                        if (n == 0) text = false;
+                        i += n;
+                    }
+                    if (text) body.set("content", bytes);
+                    else body.set("content_base64", agensio::files::base64_encode(bytes));
+                }
+                path = "/v1/sites/" + site_name + "/file";
+            }
             else if (command == "site-task" && !site_name.empty() && !body["task"].is_null()) path = "/v1/sites/" + site_name + "/task";
             else if (command == "site-tasks" && !site_name.empty()) path = "/v1/sites/" + site_name + "/tasks";
             else if (command == "site-unit" && !site_name.empty()) path = "/v1/sites/" + site_name + "/unit";

@@ -18,11 +18,12 @@ after it was queued.
 | change | since |
 |---|---|
 | `site_task` `pip_install` (`agensio ctl site-task NAME pip_install --param packages=...`): installs Python packages the caller names into a site's virtualenv, so their code runs as the site's account | 0.1.0-alpha.120 |
+| every change to a site's files: `site_file_write`, `site_file_edit`, `site_dir_create`, `site_path_move`, `site_path_delete`, `site_file_restore` (`agensio ctl site-file-write`, ...); what waits shows the diff and what the site does with the path (served as a file, or RUNS as a script) | 0.1.0-alpha.120 |
+| reading a credential or database file of a site (`site_file_read` of `.env`, `wp-config.php`, `*.key`, `*.pem`, `.git/`, a SQLite file): its content would leave the server for whoever asked; once approved, it is handed out once (`approvals_list` with the id) | 0.1.0-alpha.120 |
 
-The site's files through the control plane (write, edit, move, delete), application installs, reading a
-credential or database file, a site environment's secrets, the `site_update` changes that make files run
-or send visitors elsewhere, password users and the trash's deletions join this list in the next releases
-(`docs/design-site-operations.md` 27.2 lists them all). Everything else is made at once, as before, with
+Application installs, `site_copy`, a site environment's secrets, the `site_update` changes that make
+files run or send visitors elsewhere, password users and the trash's deletions join this list in the
+next release (`docs/design-site-operations.md` 27.2 lists them all). Everything else is made at once, as before, with
 the caller's `confirm`: none of it runs code, moves a secret off the host, grants access, or destroys
 beyond undo.
 

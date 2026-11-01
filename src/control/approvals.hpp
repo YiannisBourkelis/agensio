@@ -71,11 +71,19 @@ json::Value pending_json(const PendingChange& c, std::time_t now, bool with_resu
 
 // The person-facing text of one waiting change (ctl approve, the client's dialog): the reasons
 // first, the preview, the requester's words last and marked as theirs; escaped.
-std::string pending_text(const PendingChange& c, std::time_t now);
+// `max_lines`: lines of the preview shown, the rest counted (agensio ctl approve --show prints them all).
+std::string pending_text(const PendingChange& c, std::time_t now, std::size_t max_lines = 0);
 
 // Why a mutation waits for approval, in the server's words; empty when it does not
 // (docs/design-site-operations.md 27.2). `action` is the part after /v1/sites/NAME/. A dry run gets
 // the same reasons: the handler runs it as it is and says it would wait.
-std::vector<std::string> approval_reasons(std::string_view path, std::string_view action, const json::Value& body);
+// `secret_read`: the request reads a credential or database file (files::secret_path), which only
+// the handler can judge against the site's credential files.
+std::vector<std::string> approval_reasons(std::string_view path, std::string_view action, const json::Value& body, bool secret_read = false);
+
+// The change from `before` to `after` as a unified diff of lines (3 lines of context, hunks with
+// @@ -l,s +l,s @@), at most `max_lines` lines of it with the count of the rest; a file replaced
+// beyond a few thousand edits is shown as its new text instead.
+std::string unified_diff(std::string_view before, std::string_view after, std::size_t max_lines);
 
 }  // namespace agensio::control

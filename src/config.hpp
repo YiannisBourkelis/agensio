@@ -511,6 +511,11 @@ struct ControlConfig {
     // alone) before the hourly expiry removes it; 0 keeps entries until trash_delete (F12b,
     // 2026-09-30, the owner's 60 days).
     unsigned trash_keep = 60;  // days
+    // What a change to a site's files through the control plane replaced or removed, kept in
+    // <sites_root>/.history (F12, docs/design-site-operations.md 27.6): versions a path keeps, and
+    // for how long; versions = 0 keeps nothing (a delete then removes for good).
+    unsigned file_history_versions = 5;
+    unsigned file_history_days = 30;
     // Host protection (2026-10-02, docs/configuration.md 18): whether health looks for the
     // per-address limits in the kernel's firewall and a fail2ban jail over the access logs.
     // "check" warns when they are missing on a host with a public listener; "external" says

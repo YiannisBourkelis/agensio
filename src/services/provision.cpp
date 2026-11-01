@@ -37,6 +37,8 @@
 #endif
 #include "services/archive.hpp"
 #include "services/fetch.hpp"
+#include "services/files.hpp"
+#include "services/history.hpp"
 #include "services/install.hpp"
 #include "services/pools.hpp"
 #include "services/tasks.hpp"
@@ -160,6 +162,26 @@ std::string validate(const json::Value& req, const Config& cfg) {
             if (!req[flag].is_null() && req[flag].type() != json::Value::Type::boolean) return std::string("file_copy: ") + flag + " must be a boolean";
         for (const auto& sec : req["secrets"].items())
             if (!sec.is_string() || !archive::clean_path(sec.str(), clean, why) || clean != sec.str()) return "file_copy: secrets must be clean relative paths";
+        return "";
+    }
+    if (op == "file_op" || op == "history_expire") {
+        // F12 (docs/design-site-operations.md 3, 27.6): one operation on one site's tree, the paths
+        // cleaned, the content bounded, the history's bounds; the helper finds the account from the
+        // site's directory as for a copy, and keeps the history in root's own directory.
+        const json::Value& h = req["history"];
+        if (!h.is_null()) {
+            if (!h.is_object() || h["versions"].type() != json::Value::Type::number || h["days"].type() != json::Value::Type::number || h["versions"].num() < 0 ||
+                h["versions"].num() > 100 || h["days"].num() < 1 || h["days"].num() > 3650)
+                return op + ": history must be {versions 0 to 100, days 1 to 3650}";
+        }
+        if (op == "history_expire") return "";
+        const std::string site_root(req.get("site_root")), user(req.get("user"));
+        if (!control::safe_path(site_root, why)) return "file_op: site_root " + why;
+        if (!under(site_root, sites_root(cfg)) || site_root == sites_root(cfg)) return "file_op: " + site_root + " is not below " + sites_root(cfg);
+        if (!user.empty() && !control::valid_account(user, why)) return "file_op: user " + why;
+        if (!control::valid_domain(req.get("site"))) return "file_op: site must be a site's host name";
+        files::Op parsed;
+        if (std::string bad = files::parse(req, parsed); !bad.empty()) return "file_op: " + bad;
         return "";
     }
     if (op == "credentials_tighten") {
@@ -724,6 +746,31 @@ json::Value file_copy(const json::Value& req, const Config& cfg, int helper_fd) 
         for (const auto& sec : req["secrets"].items()) r.secrets.push_back(sec.str());
         return install::copy_file(r);
     });
+}
+
+// file_op (F12): one operation on a site's tree. The history's part (keep, list, restore) runs here,
+// as root, in <sites_root>/.history (root's alone); the account's part in a child after the drop, as
+// a copy does; the account comes from the site's directory, never root.
+json::Value file_op(const json::Value& req, const Config& cfg, int helper_fd) {
+    json::Value reply = json::Value::object();
+    files::Op op;
+    if (std::string bad = files::parse(req, op); !bad.empty()) return reply.set("ok", false).set("error", bad);
+    uid_t uid = 0;
+    gid_t gid = 0;
+    std::string why;
+    if (!install_account(cfg, op.site_root, std::string(req.get("user")), uid, gid, why)) return reply.set("ok", false).set("error", why);
+    if (uid == 0) return reply.set("ok", false).set("error", "refusing to change files as root");
+    files::Context ctx;
+    ctx.place.hist_dir = history::dir_of(provision::sites_root(cfg));
+    ctx.place.hist_owner = 0;
+    ctx.place.domain = std::string(req.get("site"));
+    ctx.place.site_root = op.site_root;
+    ctx.place.site_uid = uid;
+    if (req["history"].is_object()) {
+        ctx.place.settings.versions = static_cast<int>(req["history"]["versions"].num());
+        ctx.place.settings.days = static_cast<int>(req["history"]["days"].num());
+    }
+    return files::run(op, ctx, [&](const std::function<json::Value()>& work) { return run_as_account(uid, gid, helper_fd, -1, work, std::chrono::minutes(5)); });
 }
 
 // The account's home, <state_dir>/<account> (useradd gave it; for an account without a PHP
@@ -1973,6 +2020,15 @@ void helper_loop(int fd, const Config& cfg) {
                     reply = pools_apply(req, cfg);
                 } else if (op == "app_install") {
                     reply = app_install(req, cfg, fd);
+                } else if (op == "file_op") {
+                    reply = file_op(req, cfg, fd);
+                } else if (op == "history_expire") {
+                    history::Settings hs;
+                    if (req["history"].is_object()) {
+                        hs.versions = static_cast<int>(req["history"]["versions"].num());
+                        hs.days = static_cast<int>(req["history"]["days"].num());
+                    }
+                    reply = history::expire(history::dir_of(provision::sites_root(cfg)), 0, hs, std::time(nullptr));
                 } else if (op == "file_copy") {
                     reply = file_copy(req, cfg, fd);
                 } else if (op == "task_run") {

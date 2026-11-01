@@ -562,7 +562,8 @@ every change your account may make; the changes that wait for your approval (a `
 packages the agent named, `docs/approvals.md`) still need the code from your phone. Keep your own
 key, without the restriction, for your terminal.
 
-Easy to get wrong: files do not travel through the bridge; an archive on your machine goes up
+Easy to get wrong: archives do not travel through the bridge (a file of up to 180 KB does, with
+the file tools below); an archive on your machine goes up
 with `ssh anna@host1.example.com agensio ctl upload NAME < FILE`, with your own key, and the
 agent installs it by name. After an upgrade, reconnect the MCP server in the agent host: a
 bridge keeps the tools and texts it started with, and its answers say when the server's version
@@ -584,6 +585,28 @@ explain the findings and offer the usual jobs; `new_site` walks a user through a
 [connecting from your machine](../mcp.md#connect-from-your-machine-to-a-vps),
 [the agent's own key](../mcp.md#give-the-agents-key-the-bridge-and-nothing-else),
 [what it cannot do](../mcp.md#what-it-cannot-do).
+
+
+## Change a page of a site, the favicon or robots.txt
+
+**When:** a PageSpeed report asks for a `<meta name="description">` or finds no favicon, and the site's
+files are not on your machine: the agent changes them through the tools, as the site's account, and
+nothing changes until you approve it with the code from your phone.
+
+```sh
+agensio ctl site-file-read gr1.example.com index.html            # the page as it is
+agensio ctl site-file-edit gr1.example.com index.html --old '<title>Home</title>' \
+  --new '<title>Home</title><meta name="description" content="What the site is about">' --yes --reason "PageSpeed: meta description"
+agensio ctl site-file-write gr1.example.com favicon.svg ./favicon.svg --yes --reason "PageSpeed: favicon"
+agensio ctl approve                                                # shows both changes (the diff, what the site does with each path), one code
+agensio ctl site-file-history gr1.example.com index.html           # the page as it was, kept 30 days
+```
+
+**MCP:** `site_file_read`, then `site_file_edit` and `site_file_write` (each answers `pending: true`
+with the server's preview), then `approvals_ask` once for both, or `agensio ctl approve` on the
+server; `site_file_history` and `site_file_restore` undo it.
+
+**Reference:** [The site's files](../configuration.md#15-control-socket), [approvals](../approvals.md).
 
 ## A host a panel manages
 

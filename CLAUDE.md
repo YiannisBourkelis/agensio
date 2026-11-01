@@ -648,7 +648,7 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   through it and reports `done`; `[control] provision = false` hands commands back
   instead. Its threat analysis is in `docs/security-control-plane.md`; every change to it
   updates that section. `tests/provision.sh` runs it as root in the devbox.
-  `agensio mcp` (F5, `control/mcp.*`): stdio JSON-RPC MCP server, 41 tools with
+  `agensio mcp` (F5, `control/mcp.*`): stdio JSON-RPC MCP server, 50 tools with
   annotations gated by the caller's role, prompts, meant to be spawned over SSH by the
   agent host (`docs/mcp.md`). `agensio ctl` (F6) is the same client for shells.
 - **Approvals** (alpha.120, design `docs/design-site-operations.md` 27, `docs/approvals.md`): a
@@ -665,7 +665,16 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   at a terminal asks at once; MCP `approvals_list`, `approvals_ask` (elicitation); no tool takes a
   code. Health `approvals_not_set_up`, `approver_file_unsafe`, `approvals_without_helper`,
   `approval_code_failures`, `approvals_forgeable`. Step 1 gates `pip_install` (security rows 32,
-  50 to 52); F12's file tools and the rest of design 27.2 follow.
+  50 to 52); step 2 the site's files; the rest of design 27.2 follows.
+- **The site's files** (F12, alpha.120, `services/files.*`, `services/history.*`, design section 3
+  and 27.6, `docs/configuration.md` 15): `site_files_list`, `site_file_read`, `site_file_write`,
+  `site_file_edit`, `site_dir_create`, `site_path_move`, `site_path_delete`, `site_file_history`,
+  `site_file_restore` (ctl `site-files`, `site-file-read`, ...): one operation per call, as the site's
+  account (the helper's `file_op`, else the server's own account), below the site's tree through the
+  install's `O_NOFOLLOW` walk, at most 180 KB a call; every change and a secret's read wait for
+  approval, previewed from a dry run (diff, `path_check`'s verdict) and bound to the file's sha256;
+  the history (`<sites_root>/.history`, `[control] file_history`) keeps what a change replaced by hard
+  link and what it removed by rename, pruned only after the change succeeded. Security rows 53 to 55.
 - **Site tasks** (F13, `src/services/tasks.*`, design `docs/design-site-operations.md`
   section 4): `agensio ctl site-task NAME TASK [--param k=v]` and MCP `site_task` run one
   named task of the site's preset as the site's account in its directory: a row with a

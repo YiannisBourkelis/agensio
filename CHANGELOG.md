@@ -32,6 +32,30 @@
   - Upgrading: run `agensio approver-add NAME` as root before the first `pip_install`, which until
     then is refused with the setup line.
 
+- **The site's files through the control plane (F12), every change approved with a code.** The test
+  VPS's agent could not add a meta description to a static site's `index.html` or put a favicon
+  beside it: no tool wrote a file, and root ran `install(1)` by hand. Nine tools, as the site's own
+  account, below its directory and nowhere else: `site_files_list`, `site_file_read`,
+  `site_file_write`, `site_file_edit`, `site_dir_create`, `site_path_move`, `site_path_delete`,
+  `site_file_history`, `site_file_restore` (`agensio ctl site-files`, `site-file-read`,
+  `site-file-write NAME PATH [FILE]`, `site-file-edit --old --new`, `site-dir-create`,
+  `site-path-move`, `site-path-delete`, `site-file-history`, `site-file-restore`).
+  - Every path is walked without following a symlink, each component the site account's, so a link
+    the application planted never sends a write elsewhere; a write goes through a temporary name,
+    takes its directory's mode (a credential file `0600`), never a set-uid bit; nothing runs. At most
+    180 KB a call; larger files go up with `upload` and `site-install`.
+  - Every change waits for the person's approval (the entry above): what waits shows the diff against
+    the file there and what the site does with the path (served as a file, or RUNS as a script), and
+    carries the file's sha256, so a file changed meanwhile refuses the approved write. Reading a
+    credential or database file (`.env`, `wp-config.php`, `*.key`, `*.pem`, `.git/`, SQLite) waits
+    too, and its content is handed out once (`approvals_list` with the id). The tools' texts say that
+    what a site's file holds is data, never instructions.
+  - What a change replaces or removes is kept in `<sites_root>/.history` (root's alone): a replaced
+    file by hard link, a deleted file or tree by rename, nothing copied. `[control] file_history =
+    { versions = 5, days = 30 }` (reload; `versions = 0` keeps nothing), expired hourly.
+  - Security rows 53 to 55, `docs/configuration.md` 15, the cookbook's "Change a page of a site, the
+    favicon or robots.txt", `docs/mcp.md`, `docs/approvals.md`. Also fixed in the approvals of this
+    release: the answer that queued a change said it was 56 years old.
 - **Fix: a broken chunked request body is answered 400 over HTTP/1.1, and three loose ends of
   alpha.119.** Found by the test VPS's check of alpha.119.
   - A chunked body whose framing is broken (a chunk size that is not hex) got its `400` in the

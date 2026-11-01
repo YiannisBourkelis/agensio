@@ -1833,6 +1833,10 @@ the reasons approval would be needed, and stores nothing.
    `ctl approve` and the inline prompt, `approvals_list` and `approvals_ask`, health's findings, the
    security page; `pip_install` moved onto them, row 32 rewritten; `docs/approvals.md`.
 2. F12's seven tools and the history, gated; `tests/files.sh` in the root devbox with two accounts.
+   Built in alpha.120 with `site_file_history` and `site_file_restore` beside them, the read of a
+   secret gated with the tools rather than in step 3 (the read is new in this step), and the history
+   by hard link and rename (a delete of any size, no copy). A read's content is handed out once, by
+   `GET /v1/approvals/ID` only, so a person listing what waits does not take it from the agent.
 3. The rest of 27.2: `site_install`, `site_copy`, secret reads, `site_env` reveal and set, the
    `site_update` and `site_create` changes, `site_auth_user_set`, the trash deletes.
 

@@ -218,6 +218,16 @@ private:
     bool queue_for_approval(Stream& s, WorkerState& ws, std::string_view path, std::string_view action, const json::Value& body, std::string_view reason,
                             std::vector<std::string> why, std::function<void()>& done);
     std::string approval_preview(std::string_view path, const json::Value& body);
+    // The site's files (F12, docs/design-site-operations.md 3, 27.6): GET /v1/sites/NAME/files (list, or
+    // read with read=1), GET /v1/sites/NAME/history?path=, POST /v1/sites/NAME/file {op, ...}; every
+    // change and a secret's read wait for approval (the gate). `args` is the body, or the GET's query.
+    void site_files(Stream& s, std::string_view name, const json::Value& args, std::string_view what, std::function<void()> done);
+    // What the person reads before approving a file change, from its dry run; `reasons` gains the
+    // path's verdict when the file would run.
+    std::string file_preview(const SiteConfig& site, const std::string& site_root, const json::Value& body, const json::Value& checked,
+                             std::vector<std::string>& reasons);
+    // Whether a read of `rel` on the site reveals a credential or database file.
+    bool secret_file(std::string_view site, std::string_view rel);
     void approvals_get(Stream& s, std::string_view id);
     bool approvals_post(Stream& s, WorkerState& ws, std::string_view rest, const json::Value& body, std::function<void()>& done);
     void run_approved(std::shared_ptr<std::vector<std::string>> ids, std::size_t next, WorkerState& ws, std::function<void()> finished);

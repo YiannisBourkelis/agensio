@@ -33,6 +33,7 @@
 #include "services/authusers.hpp"
 #endif
 #include "services/archive.hpp"
+#include "services/files.hpp"
 #include "services/install.hpp"
 #include "services/pools.hpp"
 #include "services/provision.hpp"
@@ -182,6 +183,31 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         if (!require(s, Role::admin, path.substr(4))) return false;
         approvals_get(s, path == "/v1/approvals" ? std::string_view() : path.substr(14));
         return false;
+    }
+    if (path.starts_with("/v1/sites/") && (path.ends_with("/files") || path.ends_with("/history")) && path.size() > 16) {
+        // A site's files are its owner's: admin, listing and reading included (design section 10, decision 7).
+        if (!require(s, Role::admin, path.substr(4))) return false;
+        if (!done) {
+            reply(s, 503, json::Value::object().set("error", "files need an asynchronous caller"));
+            return false;
+        }
+        const bool hist = path.ends_with("/history");
+        const std::string name(path.substr(10, path.size() - 10 - (hist ? 8 : 6)));
+        json::Value args = json::Value::object();
+        const bool read = !control::query_value(req.target, "read").empty() && control::query_value(req.target, "read") != "0";
+        args.set("op", hist ? "history" : read ? "read" : "list").set("path", control::query_value(req.target, "path"));
+        for (const char* n : {"offset", "tail"})
+            if (const std::string v = control::query_value(req.target, n); !v.empty()) args.set(n, static_cast<double>(std::strtoull(v.c_str(), nullptr, 10)));
+        if (control::query_value(req.target, "base64") == "1" || control::query_value(req.target, "base64") == "true") args.set("base64", true);
+        // A credential or database file's read waits for approval, as a change does (design 27.2).
+        if (read && secret_file(name, args.get("path"))) {
+            json::Value body = args;
+            body.set("confirm", true).set("reason", "read " + std::string(args.get("path")));
+            std::vector<std::string> why = control::approval_reasons("/v1/sites/" + name + "/file", "file", body, true);
+            return queue_for_approval(s, ws, "/v1/sites/" + name + "/file", "file", body, body.get("reason"), std::move(why), done);
+        }
+        site_files(s, name, args, "sites/" + name + (hist ? "/history" : "/files"), done);
+        return true;
     }
     if (path.starts_with("/v1/sites/") && path.ends_with("/env") && path.size() > 14) {
         // A site's environment holds its secrets: admin only, every read audited.
@@ -663,7 +689,8 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
     const bool known = path == "/v1/reload" || path == "/v1/sites" || path == "/v1/logs/reopen" ||
                        (site_path && !name.empty() && (action.empty() || action == "disable" || action == "enable" ||
                                                        action == "delete" || action == "renew" || action == "install" || action == "copy" ||
-                                                       action == "task" || action == "env" || action == "auth-users" || action == "auth-users/delete")) ||
+                                                       action == "task" || action == "env" || action == "auth-users" || action == "auth-users/delete" ||
+                                                       action == "file")) ||
                        (upload_path && !name.empty() && action == "delete") || (trash_path && !name.empty() && (action == "restore" || action == "delete")) ||
                        path == "/v1/trash/expire";
     if (!known) {
@@ -694,7 +721,8 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
     // with a code from their authenticator app; a dry run runs and says it would wait. Only the approved
     // change run_approved runs passes (approving_), whatever the request says about itself.
     if (!approving_) {
-        std::vector<std::string> why = control::approval_reasons(path, action, body);
+        const bool secret_read = site_path && action == "file" && body.get("op") == "read" && secret_file(name, body.get("path"));
+        std::vector<std::string> why = control::approval_reasons(path, action, body, secret_read);
         if (!why.empty()) {
             if (!body["dry_run"].boolean()) return queue_for_approval(s, ws, path, action, body, reason, std::move(why), done);
             json::Value list = json::Value::array();
@@ -795,6 +823,14 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         if (ok) reply(s, automatic ? 202 : 200, json::Value::object().set("ok", true).set("message", message));
         else reply(s, 409, json::Value::object().set("ok", false).set("error", error));
         return false;
+    }
+    if (action == "file") {
+        if (!done) {
+            reply(s, 503, json::Value::object().set("error", "files need an asynchronous caller"));
+            return false;
+        }
+        site_files(s, name, body, what, std::move(done));
+        return true;
     }
     if (action == "install" || action == "copy" || action == "task" || action == "env") {
         if (!done) {  // no way to defer: answered synchronously as a refusal
@@ -2049,6 +2085,196 @@ void ControlHandler::site_copy(Stream& s, std::string_view name, const json::Val
     });
 }
 
+// ---- the site's files (F12, docs/design-site-operations.md 3, 27.6) ----
+
+namespace {
+
+// What the site does with a path below its tree, in path_check's words: served as a file of a type,
+// RUNS (a script it executes), refused, or not served at all (outside the directory it serves).
+std::string path_verdict(const Config& cfg, const SiteConfig& site, const std::string& site_root, const std::string& rel) {
+    const std::string abs = site_root + "/" + rel;
+    if (site.root.empty() || !provision::under_root(abs, site.root))
+        return "not served: " + abs + " is outside the directory the site serves (" + (site.root.empty() ? std::string("none") : site.root) + ")";
+    std::string url = abs.substr(site.root.size());
+    if (url.empty()) url = "/";
+    std::string error;
+    const json::Value pc = control::path_check(cfg, site, url, error);
+    if (!error.empty()) return "what the site does with " + url + " is not known: " + error;
+    const std::string decision(pc.get("decision")), summary(pc.get("summary"));
+    if (decision == "runs") return "RUNS: " + summary;
+    // A file not there yet (a write creates it): judged by the location that would handle it.
+    if (decision == "not_found" && pc["location"].is_object()) {
+        const std::string handler(pc["location"].get("handler")), where = " (location " + std::string(pc["location"].get("path")) + ", " + handler + ")";
+        if (handler == "fastcgi" || handler == "cgi") return "RUNS: once written, " + url + " runs as a script" + where;
+        if (handler == "static") return "served as a file once written" + where;
+        return summary.empty() ? decision : summary;
+    }
+    return summary.empty() ? decision : summary;
+}
+
+}  // namespace
+
+bool ControlHandler::secret_file(std::string_view name, std::string_view rel) {
+    if (!backend_) return false;
+    const SiteConfig* site = control::find_site(backend_->running(), name);
+    if (!site) return false;
+    std::string clean, why;
+    std::string_view r = rel;
+    if (r.starts_with("/")) r.remove_prefix(1);
+    if (!archive::clean_path(r, clean, why)) return false;
+    const std::string site_root = site->project_root.empty() ? site->root : site->project_root;
+    std::vector<std::string> secrets;
+    const json::Value listed = site_secrets(*site, site_root);
+    for (const auto& sec : listed.items()) secrets.push_back(sec.str());
+    return files::secret_path(clean, secrets);
+}
+
+std::string ControlHandler::file_preview(const SiteConfig& site, const std::string& site_root, const json::Value& body, const json::Value& checked,
+                                         std::vector<std::string>& reasons) {
+    const Config& cfg = backend_->running();
+    const std::string op(body.get("op"));
+    std::string rel(body.get("path"));
+    if (rel.starts_with("/")) rel.erase(0, 1);
+    const std::string abs = site_root + "/" + rel;
+    std::string t;
+    const auto verdict = [&](const std::string& r) {
+        const std::string v = path_verdict(cfg, site, site_root, r);
+        if (v.starts_with("RUNS")) reasons.push_back("the file RUNS on the site, not only served: " + v.substr(6));
+        return v;
+    };
+    if (op == "write" || op == "edit") {
+        const json::Value& cur = checked["current"];
+        t += (op == "edit" ? "edit " : "write ") + abs + (cur["exists"].boolean() ? "  (replaces " + std::to_string(static_cast<long>(cur["bytes"].num())) + " bytes, sha256 " + std::string(cur.get("sha256")) + ")" : "  (a new file)") + "\n";
+        t += "what the site does with it: " + verdict(rel) + "\n";
+        t += "as " + std::string(checked.get("as")) + ", mode " + std::string(checked.get("mode")) + (checked["secured"].boolean() ? " (a credential file)" : "") +
+             ", " + std::to_string(static_cast<long>(checked["bytes"].num())) + " bytes, sha256 " + std::string(checked.get("sha256")) + "\n";
+        std::string after;
+        bool text = true;
+        if (op == "edit") {
+            after = std::string(checked.get("new_text"));
+        } else if (body["content"].is_string()) {
+            after = std::string(body["content"].str());
+        } else if (const auto b = files::base64_decode(body.get("content_base64"))) {
+            after = *b;
+            text = files::utf8_text(after);
+        }
+        if (!text) t += "binary content: " + std::to_string(after.size()) + " bytes\n";
+        else if (cur["exists"].boolean() && cur["text"].is_string()) t += control::unified_diff(cur["text"].str(), after, 0);
+        else if (cur["exists"].boolean()) t += "the file there is not shown (binary, or larger than " + std::to_string(files::kContentMax / 1024) + " KB); its new text:\n" + control::unified_diff("", after, 0);
+        else t += control::unified_diff("", after, 0);
+        if (cur["exists"].boolean()) t += "the file there now is kept in the history\n";
+    } else if (op == "mkdir") {
+        t += "create the directory " + abs + "\n";
+        for (const auto& c : checked["would_create"].items()) t += "  new: " + std::string(c.str()) + "\n";
+    } else if (op == "move") {
+        std::string to(body.get("to"));
+        if (to.starts_with("/")) to.erase(0, 1);
+        t += "move " + abs + " (a " + std::string(checked.get("kind")) + ") to " + site_root + "/" + to + "\n";
+        if (checked["would_replace"].boolean()) t += "the file at the destination is replaced, and kept in the history\n";
+        t += "what the site does at the destination: " + verdict(to) + "\n";
+    } else if (op == "delete") {
+        t += "delete " + abs + ": a " + std::string(checked.get("kind")) + ", " + std::to_string(static_cast<long>(checked["bytes"].num())) + " bytes" +
+             (checked.get("kind") == "directory" ? ", " + std::to_string(static_cast<long>(checked["entries"].num())) + " entries" : std::string()) + "\n";
+        t += cfg.control.file_history_versions > 0 ? "it goes into the history, kept " + std::to_string(cfg.control.file_history_days) + " days (site_file_restore puts it back)\n"
+                                                   : "REMOVED FOR GOOD: [control] file_history keeps no versions on this server\n";
+    } else if (op == "restore") {
+        t += "put version " + std::string(body.get("version")) + " of " + abs + " back: a " + std::string(checked.get("kind")) + ", " +
+             std::to_string(static_cast<long>(checked["bytes"].num())) + " bytes\n";
+        if (checked["would_replace"].boolean()) t += "what is there now is kept in the history first\n";
+        t += "what the site does with it: " + verdict(rel) + "\n";
+    } else if (op == "read") {
+        t += "reveal " + abs + " (" + std::to_string(static_cast<long>(checked["size"].num())) + " bytes), a credential or database file, to whoever asked; "
+             "once the agent holds it, it can go wherever the agent's other tools can send it\n";
+    }
+    return t;
+}
+
+void ControlHandler::site_files(Stream& s, std::string_view name, const json::Value& args, std::string_view what, std::function<void()> done) {
+    const Config& cfg = backend_->running();
+    const SiteConfig* site = control::find_site(cfg, name);
+    if (!site) {
+        reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
+        done();
+        return;
+    }
+    const std::string site_root = site->project_root.empty() ? site->root : site->project_root;
+    std::string why;
+    if (site_root.empty() || !control::safe_path(site_root, why)) {
+        reply(s, 409, json::Value::object().set("error", "the site has no directory the file tools can use: " + why));
+        done();
+        return;
+    }
+    // Below [control] sites_root, as the helper requires too: the history lives beside the sites there.
+    if (const std::string base = provision::sites_root(cfg); !provision::under_root(site_root, base) || site_root == base) {
+        reply(s, 409, json::Value::object().set("error", "the site's directory " + site_root + " is not below [control] sites_root (" + base +
+                                                             "): the file tools work on sites there, where their history is kept"));
+        done();
+        return;
+    }
+    const std::string op(args.get("op"));
+    static constexpr std::string_view kOps[] = {"list", "read", "write", "edit", "mkdir", "move", "delete", "history", "restore"};
+    if (std::find(std::begin(kOps), std::end(kOps), op) == std::end(kOps)) {
+        reply(s, 400, json::Value::object().set("error", "op must be write, edit, mkdir, move, delete, restore or read"));
+        done();
+        return;
+    }
+    json::Value req = json::Value::object().set("op", "file_op").set("action", op).set("site", site->server_names.front()).set("site_root", site_root)
+                          .set("secrets", site_secrets(*site, site_root))
+                          .set("history", json::Value::object().set("versions", static_cast<double>(cfg.control.file_history_versions))
+                                              .set("days", static_cast<double>(cfg.control.file_history_days)));
+    if (!site->user.empty()) req.set("user", site->user);
+    for (const char* k : {"path", "to", "old", "new", "if_sha256", "version"})
+        if (args[k].is_string()) req.set(k, args[k].str());
+    for (const char* k : {"overwrite", "executable", "parents", "recursive", "dry_run", "base64"})
+        if (!args[k].is_null()) req.set(k, args[k]);
+    for (const char* k : {"offset", "tail"})
+        if (args[k].type() == json::Value::Type::number) req.set(k, args[k].num());
+    if (op == "write") {
+        if (args["content"].is_string()) req.set("content", files::base64_encode(args["content"].str()));
+        else if (args["content_base64"].is_string()) req.set("content", std::string(args["content_base64"].str()));
+        else {
+            reply(s, 400, json::Value::object().set("error", "write needs content (UTF-8 text) or content_base64 (any bytes), at most " + std::to_string(files::kContentMax / 1024) + " KB"));
+            done();
+            return;
+        }
+    }
+    files::Op parsed;
+    if (const std::string bad = files::parse(req, parsed); !bad.empty()) {
+        reply(s, 400, json::Value::object().set("error", bad));
+        done();
+        return;
+    }
+    const bool change = op != "list" && op != "read" && op != "history";
+    const bool dry_run = parsed.dry_run;
+    const std::vector<std::string> before = change && !dry_run ? validation_errors(*backend_) : std::vector<std::string>{};
+    backend_->install_async(req, [this, &s, what = std::string(what), op, change, dry_run, before, rel = parsed.path, to = parsed.to, site_root,
+                                  domain = site->server_names.front(), done](json::Value r) {
+        const bool ok = r["ok"].boolean();
+        const SiteConfig* now_site = control::find_site(backend_->running(), domain);
+        if (ok && now_site && (op == "write" || op == "edit" || op == "restore")) r.set("site_does", path_verdict(backend_->running(), *now_site, site_root, rel));
+        if (ok && now_site && op == "move") r.set("site_does", path_verdict(backend_->running(), *now_site, site_root, to));
+        if (op == "read" && ok && r["credentials"].boolean()) audit_peer(s, what, "read " + std::string(r.get("path")) + " (a credential file, " + std::to_string(static_cast<long>(r["size"].num())) + " bytes)");
+        if (change && !dry_run) {
+            std::string line = ok ? op + " " + std::string(r.get("path").empty() ? r.get("from") : r.get("path")) : "failed: " + std::string(r.get("error"));
+            if (ok && !r.get("sha256").empty()) line += " (sha256 " + std::string(r.get("sha256")) + ")";
+            if (ok && r["history"].is_object()) line += ", the one before kept as " + std::string(r["history"].get("version"));
+            audit_peer(s, what, line);
+        }
+        if (!ok) {
+            reply(s, std::string(r.get("error")).find("does not exist") != std::string::npos ? 404 : 409, json::Value::object().set("ok", false).set("error", r.get("error")));
+        } else if (change && !dry_run) {
+            if (const json::Value fresh = new_errors(before, validation_errors(*backend_)); !fresh.items().empty())
+                reply(s, 409, r.set("ok", false).set("written", true).set("error", "the change is made, but the configuration no longer validates; agensio -t and a restart would refuse it")
+                                  .set("errors", fresh).set("hint", "fix what the errors name (health lists them with a fix each), or site_file_restore"));
+            else
+                reply(s, op == "write" && r["replaced"].is_null() ? 201 : 200, r);
+        } else {
+            reply(s, 200, r);
+        }
+        done();
+    });
+}
+
 namespace {
 
 // One argument as a shell would need it written, for the audit line (nothing is ever run
@@ -2727,12 +2953,37 @@ bool ControlHandler::queue_for_approval(Stream& s, WorkerState& ws, std::string_
     // that fails anyway (design 27.3). The dry run's answer goes with it: for a task, the exact argv.
     auto store = [this, &s, c](const json::Value& checked) {
         const std::time_t now = std::time(nullptr);
+        // A file change: the person reads the change itself, made from its dry run (what is there now, the
+        // diff, what the path does); the stored request is bound to the file it was shown against, so a
+        // file changed meanwhile refuses the approved write (design 27.3).
+        if (c->path.ends_with("/file") && checked.is_object()) {
+            const std::string name = c->path.substr(10, c->path.size() - 10 - 5);
+            if (const SiteConfig* site = control::find_site(backend_->running(), name)) {
+                json::Value body;
+                std::string err;
+                json::parse(c->body, body, err);
+                const std::string site_root = site->project_root.empty() ? site->root : site->project_root;
+                c->preview = control::escape_for_terminal(file_preview(*site, site_root, body, checked, c->reasons));
+                const std::string op(body.get("op"));
+                if (body.get("if_sha256").empty()) {
+                    if (op == "write" || op == "edit") {
+                        const json::Value& cur = checked["current"];
+                        if (!cur["exists"].boolean()) body.set("if_sha256", "absent");
+                        else if (!cur.get("sha256").empty()) body.set("if_sha256", cur.get("sha256"));
+                    } else if (op == "delete" && !checked.get("sha256").empty()) {
+                        body.set("if_sha256", checked.get("sha256"));
+                    }
+                }
+                c->body = body.dump();
+            }
+        }
         if (checked.is_object() && checked["argv"].is_array()) {
             std::string argv;
             for (const auto& a : checked["argv"].items()) argv += (argv.empty() ? "" : " ") + shell_word(a.str());
             c->preview += control::escape_for_terminal("\nruns: " + argv + (checked.get("as").empty() ? std::string() : " as " + std::string(checked.get("as"))));
         }
         const std::string id = c->id, first = c->reasons.front(), what = c->path.substr(4) + (c->reason.empty() ? "" : " (" + c->reason + ")");
+        c->created = now;  // the answer is made before the store sets it (alpha.120's first build answered an age of 56 years)
         json::Value answer = control::pending_json(*c, now, false);
         if (!approvals_.add(*c, now)) {
             reply(s, 429, json::Value::object().set("error", std::to_string(control::ApprovalStore::kMaxWaiting) +
@@ -2743,7 +2994,7 @@ bool ControlHandler::queue_for_approval(Stream& s, WorkerState& ws, std::string_
         answer.set("ok", true).set("pending", true).set("approve", kApproveHow);
         reply(s, 202, answer);
     };
-    if (action != "task" || !done) {
+    if ((action != "task" && action != "file") || !done) {
         store(json::Value());
         return false;
     }
@@ -2774,24 +3025,43 @@ bool ControlHandler::queue_for_approval(Stream& s, WorkerState& ws, std::string_
     return true;
 }
 
+namespace {
+// A read's content is handed out once (design 27.3): the first answer that carries it marks it taken
+// and drops it from the record, so it is not in the server's memory a moment longer than needed.
+void take_read_once(control::PendingChange& c, json::Value& v) {
+    if (!c.result.is_object() || !c.result["content"].is_string()) return;
+    if (c.result_taken) return;
+    c.result_taken = true;
+    c.result = json::Value::object().set("ok", true).set("path", c.result.get("path")).set("size", c.result["size"].num())
+                   .set("note", "the content was handed out once already");
+    (void)v;
+}
+}  // namespace
+
 void ControlHandler::approvals_get(Stream& s, std::string_view id) {
     const std::time_t now = std::time(nullptr);
     if (id.empty()) {
         json::Value list = json::Value::array();
         std::size_t waiting = 0;
-        for (const control::PendingChange* c : approvals_.all(now)) {
+        for (control::PendingChange* c : approvals_.all(now)) {
             if (c->state == control::PendingChange::State::waiting) ++waiting;
-            list.push(control::pending_json(*c, now, true).set("text", control::pending_text(*c, now)));
+            json::Value v = control::pending_json(*c, now, true).set("text", control::pending_text(*c, now));
+            if (v["result"].is_object() && v["result"]["content"].is_string())  // a read's content: only GET /v1/approvals/ID, once
+                v.set("result", json::Value::object().set("ok", true).set("path", v["result"].get("path")).set("size", v["result"]["size"].num())
+                                    .set("note", "the content is handed out once, to approvals_list with this id (GET /v1/approvals/" + c->id + ")"));
+            list.push(std::move(v));
         }
         reply(s, 200, json::Value::object().set("waiting", static_cast<double>(waiting)).set("approvals", std::move(list)).set("approve", kApproveHow));
         return;
     }
-    const control::PendingChange* c = approvals_.find(id, now);
+    control::PendingChange* c = approvals_.find(id, now);
     if (!c) {
         reply(s, 404, json::Value::object().set("error", "no approval " + std::string(id) + ": unknown, or older than ten minutes"));
         return;
     }
-    reply(s, 200, control::pending_json(*c, now, true).set("text", control::pending_text(*c, now)));
+    json::Value v = control::pending_json(*c, now, true).set("text", control::pending_text(*c, now));
+    take_read_once(*c, v);
+    reply(s, 200, v);
 }
 
 bool ControlHandler::approvals_post(Stream& s, WorkerState& ws, std::string_view rest, const json::Value& body, std::function<void()>& done) {
@@ -2859,7 +3129,13 @@ bool ControlHandler::approvals_post(Stream& s, WorkerState& ws, std::string_view
             const std::time_t end = std::time(nullptr);
             json::Value results = json::Value::array();
             for (const auto& id : *ids)
-                if (const control::PendingChange* c = approvals_.find(id, end)) results.push(control::pending_json(*c, end, true));
+                if (const control::PendingChange* c = approvals_.find(id, end)) {
+                    json::Value v = control::pending_json(*c, end, true);
+                    if (v["result"].is_object() && v["result"]["content"].is_string())  // a read's content: approvals_list hands it out, once
+                        v.set("result", json::Value::object().set("ok", true).set("path", v["result"].get("path")).set("size", v["result"]["size"].num())
+                                            .set("note", "the content is handed out once, by approvals_list or GET /v1/approvals/" + id));
+                    results.push(std::move(v));
+                }
             reply(s, 200, json::Value::object().set("ok", true).set("approved_by", approver).set("results", std::move(results)));
             done();
         });

@@ -47,6 +47,8 @@
 #include "services/install.hpp"
 #include "services/json.hpp"
 #include "services/approvers.hpp"
+#include "services/files.hpp"
+#include "services/history.hpp"
 #include "services/tasks.hpp"
 #include "services/totp.hpp"
 #include "http/request_assembly.hpp"
@@ -3256,6 +3258,21 @@ static void test_tasks() {
     // approval_check takes six digits and nothing else (docs/design-site-operations.md 27.5); approvers_list nothing.
     CHECK(provision::validate(js(R"({"op":"approval_check","code":"012345"})"), Config{}).empty());
     CHECK(provision::validate(js(R"({"op":"approvers_list"})"), Config{}).empty());
+    // file_op (F12): the site below sites_root, a clean path, bounded content, the history's bounds.
+    {
+        Config fc;
+        fc.control.sites_root = "/srv/www";
+        const auto v = [&](const char* text) { return provision::validate(js(text), fc); };
+        CHECK(v(R"({"op":"file_op","action":"read","site":"a.test","site_root":"/srv/www/a.test/web","path":"index.html"})").empty());
+        CHECK(v(R"({"op":"file_op","action":"write","site":"a.test","site_root":"/srv/www/a.test/web","path":"x","content":"aGk=","history":{"versions":5,"days":30}})").empty());
+        CHECK(v(R"({"op":"history_expire","history":{"versions":5,"days":30}})").empty());
+        CHECK(v(R"({"op":"file_op","action":"read","site":"a.test","site_root":"/etc","path":"passwd"})").find("not below") != std::string::npos);
+        CHECK(v(R"({"op":"file_op","action":"read","site":"a.test","site_root":"/srv/www","path":"x"})").find("not below") != std::string::npos);
+        CHECK(v(R"({"op":"file_op","action":"read","site":"a.test","site_root":"/srv/www/a.test/web","path":"../b.test/x"})").find("'..'") != std::string::npos);
+        CHECK(v(R"({"op":"file_op","action":"read","site":"a.test","site_root":"/srv/www/a.test/web","path":"x","history":{"versions":101,"days":30}})").find("history") != std::string::npos);
+        CHECK(v(R"({"op":"file_op","action":"read","site":"not a site","site_root":"/srv/www/a.test/web","path":"x"})").find("host name") != std::string::npos);
+        CHECK(v(R"({"op":"file_op","action":"write","site":"a.test","site_root":"/srv/www/a.test/web","path":"x","content":"not base64!"})").find("base64") != std::string::npos);
+    }
     for (const char* bad : {R"({"op":"approval_check"})", R"({"op":"approval_check","code":"12345"})", R"({"op":"approval_check","code":"1234567"})",
                             R"({"op":"approval_check","code":"12345a"})", R"({"op":"approval_check","code":"../../x"})", R"({"op":"approval_check","code":123456})"})
         CHECK(provision::validate(js(bad), Config{}).find("six digits") != std::string::npos);
@@ -7703,6 +7720,183 @@ static void test_managed_response_headers() {
         CHECK(plain.find("[[site.response_headers]]") == std::string::npos && plain.find("response_headers_baseline") == std::string::npos);
     }
     fs::remove_all(dir);
+}
+
+// The site's files (F12, docs/design-site-operations.md 3, 27.6): the request's shapes, what counts as a
+// secret, base64, the preview's diff, each operation as the executing account on a site of its own
+// (a planted symlink refused on the way and as the leaf, a stale sha256 refused, edit's one occurrence,
+// a credential file 0600), and the history: kept by link before a write and by rename for a delete and
+// a replaced destination, listed, put back, expired, a refused change's keep undone.
+static void test_site_files() {
+    namespace fs = std::filesystem;
+    const fs::path base = fs::temp_directory_path() / ("agensio-files-" + std::to_string(::getpid()));
+    fs::remove_all(base);
+    const fs::path site = base / "www" / "f.test" / "web";
+    fs::create_directories(site / "css");
+    fs::create_directories(base / "outside");
+    std::ofstream(site / "index.html") << "<p>one</p>\n";
+    std::ofstream(site / "css" / "a.css") << "body{}\n";
+    std::ofstream(base / "outside" / "x") << "outside";
+    const auto op = [&](json::Value req) {
+        req.set("site_root", site.string());
+        files::Op o;
+        const std::string bad = files::parse(req, o);
+        return std::pair<std::string, files::Op>{bad, o};
+    };
+    // Shapes.
+    for (const char* bad : {R"({"action":"write","path":"../x","content":""})", R"({"action":"write","path":"a/../../x","content":""})",
+                            R"({"action":"read","path":""})", R"({"action":"delete","path":"/"})", R"({"action":"move","path":"a","to":"a"})",
+                            R"({"action":"move","path":"a","to":"a/b"})", R"({"action":"write","path":"x","content":"%%%"})", R"({"action":"chmod","path":"x"})",
+                            R"({"action":"write","path":"x","content":"","overwrite":"yes"})", R"({"action":"write","path":"x","content":"","if_sha256":"zz"})",
+                            R"({"action":"restore","path":"x","version":"yesterday"})", R"({"action":"edit","path":"x","old":"","new":"y"})"}) {
+        json::Value req;
+        std::string err;
+        CHECK(json::parse(bad, req, err));
+        if (op(req).first.empty()) std::printf("accepted: %s\n", bad);
+        CHECK(!op(req).first.empty());
+    }
+    {
+        json::Value big = json::Value::object().set("action", "write").set("path", "x").set("content", files::base64_encode(std::string(files::kContentMax + 1, 'a')));
+        CHECK(op(big).first.find("at most 180 KB") != std::string::npos);
+        json::Value lead = json::Value::object().set("action", "read").set("path", "/css/a.css");
+        CHECK(op(lead).first.empty() && op(lead).second.path == "css/a.css");  // a leading slash is the site's root
+    }
+    // Secrets.
+    const std::vector<std::string> secrets = {"wp-config.php", "config/credentials/"};
+    for (const char* s : {"wp-config.php", ".env", ".env.local", "app/.env", ".git/config", "a/.git/HEAD", "certs/site.key", "x.pem", "data/db.sqlite", "app.sqlite3",
+                          "var/app.db", "config/credentials/production.key", "config/credentials/x"})
+        CHECK(files::secret_path(s, secrets));
+    for (const char* s : {"index.html", "wp-config.php.txt", "envelope.txt", "keyboard.css", "db.sql.txt", ".gitignore", "credentials.html"}) CHECK(!files::secret_path(s, secrets));
+    // base64 round trip, every length.
+    for (std::size_t n = 0; n < 8; ++n) {
+        const std::string bytes = std::string("\x00\xff\x10 abc", 7).substr(0, n);
+        CHECK(files::base64_decode(files::base64_encode(bytes)) == std::optional<std::string>(bytes));
+    }
+    CHECK(files::base64_encode("foobar") == "Zm9vYmFy" && !files::base64_decode("Zm9v!") && !files::base64_decode("Zg==Zg"));
+    // The diff.
+    CHECK(control::unified_diff("a\nb\nc\n", "a\nB\nc\n", 0) == "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n");
+    CHECK(control::unified_diff("", "x\ny\n", 0) == "@@ -0,0 +1,2 @@\n+x\n+y\n");
+    CHECK(control::unified_diff("same\n", "same\n", 0) == "no change\n");
+    {
+        std::string a, b;
+        for (int i = 0; i < 40; ++i) a += "line " + std::to_string(i) + "\n";
+        b = a;
+        b.replace(b.find("line 20\n"), 8, "LINE 20\n");
+        const std::string d = control::unified_diff(a, b, 0);
+        CHECK(d == "@@ -18,7 +18,7 @@\n line 17\n line 18\n line 19\n-line 20\n+LINE 20\n line 21\n line 22\n line 23\n");
+        CHECK(control::unified_diff(a, b, 3).find("... 5 more lines of the diff") != std::string::npos);
+    }
+    // The operations, as this account, without a history.
+    const auto run = [&](const char* text) {
+        json::Value req;
+        std::string err;
+        json::parse(text, req, err);
+        auto [bad, o] = op(req);
+        if (!bad.empty()) return json::Value::object().set("ok", false).set("error", bad);
+        o.secrets = secrets;
+        return files::execute(o);
+    };
+    json::Value r = run(R"({"action":"list","path":""})");
+    CHECK(r["ok"].boolean() && r["entries"].items().size() == 2 && r["entries"].items()[0].get("name") == "css");
+    r = run(R"({"action":"read","path":"index.html"})");
+    const std::string sha1 = std::string(r.get("sha256"));
+    CHECK(r["ok"].boolean() && r.get("content") == "<p>one</p>\n" && r.get("encoding") == "text" && r["untrusted"].boolean() && (totp::available() ? sha1.size() == 64 : true));
+    // A symlink planted in the tree: refused as a step of the walk and as the leaf, never followed.
+    fs::create_directory_symlink(base / "outside", site / "out");
+    fs::create_symlink(base / "outside" / "x", site / "x.html");
+    CHECK(std::string(run(R"({"action":"read","path":"out/x"})").get("error")).find("symlink") != std::string::npos);
+    CHECK(std::string(run(R"({"action":"read","path":"x.html"})").get("error")).find("symlink") != std::string::npos);
+    CHECK(std::string(run(R"({"action":"write","path":"out/new","content":"aGk="})").get("error")).find("symlink") != std::string::npos);
+    CHECK(std::string(run(R"({"action":"write","path":"x.html","content":"aGk=","overwrite":true})").get("error")).find("symlink") != std::string::npos);
+    CHECK(!fs::exists(base / "outside" / "new") && std::ifstream(base / "outside" / "x").get() == 'o');
+    // Write: a new file, then over it only with overwrite, and only while it is what was read.
+    r = run(R"({"action":"write","path":"new.html","content":"PGI+aGk8L2I+Cg=="})");  // "<b>hi</b>\n"
+    CHECK(r["ok"].boolean() && r["replaced"].is_null());
+    CHECK(std::string(run(R"({"action":"write","path":"new.html","content":"eA=="})").get("error")).find("overwrite: true") != std::string::npos);
+    if (totp::available()) {
+        CHECK(std::string(run(R"({"action":"write","path":"index.html","content":"eA==","overwrite":true,"if_sha256":"0000000000000000000000000000000000000000000000000000000000000000"})").get("error"))
+                  .find("changed since it was read") != std::string::npos);
+        json::Value w = json::Value::object().set("action", "write").set("path", "index.html").set("content", files::base64_encode("<p>two</p>\n")).set("overwrite", true).set("if_sha256", sha1);
+        auto [bad, o] = op(w);
+        CHECK(bad.empty() && files::execute(o)["ok"].boolean());
+    }
+    // Edit: old exactly once.
+    std::ofstream(site / "e.txt") << "a b a\n";
+    CHECK(std::string(run(R"({"action":"edit","path":"e.txt","old":"a","new":"x"})").get("error")).find("occurs 2 times") != std::string::npos);
+    CHECK(run(R"({"action":"edit","path":"e.txt","old":"b","new":"B"})")["ok"].boolean());
+    {
+        std::ifstream in(site / "e.txt");
+        std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(all == "a B a\n");
+    }
+    // A credential file is made 0600.
+    CHECK(run(R"({"action":"write","path":"wp-config.php","content":"PD9waHA="})")["secured"].boolean());
+    struct stat st{};
+    CHECK(::stat((site / "wp-config.php").c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+    // mkdir, move, delete.
+    CHECK(std::string(run(R"({"action":"mkdir","path":"a/b"})").get("error")).find("parents: true") != std::string::npos);
+    CHECK(run(R"({"action":"mkdir","path":"a/b","parents":true})")["ok"].boolean() && fs::is_directory(site / "a" / "b"));
+    CHECK(run(R"({"action":"move","path":"new.html","to":"a/b/n.html"})")["ok"].boolean() && fs::exists(site / "a" / "b" / "n.html"));
+    CHECK(std::string(run(R"({"action":"delete","path":"a"})").get("error")).find("recursive: true") != std::string::npos);
+    CHECK(run(R"({"action":"delete","path":"a","recursive":true})")["ok"].boolean() && !fs::exists(site / "a"));
+    CHECK(run(R"({"action":"delete","path":"out"})")["ok"].boolean() && !fs::exists(site / "out") && fs::exists(base / "outside" / "x"));  // the link, not its target
+    // The whole operation with a history, as the server without the helper runs it.
+    files::Context ctx;
+    ctx.place.hist_dir = history::dir_of((base / "www").string());
+    ctx.place.hist_owner = ::geteuid();
+    ctx.place.domain = "f.test";
+    ctx.place.site_root = site.string();
+    ctx.place.site_uid = ::geteuid();
+    ctx.place.settings = {2, 30};
+    const files::AsSite self = [](const std::function<json::Value()>& work) { return work(); };
+    const auto whole = [&](json::Value req) {
+        auto [bad, o] = op(req);
+        CHECK(bad.empty());
+        return files::run(o, ctx, self);
+    };
+    for (const char* text : {"v1\n", "v2\n", "v3\n"})
+        CHECK(whole(json::Value::object().set("action", "write").set("path", "h.txt").set("content", files::base64_encode(text)).set("overwrite", true))["ok"].boolean());
+    json::Value hist = history::list(ctx.place, "h.txt");
+    CHECK(hist["versions"].items().size() == 2 && hist["versions"].items()[0].get("reason") == "replaced by a write");  // v1 and v2 kept, two at most
+    CHECK(::stat(ctx.place.hist_dir.c_str(), &st) == 0 && (st.st_mode & 0777) == 0700);
+    // A refused change keeps nothing: the keep is undone.
+    if (totp::available()) {
+        CHECK(!whole(json::Value::object().set("action", "write").set("path", "h.txt").set("content", files::base64_encode("v4")).set("overwrite", true)
+                         .set("if_sha256", std::string(64, '0')))["ok"].boolean());
+        CHECK(history::list(ctx.place, "h.txt")["versions"].items().size() == 2);
+    }
+    // Restore the newest kept (v2): over v3 only with overwrite, which keeps v3 first.
+    const std::string v2 = std::string(history::list(ctx.place, "h.txt")["versions"].items()[0].get("version"));
+    CHECK(std::string(whole(json::Value::object().set("action", "restore").set("path", "h.txt").set("version", v2)).get("error")).find("overwrite: true") != std::string::npos);
+    r = whole(json::Value::object().set("action", "restore").set("path", "h.txt").set("version", v2).set("overwrite", true));
+    CHECK(r["ok"].boolean() && !r.get("replaced").empty());
+    {
+        std::ifstream in(site / "h.txt");
+        std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(all == "v2\n");
+    }
+    // A delete renames into the history whole; a restore brings the tree back.
+    fs::create_directories(site / "d" / "e");
+    std::ofstream(site / "d" / "e" / "f") << "f";
+    r = whole(json::Value::object().set("action", "delete").set("path", "d").set("recursive", true));
+    CHECK(r["ok"].boolean() && !fs::exists(site / "d") && r["history"].is_object());
+    const std::string dv = std::string(history::list(ctx.place, "d")["versions"].items()[0].get("version"));
+    CHECK(history::list(ctx.place, "d")["versions"].items()[0].get("kind") == "directory");
+    CHECK(whole(json::Value::object().set("action", "restore").set("path", "d").set("version", dv))["ok"].boolean() && fs::exists(site / "d" / "e" / "f"));
+    // A move over a file keeps the file it replaced.
+    std::ofstream(site / "m1") << "m1";
+    std::ofstream(site / "m2") << "m2";
+    r = whole(json::Value::object().set("action", "move").set("path", "m1").set("to", "m2").set("overwrite", true));
+    CHECK(r["ok"].boolean() && history::list(ctx.place, "m2")["versions"].items().size() == 1);
+    // Expiry: nothing yet; everything a day past the days.
+    CHECK(history::expire(ctx.place.hist_dir, ::geteuid(), ctx.place.settings, std::time(nullptr))["removed"].items().empty());
+    CHECK(!history::expire(ctx.place.hist_dir, ::geteuid(), ctx.place.settings, std::time(nullptr) + 31 * 86400)["removed"].items().empty());
+    CHECK(history::list(ctx.place, "h.txt")["versions"].items().empty());
+    // A history directory another account owns, or open to others, is refused.
+    ::chmod(ctx.place.hist_dir.c_str(), 0755);
+    CHECK(whole(json::Value::object().set("action", "write").set("path", "h.txt").set("content", "eQ==").set("overwrite", true))["ok"].boolean());
+    CHECK(::stat(ctx.place.hist_dir.c_str(), &st) == 0 && (st.st_mode & 0777) == 0700);  // tightened, it being ours
+    fs::remove_all(base);
 }
 
 // Approval codes (docs/design-site-operations.md 27.5): HOTP and TOTP as RFC 4226 and RFC 6238 give
@@ -13386,6 +13580,7 @@ int main() {
     test_totp();
     test_approvers();
     test_pending_changes();
+    test_site_files();
     test_header_suggestions();
     test_archives_in_root();
     test_root_files();

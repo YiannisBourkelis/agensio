@@ -803,12 +803,11 @@ json::Value execute(const Request& req) {
     return result;
 }
 
-namespace {
-
-// Opens the directory `rel` (cleaned, "" for the root itself) below an open site root,
-// component by component, never through a symlink, every component the account's.
-// -1 with `error`; `missing` says the failure was a component that does not exist.
 int walk_dirs(int root_fd, const std::string& root_path, const std::string& rel, std::string& error, bool& missing) {
+    return walk_dirs_owned(root_fd, root_path, rel, ::geteuid(), error, missing);
+}
+
+int walk_dirs_owned(int root_fd, const std::string& root_path, const std::string& rel, uid_t owner, std::string& error, bool& missing) {
     missing = false;
     int cur = ::dup(root_fd);
     if (cur < 0) {
@@ -831,8 +830,8 @@ int walk_dirs(int root_fd, const std::string& root_path, const std::string& rel,
             return -1;
         }
         struct stat st {};
-        if (::fstat(child, &st) != 0 || st.st_uid != ::geteuid()) {
-            error = st.st_uid != ::geteuid() ? path + " belongs to uid " + std::to_string(st.st_uid) + ", another account; refused" : path + ": " + std::strerror(errno);
+        if (::fstat(child, &st) != 0 || st.st_uid != owner) {
+            error = st.st_uid != owner ? path + " belongs to uid " + std::to_string(st.st_uid) + ", another account; refused" : path + ": " + std::strerror(errno);
             ::close(child);
             ::close(cur);
             return -1;
@@ -850,7 +849,8 @@ void split_leaf(const std::string& rel, std::string& dir, std::string& leaf) {
     leaf = slash == std::string::npos ? rel : rel.substr(slash + 1);
 }
 
-}  // namespace
+std::string executing_account() { return account_name(); }
+std::string mode_string(unsigned mode) { return mode_text(static_cast<mode_t>(mode)); }
 
 json::Value copy_file(const CopyRequest& req) {
     std::string cf, ct, why;

@@ -17,6 +17,8 @@
 #include "services/provision.hpp"
 #include "services/appenv.hpp"
 #include "services/approvers.hpp"
+#include "services/files.hpp"
+#include "services/history.hpp"
 #ifdef AGENSIO_HAS_AUTH
 #include "services/authusers.hpp"
 #endif
@@ -1721,6 +1723,32 @@ void Server::install_async(const json::Value& req, std::function<void(json::Valu
     std::thread([this, req, ruby_dir, node_dir, done = std::move(done)] {
         json::Value r;
         const bool copy = req.get("op") == "file_copy";
+        if (req.get("op") == "file_op") {  // F12: the helper's, else the server's own account, its history its own
+            if (provisioner_.available()) {
+                r = provisioner_.request(req);
+            } else {
+#ifndef _WIN32
+                files::Op op;
+                if (std::string bad = files::parse(req, op); !bad.empty()) {
+                    r = json::Value::object().set("ok", false).set("error", bad);
+                } else {
+                    files::Context ctx;
+                    ctx.place.hist_dir = history::dir_of(provision::sites_root(cfg_));
+                    ctx.place.hist_owner = ::geteuid();
+                    ctx.place.domain = std::string(req.get("site"));
+                    ctx.place.site_root = op.site_root;
+                    ctx.place.site_uid = ::geteuid();
+                    if (req["history"].is_object())
+                        ctx.place.settings = history::Settings{static_cast<int>(req["history"]["versions"].num()), static_cast<int>(req["history"]["days"].num())};
+                    r = files::run(op, ctx, [](const std::function<json::Value()>& work) { return work(); });
+                }
+#else
+                r = json::Value::object().set("ok", false).set("error", "not available on this platform");
+#endif
+            }
+            asio::post(workers_[0]->ctx, [done, r] { done(r); });
+            return;
+        }
         if (provisioner_.available()) {
             json::Value h = req;
             if (!copy) h.set("op", "app_install");
@@ -1926,12 +1954,30 @@ void Server::provision_async(const json::Value& req, std::function<void(json::Va
 // Expired trash entries (F12b): once an hour on worker 0, through the helper, never waited
 // for (a task holding the helper only delays it to the next hour).
 void Server::arm_trash_expiry() {
-    if (!provisioner_.available()) return;
     if (!trash_timer_) trash_timer_ = std::make_unique<asio::steady_timer>(workers_[0]->ctx);
     trash_timer_->expires_after(std::chrono::hours(1));
     trash_timer_->async_wait([this](const asio::error_code& ec) {
         if (ec || stopping_) return;
-        std::thread([this] {
+        // The file history's versions past [control] file_history's days (F12): the helper's, root's
+        // directory; without the helper the server's own.
+        const json::Value hs = json::Value::object().set("versions", static_cast<double>(running().control.file_history_versions))
+                                   .set("days", static_cast<double>(running().control.file_history_days));
+        const std::string hist = history::dir_of(provision::sites_root(running()));
+        std::thread([this, hs, hist] {
+            json::Value h;
+            if (provisioner_.available()) {
+                h = provisioner_.try_request(json::Value::object().set("op", "history_expire").set("history", hs));
+            } else {
+#ifndef _WIN32
+                h = history::expire(hist, ::geteuid(), history::Settings{static_cast<int>(hs["versions"].num()), static_cast<int>(hs["days"].num())}, std::time(nullptr));
+#endif
+            }
+            if (h["ok"].boolean() && !h["removed"].items().empty())
+                error_log_.info("file history: " + std::to_string(h["removed"].items().size()) + " expired versions removed");
+            if (!provisioner_.available()) {
+                asio::post(workers_[0]->ctx, [this] { arm_trash_expiry(); });
+                return;
+            }
             const json::Value r = provisioner_.try_request(json::Value::object().set("op", "trash_expire"));
             if (r["ok"].boolean() && !r["removed"].items().empty()) {
                 std::string names;
