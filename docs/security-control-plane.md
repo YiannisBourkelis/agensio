@@ -204,10 +204,13 @@ brotli and zstd refuses a `codings` list naming brotli with the package and offe
 default. The A/B against alpha.117: `bench/ab.sh v0.1.0-alpha.117 -P -A -2 -r 3` (`ab-20261031-221151.md`)
 ran beside KDE's file indexer and VS Code's C++ indexer, both kept busy by the A/B worktrees under
 bench/tmp, and put three rows at 1.07 to 1.12; on a quiet machine, by hand (`release-118-rows-20261101.md`),
-they are 1.005 to 1.013, and plain HTTP 1 KB is 1.022 with every new round above every base round: 36
-instructions more per request and 20 more L1 instruction-cache misses, the compression code's size and
-not its work, under the 3 % gate. The HTTP/3 rows (`ab-20261031-225221.md`, `-3 -r 3`): 1.001 to 1.021;
-that run's plain 100 KB row at 1.066 is 1.010 by hand.
+they are 1.005 to 1.013, and plain HTTP 1 KB read 1.022 with every new round above every base round. That
+new side was `build/agensio`, configured with the HttpArena handler, which `bench/ab.sh` takes as its new
+side whatever the base's options: built alike (`release-118-clean-20261101.md`), alpha.118 against
+alpha.117 is 1.004 to 1.016 on four rows with the same instructions and instruction-cache misses per
+request (the arena handler's code had moved the layout: one source, 279 to 292 misses built one way, 309
+to 316 the other). The HTTP/3 rows (`ab-20261031-225221.md`, `-3 -r 3`): 1.001 to 1.021; that run's
+plain 100 KB row at 1.066 is 1.010 by hand.
 
 | target | runs | edges | result |
 |---|---|---|---|
