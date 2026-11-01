@@ -2,6 +2,14 @@
 
 ## 0.1.0-alpha.119
 
+- **Docs: what response compression leaves alone, as the build does it.** `docs/configuration.md`
+  20, the cookbook's compression page and the design note said agensio's own error pages are
+  compressed; they are not: each is a canned body of 150 to 230 bytes, under any useful `min_size`.
+  An application's error pages are compressed like its other answers. The padding of an answer
+  compressed per request is 0 to 32 bytes, and a draw of 0 leaves the coding's field out; the guide
+  said "up to 32", which a reader of the gzip header took for a defect. Both found by the test VPS's
+  check of alpha.118.
+
 ## 0.1.0-alpha.118 (2026-11-01)
 
 - **Response compression, step 1 of `docs/design-compression.md`: the keys and the chooser.** The

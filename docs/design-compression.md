@@ -25,7 +25,8 @@ files itself, in memory only, counted in the cache's budget.
 ## 1. Goals
 
 - Compress what a site serves, whatever produced it: cached static files, FastCGI (PHP), proxied
-  and CGI answers, agensio's own error pages. One switch per site, `response_compression = true`,
+  and CGI answers (agensio's own error pages, a few hundred bytes built once at start, are not:
+  section 6). One switch per site, `response_compression = true`,
   or one for the host in the main file's `[response_compression]` (section 3),
   with defaults that are right for a WordPress, Laravel, Drupal, Rails or Node site without a
   second key.
@@ -220,8 +221,12 @@ has no twin on disk gets its copies made by agensio:
 
 ## 6. Dynamic answers: compressed on the worker, in pieces
 
-FastCGI, proxied and CGI answers, and agensio's own error pages, are compressed where the answer is
-built, in `apply_upstream_result` and the error-page path, by a `Compressor` the worker owns:
+FastCGI, proxied and CGI answers are compressed where the answer is built, in
+`apply_upstream_result`, by a `Compressor` the worker owns. agensio's own error pages are not (the
+first draft of this note planned it, and configuration.md 20 said it until the test VPS's check of
+alpha.118): each is a canned body of 150 to 230 bytes (`error_page` in `response.hpp`, no key
+replaces it), under any useful `min_size`, and a coding would add work to the error path for a few
+bytes. An application's error page is one of its answers and is compressed like the others.
 
 - **The decision** runs once per answer, after the field loop has decided the head (it already
   reads every field): eligible type, size, status, no `Content-Encoding` in the answer, no
@@ -323,19 +328,19 @@ browsers' default since 2020 and set by Laravel, Django and Rails, keep the sess
 cross-site requests the attack forges. So agensio compresses an application's pages for every
 visitor and does two things no mainstream server does by default:
 
-- **Every answer compressed per request is padded** with a length drawn per answer, up to 32
-  bytes, where the coding's decoders skip it (gzip's FEXTRA field, RFC 1952 2.3.1.1; a zstd
-  skippable frame, RFC 8878 3.1.2; a brotli metadata meta-block, RFC 7932 9.2): the Heal the
-  Breach mitigation, as Rails' Thruster (32 bytes) and Django's GZipMiddleware (100) apply it by
-  default. What protects is the spread of the random part, not the bytes on the wire: an attacker
-  averaging the length pays with the square of it, so 32 costs him 1.7 times the samples of 24 and
-  hundreds of times those of no padding, for four more bytes on average per answer (the coding's
-  framing, 6 bytes for gzip, 8 for zstd, up to 4 for brotli, is constant and buys nothing). Not
-  Django's 100: on every answer, fifty bytes on average would be up to 15 % of the smallest ones.
-  Honestly a raise of the attack's cost, not its removal; the literature disagrees on how much (the
-  BREACH authors: it only multiplies the requests; Heal the Breach: about 500 times for 1 to 10
-  bytes). The copies of cached files made at fill are not padded: a file holds no secret and
-  reflects no input, and a constant padding would hide nothing.
+- **Every answer compressed per request is padded** with a length drawn per answer, 0 to 32 bytes
+  (a draw of 0 leaves the field out), where the coding's decoders skip it (gzip's FEXTRA field,
+  RFC 1952 2.3.1.1; a zstd skippable frame, RFC 8878 3.1.2; a brotli metadata meta-block, RFC 7932
+  9.2): the Heal the Breach mitigation, as Rails' Thruster (32 bytes) and Django's GZipMiddleware
+  (100) apply it by default. What protects is the spread of the random part, not the bytes on the
+  wire: an attacker averaging the length pays with the square of it, so 32 costs him 1.7 times the
+  samples of 24 and hundreds of times those of no padding, for four more bytes on average per
+  answer (the coding's framing, 6 bytes for gzip, 8 for zstd, up to 4 for brotli, is constant and
+  buys nothing). Not Django's 100: on every answer, fifty bytes on average would be up to 15 % of
+  the smallest ones. Honestly a raise of the attack's cost, not its removal; the literature
+  disagrees on how much (the BREACH authors: it only multiplies the requests; Heal the Breach:
+  about 500 times for 1 to 10 bytes). The copies of cached files made at fill are not padded: a
+  file holds no secret and reflects no input, and a constant padding would hide nothing.
 - The guard above, on the three credentials only agensio can see.
 
 The `exclude_paths` cover what is left (`/my-account/`, `/checkout/`: the pages of an unmasked

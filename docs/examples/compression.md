@@ -32,7 +32,7 @@ response_compression = true
 **What it does.** Cached static files get brotli and gzip copies made once, in memory, on a
 thread of their own (counted in `cache.max_size` with the file); a `.br` or `.gz` that the site's
 build left beside a file is served instead and gets no copy. PHP's pages, a proxied
-application's answers, CGI and agensio's own error pages are compressed as they are sent, with the
+application's answers and CGI, their error pages included, are compressed as they are sent, with the
 coding the browser takes: zstd for Chrome, Firefox and Edge, brotli for Safari, gzip for a tool
 that knows nothing else. An answer the application compressed itself passes through untouched,
 and so does one marked `Cache-Control: no-transform`. A browser sending no `Accept-Encoding` gets

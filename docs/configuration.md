@@ -4039,7 +4039,9 @@ response_compression = false
 With compression on, a site's answers go out compressed to a browser that takes it, whatever
 produced them: cached static files (copies made once, in memory, counted in `cache.max_size` with
 the file; a `.br` or `.gz` the site's build left beside a file is served as before and gets no
-copy), PHP, proxied and CGI answers, and agensio's own error pages, compressed as they are sent.
+copy), and PHP, proxied and CGI answers, compressed as they are sent, an application's error pages
+included. agensio's own error pages (404, 405, 413, 502...) are sent as they are: a few hundred
+bytes each, built once at start, with nothing for a coding to gain.
 The coding is the browser's choice among those the site offers (`Accept-Encoding`, with its
 q-values): zstd, brotli and gzip are built in, so there is no module to add, and a browser that
 lacks one gets the next. What is compressed is decided by the media type (text of every kind,
@@ -4048,9 +4050,9 @@ audio or archives), judged without the type's parameters, so `application/json; 
 is JSON; answers under 1 KB are left alone; a 206 is never compressed; `Vary: Accept-Encoding`
 goes on every answer that could have been compressed; an answer the application compressed itself
 passes through untouched; `Cache-Control: no-transform` from the application is honoured. Every
-answer compressed per request carries up to 32 bytes of random padding, so one page's compressed
-length differs from request to request (what an attacker measuring it would need constant; see
-BREACH below).
+answer compressed per request carries a random padding of 0 to 32 bytes, drawn per answer, so one
+page's compressed length differs from request to request (what an attacker measuring it would need
+constant; see BREACH below).
 
 A site that needs more writes the table. In a site file it goes below its `[[site]]` as
 `[site.response_compression]`, or inside it on one line as `response_compression = { ... }`:
@@ -4095,8 +4097,9 @@ frameworks answer on their side: Django and Rails mask their CSRF tokens per ans
 page leaks nothing useful; Laravel does not, and WordPress's nonces were not examined. agensio does
 the same and adds two things no mainstream server does by default:
 
-- *Random padding on every answer compressed per request*: up to 32 bytes, in a place every
-  decoder skips (gzip's extra field, a zstd skippable frame, a brotli metadata block). An
+- *Random padding on every answer compressed per request*: 0 to 32 bytes drawn per answer, in a
+  place every decoder skips (gzip's extra field, a zstd skippable frame, a brotli metadata block;
+  a draw of 0 leaves the place out, which makes that answer the shortest). An
   attacker averaging the length pays with the square of the spread for every byte he guesses:
   hundreds of times the requests of an unpadded page. Rails' own proxy, Thruster, pads 32 bytes
   by default, Django's GZipMiddleware 100. It raises the attack's cost; it does not remove it.
