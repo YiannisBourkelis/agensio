@@ -50,7 +50,7 @@ agensio -t --explain -c /etc/agensio/agensio.toml | grep response_compression
 and the site is reloaded.
 
 ```sh
-agensio ctl site-update shop.example.com --compression on --reason "PageSpeed: enable text compression"
+agensio ctl site-update shop.example.com --compression on --yes --reason "PageSpeed: enable text compression"
 agensio ctl site shop.example.com               # response_compression: the values in force, own: the site's
 ```
 

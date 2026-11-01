@@ -147,7 +147,7 @@ public:
                 maybe_finish();
                 return;
             }
-            send_rst(s.id, ErrorCode::no_error, "response complete before the request body");
+            send_rst(s.id, ErrorCode::no_error, "response complete before the request body", &s);
         }
         close_stream(s);
         maybe_finish();
@@ -664,7 +664,7 @@ private:
         if (streams_.active() >= live_->http2.max_concurrent_streams) {
             for (auto& s : streams_.all()) {  // a stream kept only to drain its body gives its slot up
                 if (s->state != StreamState::half_closed_local) continue;
-                send_rst(s->id, ErrorCode::no_error, "response complete, slot needed");
+                send_rst(s->id, ErrorCode::no_error, "response complete, slot needed", &*s);
                 close_stream(*s);
                 break;
             }
@@ -978,7 +978,7 @@ private:
                 return;
             }
             if (s->discarded > kDrainAfterResponse) {
-                send_rst(s->id, ErrorCode::no_error, "response complete, request body cut short");
+                send_rst(s->id, ErrorCode::no_error, "response complete, request body cut short", s);
                 close_stream(*s);
                 maybe_finish();
             }
@@ -1113,20 +1113,22 @@ private:
 
     // ---- errors, budgets, GOAWAY ----
 
-    void send_rst(std::uint32_t id, ErrorCode code, std::string_view reason) {
+    // `s`, when the connection holds the stream, makes the line name its request (stream_text), as
+    // the reset and no-progress lines do (0.1.0-alpha.120: the test VPS's report).
+    void send_rst(std::uint32_t id, ErrorCode code, std::string_view reason, const H2Stream* s = nullptr) {
         std::string f;
         append_rst_stream(f, id, code);
         writer_.control(f);
         if (!reason.empty())
             if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
-                log->info("http2 " + remote_text() + " stream " + std::to_string(id) + ": RST_STREAM " +
+                log->info("http2 " + remote_text() + " " + (s ? stream_text(*s) : "stream " + std::to_string(id)) + ": RST_STREAM " +
                           std::string(error_name(code)) + ": " + std::string(reason));
     }
 
     // A stream error: RST_STREAM, the stream closed, a glitch counted; one the client
     // provoked before any response counts as a reset too (MadeYouReset).
     void stream_error(H2Stream& s, ErrorCode code, std::string_view reason) {
-        send_rst(s.id, code, reason);
+        send_rst(s.id, code, reason, &s);
         if (!s.responded) count_reset();
         s.unsent_status = 400;  // the client broke the protocol on this stream
         close_stream(s);
@@ -1320,7 +1322,7 @@ private:
                 const auto age = now - s.since;
                 bool cut = false;
                 if (s.state == StreamState::half_closed_local && age >= idle_timeout_) {  // the body never finished
-                    send_rst(s.id, ErrorCode::no_error, "response complete, request body never finished");
+                    send_rst(s.id, ErrorCode::no_error, "response complete, request body never finished", &s);
                     close_stream(s);
                     if (closed_) return;
                     continue;

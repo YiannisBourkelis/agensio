@@ -276,11 +276,7 @@ public:
             else bpos_ += used;
             if (ec) {
                 body_pending_ = false;
-                if (ec == make_error_code(BodyError::too_large)) refuse_body();
-                else {
-                    unsent_status_ = 400;  // the chunked framing is broken: the client's error, answered by a close
-                    close();
-                }
+                refuse_body(ec == make_error_code(BodyError::too_large) ? 413 : 400);
                 handler(ec, 0);
                 return;
             }
@@ -962,14 +958,18 @@ private:
     // A chunked body that passed the limit while the handler read it (a declared one is
     // refused before the handler runs): 413 and close, logged as such, and whatever the
     // handler answers after the read error is dropped (request_gen_). Before 2026-09-27 the
-    // connection closed with no answer and the access log said 200. When an answer is
-    // already on its way, or the body is being drained after one, closing is all there is.
-    void refuse_body() {
+    // connection closed with no answer and the access log said 200. A chunked body whose
+    // framing is broken gets 400 the same way, as nginx answers it (0.1.0-alpha.120; alpha.119
+    // logged the 400 and closed without it). When an answer is already on its way, or the
+    // body is being drained after one, closing is all there is.
+    void refuse_body(int status) {
         if (responding_ || !handler_busy_) {
+            unsent_status_ = status;
             close();
             return;
         }
-        if constexpr (!IsLocalSocket<Socket>::value) log_body_refused(site_, body_read_, true);
+        if constexpr (!IsLocalSocket<Socket>::value)
+            if (status == 413) log_body_refused(site_, body_read_, true);
         ++request_gen_;
         if (upstream_) {
             upstream_->cancel();
@@ -977,7 +977,7 @@ private:
         }
         handler_busy_ = false;
         worker_.state.now = std::time(nullptr);
-        dispatcher_.static_handler().error(stream_, 413, false);
+        dispatcher_.static_handler().error(stream_, status, false);
         responding_ = true;
         head_out_ = true;
         writer_.write(stream_, worker_.state);

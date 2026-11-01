@@ -153,6 +153,16 @@ UNREACHABLE = re.compile(r"(fastcgi|proxy) upstream .*(Connection refused|No suc
 
 ctl_help = subprocess.run([BIN, "ctl", "--help"], capture_output=True, text=True)
 ctl_help = ctl_help.stdout + ctl_help.stderr
+# The commands ctl sends as changes, refused with 428 without --yes: main.cpp's `mutation`, which
+# this mirrors (keep the two in step). A recipe's line for one carries --yes (the alpha.119 report:
+# the compression recipe's site-update without it failed as written).
+CTL_SITE_READS = {"site-tasks", "site-env", "site-unit", "site-auth-users", "site-service", "site-service-logs", "site-task-output"}
+
+
+def ctl_changes(command):
+    return command in ("reload", "logs-reopen", "cert-renew", "uploads-delete", "trash-delete", "trash-expire") or \
+        (command.startswith("site-") and command not in CTL_SITE_READS)
+
 mcp_names = set(re.findall(r'"([a-z0-9_]+)"', open("src/control/mcp.cpp", encoding="utf-8").read()))
 
 listed = set()
@@ -191,7 +201,7 @@ for path in CATEGORIES:
         for lang, block in blocks:
             if lang not in ("sh", "bash", "console"):
                 continue
-            for line in block.splitlines():
+            for line in re.sub(r"\\\n\s*", " ", block).splitlines():  # a command's continuation lines joined
                 m = re.search(r"agensio ctl ([a-z][a-z-]*)(.*)", line)
                 if not m:
                     continue
@@ -199,6 +209,9 @@ for path in CATEGORIES:
                 unknown = [w for w in [m.group(1)] + re.findall(r"(?<![\w-])(--[a-z][a-z0-9-]*)", args)
                            if not re.search(r"(?<![\w-])" + re.escape(w) + r"(?![\w-])", ctl_help)]
                 check(f"{label}: `agensio ctl {m.group(1)}` and its flags exist", not unknown, " ".join(unknown))
+                if ctl_changes(m.group(1)):
+                    confirmed = re.search(r"(?<![\w-])--(yes|dry-run)(?![\w-])", args) is not None
+                    check(f"{label}: `agensio ctl {m.group(1)}` changes the server and carries --yes", confirmed, line.strip())
         for line in prose:
             if "**MCP:**" in line:
                 unknown = [w for w in re.findall(r"`([a-z0-9]+(?:_[a-z0-9]+)+)`", line) if w not in mcp_names]

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.0-alpha.120
+
+- **Fix: a broken chunked request body is answered 400 over HTTP/1.1, and three loose ends of
+  alpha.119.** Found by the test VPS's check of alpha.119.
+  - A chunked body whose framing is broken (a chunk size that is not hex) got its `400` in the
+    access log while the connection closed with no answer at all. It is now answered `400` and
+    closed, as nginx answers it, through the path that answers a body over the limit with `413`
+    (`refuse_body`, which now takes the status). A `499` and a `408` stay what the log records and
+    are not sent (nginx sends neither); over HTTP/2 and HTTP/3 a malformed request's stream is reset,
+    as RFC 9113 8.1.1 and RFC 9114 4.1.2 ask. `docs/configuration.md` 8 says which is which.
+  - The error log's `RST_STREAM` lines for a stream the connection holds (`more DATA than
+    content-length`, a body left unread after the answer) name the request's site, method and path
+    too, as the reset and no-progress lines of alpha.119 do.
+  - `site_update`'s refusal of a `response_compression` field of the wrong type says what that
+    field takes: `enabled must be true or false, or null` (it said "true, false or a list of
+    strings" for every field).
+  - The cookbook's managed-site compression line and its mention in `docs/configuration.md` 20
+    lacked `--yes`, so the command was refused as written. `tests/examples.sh` now checks that every
+    recipe line for a command that changes the server carries `--yes` (mirroring `ctl`'s own list).
+  - `tests/abandoned-requests.py` gains the two rows (`h1-bad-chunk`: the client gets the 400;
+    `h2-overlong`: DATA beyond the content-length, a 400 logged, the RST line naming the request),
+    both failing on alpha.119.
+
 ## 0.1.0-alpha.119 (2026-11-01)
 
 - **Response compression on a managed site, through the control plane.** Until this release a site

@@ -1461,10 +1461,14 @@ the socket took (HTTP/1.1, HTTP/2) or what went into packets (HTTP/3), so they c
 client that left had read, as nginx counts them, but never more than the body. When no head went
 out, the status says why: `499` the client left first (closed the connection, reset or cancelled
 the stream: RST_STREAM, STOP_SENDING, RESET_STREAM; nginx's "client closed request", which log
-tools and fail2ban filters know), `408` its body stopped arriving for `body_timeout`, `400` it broke
-the body's framing or the protocol on that stream. The application may still have run the request:
-agensio closes its connection to PHP or the origin when the client leaves, but a PHP script runs on
-until it writes output, and on to its end with `ignore_user_abort` set. Before
+tools and fail2ban filters know), `408` its body stopped arriving for `body_timeout`, `400` it
+broke the body's framing or the protocol on that stream. A `499` and a `408` are what the log
+records, never sent: the client is gone or silent, and the connection is closed (nginx does the
+same). A `400` for a broken chunked body is sent over HTTP/1.1 before the close (0.1.0-alpha.120;
+alpha.119 closed without it); over HTTP/2 and HTTP/3 the stream is reset instead, as RFC 9113
+8.1.1 and RFC 9114 4.1.2 ask of a malformed request. The application may still have run the
+request: agensio closes its connection to PHP or the origin when the client leaves, but a PHP
+script runs on until it writes output, and on to its end with `ignore_user_abort` set. Before
 0.1.0-alpha.119 such a request was logged `200 0` over HTTP/1.1 and HTTP/3 and not at all over
 HTTP/2, and an HTTP/3 download cut short counted the whole file.
 
@@ -4102,7 +4106,7 @@ site's defaults.
 fields that are its own named in a comment, the rest marked as the main file's.
 
 **A managed site** (0.1.0-alpha.119) gets its own `response_compression` through `site_create` and
-`site_update`, or `agensio ctl site-update NAME --compression on`: the switch, `exclude_paths`,
+`site_update`, or `agensio ctl site-update NAME --compression on --yes`: the switch, `exclude_paths`,
 `compress_signed_in` and `codings`, each field changed on its own and the others kept, and `main`
 (or `null` in the field) handing a field back to the main file; `--compression-reset` drops them
 all. The managed file carries only the fields set, so a later change of the main file still reaches

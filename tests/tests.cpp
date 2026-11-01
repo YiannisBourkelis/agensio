@@ -7779,7 +7779,8 @@ static void test_managed_response_compression() {
         refused(R"J({"response_compression": {"codings": ["deflate"]}})J", "is not a coding agensio offers");
         refused(R"J({"response_compression": {"codings": ["gzip", "gzip"]}})J", "twice");
         refused(R"J({"response_compression": {"exclude_paths": ["checkout"]}})J", "exclude_paths");
-        refused(R"J({"response_compression": {"enabled": "yes"}})J", "response_compression.enabled");
+        refused(R"J({"response_compression": {"enabled": "yes"}})J", "response_compression.enabled must be true or false, or null");
+        refused(R"J({"response_compression": {"codings": "br"}})J", "response_compression.codings must be a list of strings");
         refused(R"J({"response_compression": {"enabeld": true}})J", "no field 'enabeld'");
         refused(R"J({"response_compression": "on"})J", "must be true, false");
     }

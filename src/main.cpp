@@ -924,6 +924,7 @@ int main(int argc, char** argv) {
                 body = nb;
             }
             std::string path, method = "GET";
+            // tests/examples.py's ctl_changes mirrors this list (a recipe's line for a change carries --yes).
             const bool mutation = command == "reload" || command == "logs-reopen" ||
                                   (command.starts_with("site-") && command != "site-tasks" && command != "site-env" && command != "site-unit" && command != "site-auth-users" &&
                                    command != "site-service" && command != "site-service-logs" && command != "site-task-output") ||

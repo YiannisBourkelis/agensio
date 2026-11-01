@@ -10,7 +10,8 @@ One single-worker server for every row, a proxied location /slow to an origin in
 that answers after 3 s and notes whether agensio closed its connection first, a 3-byte ok.txt
 and a 20 MB big.bin. Each row tags its request with ?t=ROW and checks the line(s) with that tag:
 exactly one, the status (499 when the client left before the head went out, 408 when its body
-stopped arriving, the answer's status when the head went out) and bytes no more than the body.
+stopped arriving, 400 its body broken: answered over HTTP/1.1, a reset over HTTP/2, the answer's
+status when the head went out) and bytes no more than the body.
 Requires python3-h2 and aioquic (h3 rows), openssl. Exit 1 on any failed row.
 """
 import argparse
@@ -303,6 +304,29 @@ def row_h1_body_timeout(srv):
     return lambda: judge(srv, "h1-body-timeout", 408, 0, protocol="HTTP/1.1")
 
 
+def row_h1_bad_chunk(srv):
+    """A chunk size that is not hex: a 400 answered before the close, as nginx answers it (alpha.120)."""
+    s = tcp(srv.plain)
+    s.sendall(b"POST /slow?t=h1-bad-chunk HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nxx\r\n")
+    got = b""
+    try:
+        while b"\r\n" not in got:
+            data = s.recv(4096)
+            if not data:
+                break
+            got += data
+    except OSError:
+        pass
+    s.close()
+    line = got.split(b"\r\n", 1)[0].decode(errors="replace")
+
+    def check():
+        if not line.startswith("HTTP/1.1 400 "):
+            return f"the client got {line!r}, not a 400"
+        return judge(srv, "h1-bad-chunk", 400, 4096, protocol="HTTP/1.1")
+    return check
+
+
 def row_h1_partial(srv):
     got = h1_partial(srv.plain, "h1-partial")
     return lambda: judge(srv, "h1-partial", 200, BIG - 1, min_bytes=got, protocol="HTTP/1.1")
@@ -354,6 +378,28 @@ def row_h2_body_timeout(srv):
     c.pump(2.5)  # body_timeout = 1
     c.close()
     return lambda: judge(srv, "h2-body-timeout", 408, 0, protocol="HTTP/2.0")
+
+
+def row_h2_overlong(srv):
+    """More DATA than the content-length: the stream reset, 400 logged, the RST line naming the request."""
+    c = H2(srv.plain)
+    sid = c.conn.get_next_available_stream_id()
+    c.conn.send_headers(sid, [(":method", "POST"), (":scheme", "http"), (":authority", "localhost"),
+                              (":path", "/slow?t=h2-overlong"), ("content-length", "10")])
+    c.conn.send_data(sid, b"x" * 20, end_stream=True)
+    c.flush()
+    c.pump(0.5)
+    c.close()
+
+    def check():
+        fail = judge(srv, "h2-overlong", 400, 0, protocol="HTTP/2.0")
+        if fail:
+            return fail
+        if not re.search(r"stream \d+ \(localhost POST /slow\): RST_STREAM PROTOCOL_ERROR: more DATA than content-length", srv.error_log()):
+            return "the RST_STREAM line does not name the request: " + \
+                   " | ".join(l for l in srv.error_log().splitlines() if "more DATA" in l)
+        return None
+    return check
 
 
 def row_h2_partial(srv):
@@ -425,9 +471,10 @@ def row_h3_partial(srv):
 
 
 ROWS = {
-    "h1-get": row_h1_get, "h1-post": row_h1_post, "h1-body-timeout": row_h1_body_timeout, "h1-partial": row_h1_partial,
+    "h1-get": row_h1_get, "h1-post": row_h1_post, "h1-body-timeout": row_h1_body_timeout, "h1-bad-chunk": row_h1_bad_chunk,
+    "h1-partial": row_h1_partial,
     "h2-get": row_h2_get, "h2-post": row_h2_post, "h2-rst": row_h2_rst, "h2-body-timeout": row_h2_body_timeout,
-    "h2-partial": row_h2_partial,
+    "h2-overlong": row_h2_overlong, "h2-partial": row_h2_partial,
     "h3-get": row_h3_get, "h3-post": row_h3_post, "h3-cancel": row_h3_cancel, "h3-partial": row_h3_partial,
 }
 

@@ -5149,8 +5149,9 @@ std::string load_site_compression(const json::Value& own, const CompressionConfi
                 list.push_back(std::string(e.str()));
             }
             tt.insert(k, std::move(list));
-        } else {
-            return "response_compression." + k + " must be true, false or a list of strings";
+        } else {  // what the field takes, by its kind (the alpha.119 report: "enabled must be ... a list of strings")
+            const bool list = k == "codings" || k == "exclude_paths" || k == "extra_types";
+            return "response_compression." + k + (list ? " must be a list of strings" : " must be true or false") + ", or null for the main file's";
         }
     }
     site.compression = server;
