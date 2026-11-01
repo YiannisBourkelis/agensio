@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.118
+## 0.1.0-alpha.118 (2026-11-01)
 
 - **Response compression, step 1 of `docs/design-compression.md`: the keys and the chooser.** The
   key `response_compression` (off by default; in the main file every site's defaults, on a site its
