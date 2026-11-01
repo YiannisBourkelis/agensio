@@ -1250,13 +1250,16 @@ process's heap history). `M_MMAP_THRESHOLD` 2 MB and `M_TRIM_THRESHOLD` 8 MB at 
 code, read `/proc/<pid>/stat`'s minor faults per request (`bench/compression/brotli-row.sh` does).
 
 An A/B's two sides must be built alike (2026-11-01, `bench/results/release-118-clean-20261101.md`):
-`bench/ab.sh` builds its base with `-DAGENSIO_TESTS=OFF` and takes `build/agensio` as the new side, so a
-`build/` configured with `-DAGENSIO_HTTPARENA=ON` is a different binary. The arena handler adds no work
-to a request, but its code moves the layout: one source measured 279 to 292 or 309 to 316 L1
-instruction-cache misses per plain request depending on the build, plain 1 KB 2.2 % apart, which the
-release check of alpha.118 first read as a cost of the compression code. Before reading a small row,
-compare the two sides' `CMakeCache.txt`; `perf stat -e instructions,L1-icache-load-misses` tells work
-(instructions) from layout (misses).
+`bench/ab.sh` takes `build/agensio` as the new side and built its base with its own options, so a
+`build/` configured with `-DAGENSIO_HTTPARENA=ON` (kept that way for the arena's profiling scripts) was a
+different binary. The arena handler adds no work to a request, but its code moves the layout: one source
+measured 279 to 292 or 309 to 316 L1 instruction-cache misses per plain request depending on the build,
+plain 1 KB 2.2 % apart, which the release check of alpha.118 first read as a cost of the compression
+code. Since then `ab.sh` builds the base with every option of `build/CMakeCache.txt` that changes the
+binary (not the tests, the fuzzers or the package suffix), names them in the results' header and says
+when the base is too old to have one. A comparison by hand still needs the two sides' `CMakeCache.txt`
+compared; `perf stat -e instructions,L1-icache-load-misses` tells work (instructions) from layout
+(misses).
 
 Things measured with no effect (do not retry without new evidence): cache hit-path
 refcount and `last_access` traffic (under 2 %), `SSL_MODE_RELEASE_BUFFERS`, streaming

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# A/B checkpoint: the binary in build/ against one built from a base git ref, alternated
-# in the same session so that run-to-run drift cancels out. This is the gate for every
-# phase checkpoint and every change on the request path (see CLAUDE.md).
+# A/B checkpoint: the binary in build/ against one built from a base git ref with build/'s
+# options, alternated in the same session so that run-to-run drift cancels out. This is the
+# gate for every phase checkpoint and every change on the request path (see CLAUDE.md).
 #
 # usage: bench/ab.sh <base-ref> [-r ROUNDS] [-d DURATION] [-t THREADS] [-w WORKERS] [-2] [-3] [-P] [-A] [-C] [-u URLSPEC ...]
 #   base-ref  commit, branch or tag to build as the "base" side (worktree under bench/tmp/ab/)
@@ -134,13 +134,37 @@ BASE_DIR="$BENCH/tmp/ab/$BASE_SHA"
 if [ ! -d "$BASE_DIR" ]; then
   git -C "$ROOT" worktree add --detach "$BASE_DIR" "$BASE_SHA" >/dev/null
 fi
-if [ ! -x "$BASE_DIR/build/agensio" ]; then
+# The base is built with every option of build/ that changes the agensio binary, read from its
+# CMakeCache.txt: two sides built differently measure their layout, not the change (2026-11-01: build/
+# with -DAGENSIO_HTTPARENA=ON against bases without it put plain 1 KB 2.2 % apart on one source).
+# The tests, the fuzzers and the package suffix change no byte of it; a base built before with other
+# options is configured again.
+BUILD_OPTS=()
+while IFS= read -r line; do
+  case "$line" in
+    AGENSIO_TESTS:*|AGENSIO_FUZZ:*|AGENSIO_DEB_SUFFIX:*) ;;
+    AGENSIO_*:BOOL=*|AGENSIO_*:STRING=*|CMAKE_BUILD_TYPE:*|CMAKE_CXX_COMPILER:*|CMAKE_CXX_FLAGS:*|XCRYPT_LIBRARY:*)
+      BUILD_OPTS+=("-D${line%%:*}=${line#*=}") ;;
+  esac
+done < "$ROOT/build/CMakeCache.txt"
+if [ ! -x "$BASE_DIR/build/agensio" ] || [ "$(cat "$BASE_DIR/build/ab-options" 2>/dev/null)" != "${BUILD_OPTS[*]}" ]; then
   echo "building base $BASE_SHA"
   ASIO_SRC="$ROOT/build/_deps/asio-src"
   extra=""; [ -d "$ASIO_SRC" ] && extra="-DFETCHCONTENT_SOURCE_DIR_ASIO=$ASIO_SRC"
-  cmake -S "$BASE_DIR" -B "$BASE_DIR/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=OFF $extra >/dev/null
+  cmake -S "$BASE_DIR" -B "$BASE_DIR/build" -G Ninja -DAGENSIO_TESTS=OFF "${BUILD_OPTS[@]}" $extra >/dev/null
   cmake --build "$BASE_DIR/build" >/dev/null
+  printf '%s' "${BUILD_OPTS[*]}" > "$BASE_DIR/build/ab-options"
 fi
+# An option the base does not declare (a base older than it): what the option builds is then part of
+# the difference measured. cmake keeps such an option as UNINITIALIZED; its own variables are always
+# known (a compiler passed to an existing cache stays UNINITIALIZED too).
+BUILD_NOTE=""
+for opt in "${BUILD_OPTS[@]}"; do
+  name="${opt#-D}"; name="${name%%=*}"
+  case $name in CMAKE_*) continue ;; esac
+  grep -Eq "^$name:(BOOL|STRING|FILEPATH|PATH)=" "$BASE_DIR/build/CMakeCache.txt" || BUILD_NOTE+=" $name"
+done
+[ -n "$BUILD_NOTE" ] && echo "note: the base predates$BUILD_NOTE; what they build is part of the difference measured"
 NEW_SHA="$(git -C "$ROOT" rev-parse --short HEAD)$(git -C "$ROOT" diff --quiet HEAD -- src CMakeLists.txt || echo '+dirty')"
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -490,6 +514,7 @@ done
   echo
   echo "- machine: $(uname -m), $(sysctl -n machdep.cpu.brand_string 2>/dev/null || grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ *//'), $(uname -sr)"
   echo "- agensio workers=$WORKERS, wrk threads=$THREADS, duration=$DURATION, rounds=$ROUNDS; CPU us/req = server CPU time / requests"
+  echo "- both sides built with:$(printf ' %s' "${BUILD_OPTS[@]}")${BUILD_NOTE:+ (the base predates$BUILD_NOTE)}"
   echo
   echo "| case | base us/req (per round) | new us/req (per round) | new/base |"
   echo "|---|---|---|---|"
