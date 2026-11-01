@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.119
+## 0.1.0-alpha.119 (2026-11-01)
 
 - **Response compression on a managed site, through the control plane.** Until this release a site
   made through the tools could not turn compression on for itself: `site_update` refused the field
