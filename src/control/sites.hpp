@@ -76,6 +76,11 @@ struct SiteSpec {
     std::optional<bool> response_headers_baseline;
     // The offered fields the owner declined (docs/headers.md 7): canonical names, the list sent whole.
     std::vector<std::string> response_headers_offer_declined;
+    // The site's own response_compression (docs/design-compression.md 9, 0.1.0-alpha.119): the fields
+    // the owner set, an object of enabled, exclude_paths, compress_signed_in and codings, each other
+    // field the main file's [response_compression]; empty: the site follows the main file whole.
+    // Judged by load_site_compression, rendered as the site's response_compression key.
+    json::Value response_compression;
     // Where the application's login form or authenticating API is posted to, on top of the
     // preset's known paths (2026-10-02): the rendered fail2ban jail counts attempts there;
     // nothing is served or refused by it. Plain paths (check_login_path), at most 16.

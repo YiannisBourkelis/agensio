@@ -4101,6 +4101,15 @@ site's defaults.
 `agensio -t --explain` prints the main file's table and, for every site, its values with the
 fields that are its own named in a comment, the rest marked as the main file's.
 
+**A managed site** (0.1.0-alpha.119) gets its own `response_compression` through `site_create` and
+`site_update`, or `agensio ctl site-update NAME --compression on`: the switch, `exclude_paths`,
+`compress_signed_in` and `codings`, each field changed on its own and the others kept, and `main`
+(or `null` in the field) handing a field back to the main file; `--compression-reset` drops them
+all. The managed file carries only the fields set, so a later change of the main file still reaches
+the rest. `levels`, `min_size` and `extra_types` stay the main file's, and `offload` and
+`compress_event_streams` come to managed sites with step 6, where they act. `site_show` gives the
+values in force and, in `own`, the fields the site sets.
+
 **BREACH, and what agensio does about it.** A compressed page that holds a secret (a CSRF token,
 an account number) beside something the attacker got reflected into it leaks the secret, byte by
 byte, to an attacker who can make the visitor's browser request the page over and over with the

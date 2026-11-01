@@ -7696,6 +7696,104 @@ static void test_managed_response_headers() {
     fs::remove_all(dir);
 }
 
+// Response compression on managed sites (docs/design-compression.md 9, alpha.119; the test VPS could
+// not turn it on for one site): site_create and site_update take the site's own fields, merged field by
+// field into what it set (null goes back to the main file's), judged by the loader's own parse; the
+// managed file carries only those fields and loads back to them over the main file's; site_show names
+// the values in force and the site's own; the host's tuning and the fields of step 6 are refused.
+static void test_managed_response_compression() {
+    namespace fs = std::filesystem;
+    using control::SiteSpec;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-mcomp-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "web");
+    std::ofstream(dir / "web" / "index.html") << "<p>hi</p>";
+    Config cfg;
+    cfg.config_path = dir / "agensio.toml";
+    // The codings this build has, in a site's own order: the test holds in builds without brotli or zstd.
+    std::vector<std::string> built;
+    for (const auto& [e, name] : {std::pair{Encoding::br, "br"}, {Encoding::gzip, "gzip"}, {Encoding::zstd, "zstd"}})
+        if (coding_built(e)) built.push_back(name);
+    if (built.empty()) return;  // a build with no coding at all has nothing to offer
+    std::string codings_json = "[";
+    for (std::size_t i = 0; i < built.size(); ++i) codings_json += (i ? ", \"" : "\"") + built[i] + "\"";
+    codings_json += "]";
+    SiteSpec spec;
+    spec.domain = "c.test";
+    spec.https = "none";
+    spec.app = "static";
+    spec.root = (dir / "web").string();
+    spec.no_user = true;
+    spec.user_decided = true;
+    spec.listen_plain = "127.0.0.1:18752";
+    json::Value body;
+    std::string err;
+    CHECK(json::parse(R"J({"response_compression": {"enabled": true, "exclude_paths": ["/checkout/"], "codings": )J" + codings_json + "}}", body, err));
+    CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty());
+    CHECK(spec.response_compression.members().size() == 3 && spec.response_compression["enabled"].boolean());
+    {
+        SiteSpec back;
+        CHECK(SiteSpec::from_json(spec.to_json(), back) && back.response_compression.dump() == spec.response_compression.dump());
+    }
+    // Rendered as the site's key with those fields alone; loaded, the rest is the main file's.
+    std::string text = control::render_site(spec, "x");
+    CHECK(text.find("response_compression = { enabled = true, exclude_paths = [\"/checkout/\"], codings = ") != std::string::npos);
+    std::ofstream(dir / "c.toml") << text;
+    {
+        const Config c = load_config(dir / "c.toml");
+        const SiteConfig& s = c.sites.at(0);
+        CHECK(s.compression.enabled && s.compression.exclude_paths == std::vector<std::string>{"/checkout/"} && s.compression.codings == built &&
+              !s.compression.compress_signed_in && s.compression.min_size == 1024);
+        const std::vector<std::string_view> own = compression_own_fields(s.compression);
+        CHECK(own == (std::vector<std::string_view>{"enabled", "exclude_paths", "codings"}));
+        // site_show: the values in force and the site's own fields.
+        const json::Value shown = control::site(c, s, std::time(nullptr));
+        const json::Value& rc = shown["response_compression"];
+        CHECK(rc["enabled"].boolean() && rc["exclude_paths"].items().size() == 1 && rc["own"].items().size() == 3 &&
+              rc["own"].items()[0].str() == "enabled" && rc["min_size"].num() == 1024 && !rc["compress_signed_in"].boolean());
+    }
+    // A field given null goes back to the main file's, a field left out stays, true or false sets enabled alone.
+    CHECK(json::parse(R"J({"response_compression": {"codings": null, "compress_signed_in": true}})J", body, err));
+    CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty());
+    CHECK(spec.response_compression["codings"].is_null() && spec.response_compression["compress_signed_in"].boolean() &&
+          spec.response_compression["exclude_paths"].items().size() == 1 && spec.response_compression["enabled"].boolean());
+    CHECK(json::parse(R"J({"response_compression": false})J", body, err));
+    CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty());
+    CHECK(!spec.response_compression["enabled"].boolean() && spec.response_compression.members().size() == 3);
+    // Refused with the reason, the spec unchanged: the host's tuning, the fields of step 6, the loader's own checks.
+    {
+        const std::string before = spec.response_compression.dump();
+        const auto refused = [&](const char* text, std::string_view why) {
+            SiteSpec probe = spec;
+            std::string e;
+            json::Value b;
+            CHECK(json::parse(text, b, e));
+            control::apply_request(b, cfg, probe, e);
+            const bool ok = e.find(why) != std::string::npos && probe.response_compression.dump() == before;
+            if (!ok) std::printf("response_compression %s: %s\n", text, e.c_str());
+            CHECK(ok);
+        };
+        refused(R"J({"response_compression": {"levels": {"zstd": 9}}})J", "host's tuning");
+        refused(R"J({"response_compression": {"min_size": "2KB"}})J", "host's tuning");
+        refused(R"J({"response_compression": {"offload": true}})J", "not offered on a managed site yet");
+        refused(R"J({"response_compression": {"compress_event_streams": true}})J", "not offered on a managed site yet");
+        refused(R"J({"response_compression": {"codings": ["deflate"]}})J", "is not a coding agensio offers");
+        refused(R"J({"response_compression": {"codings": ["gzip", "gzip"]}})J", "twice");
+        refused(R"J({"response_compression": {"exclude_paths": ["checkout"]}})J", "exclude_paths");
+        refused(R"J({"response_compression": {"enabled": "yes"}})J", "response_compression.enabled");
+        refused(R"J({"response_compression": {"enabeld": true}})J", "no field 'enabeld'");
+        refused(R"J({"response_compression": "on"})J", "must be true, false");
+    }
+    // [] clears exclude_paths; enabled alone renders as the bare key; null drops every field.
+    CHECK(json::parse(R"J({"response_compression": {"exclude_paths": [], "compress_signed_in": null, "enabled": true}})J", body, err));
+    CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty() && spec.response_compression.members().size() == 1);
+    text = control::render_site(spec, "x");
+    CHECK(text.find("\nresponse_compression = true   # this site's own") != std::string::npos);
+    CHECK(json::parse(R"J({"response_compression": null})J", body, err));
+    CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty() && spec.response_compression.is_null());
+    CHECK(control::render_site(spec, "x").find("response_compression") == std::string::npos && spec.to_json()["response_compression"].is_null());
+    fs::remove_all(dir);
+}
+
 // response_headers_suggested (docs/headers.md 7, alpha.94): health reads a live HTTPS site's home page
 // and names the offered fields (headers.md 4.1) it goes without, an application's own counting;
 // response_headers_offer_declined records the ones the owner said no to, which health and
@@ -13123,6 +13221,7 @@ int main() {
     test_cache_over_fallback();
     test_security_baseline();
     test_managed_response_headers();
+    test_managed_response_compression();
     test_header_suggestions();
     test_archives_in_root();
     test_root_files();

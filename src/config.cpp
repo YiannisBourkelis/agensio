@@ -3093,18 +3093,24 @@ static std::string compression_toml(const CompressionConfig& c, bool site) {
     return s;
 }
 
-// Which fields of a site's response_compression the site named itself, for the comment beside it.
-static std::string compression_own(const CompressionConfig& c) {
-    static constexpr std::pair<CompressionConfig::Field, const char*> kNames[] = {
+std::vector<std::string_view> compression_own_fields(const CompressionConfig& c) {
+    static constexpr std::pair<CompressionConfig::Field, std::string_view> kNames[] = {
         {CompressionConfig::f_enabled, "enabled"},           {CompressionConfig::f_exclude_paths, "exclude_paths"},
         {CompressionConfig::f_signed_in, "compress_signed_in"}, {CompressionConfig::f_event_streams, "compress_event_streams"},
         {CompressionConfig::f_offload, "offload"},           {CompressionConfig::f_codings, "codings"},
         {CompressionConfig::f_levels, "levels"},             {CompressionConfig::f_min_size, "min_size"},
         {CompressionConfig::f_extra_types, "extra_types"},
     };
-    std::string s;
+    std::vector<std::string_view> out;
     for (const auto& [f, name] : kNames)
-        if (c.own & f) s += (s.empty() ? "" : ", ") + std::string(name);
+        if (c.own & f) out.push_back(name);
+    return out;
+}
+
+// Which fields of a site's response_compression the site named itself, for the comment beside it.
+static std::string compression_own(const CompressionConfig& c) {
+    std::string s;
+    for (const std::string_view name : compression_own_fields(c)) s += (s.empty() ? "" : ", ") + std::string(name);
     return s;
 }
 
@@ -5122,6 +5128,36 @@ std::string load_redirect_rules(const json::Value& rules, SiteConfig& site) {
     try {
         parse_redirects(arr, site, "redirects");
         check_redirects(site, "redirects");
+    } catch (const std::exception& e) {
+        return e.what();
+    }
+    return "";
+}
+
+// A site's own response_compression sent as JSON (site_update, docs/design-compression.md 9): the
+// loader's own parse of the same fields as a table, over the main file's (config.hpp).
+std::string load_site_compression(const json::Value& own, const CompressionConfig& server, SiteConfig& site) {
+    if (!own.is_object()) return "response_compression must be true, false, an object of its fields or null";
+    toml::table tt;
+    for (const auto& [k, v] : own.members()) {
+        if (v.type() == json::Value::Type::boolean) {
+            tt.insert(k, v.boolean());
+        } else if (v.is_array()) {
+            toml::array list;
+            for (const auto& e : v.items()) {
+                if (!e.is_string()) return "response_compression." + k + " must be a list of strings";
+                list.push_back(std::string(e.str()));
+            }
+            tt.insert(k, std::move(list));
+        } else {
+            return "response_compression." + k + " must be true, false or a list of strings";
+        }
+    }
+    site.compression = server;
+    site.compression.own = 0;
+    try {
+        check_keys(tt, {"response_compression = {}"}, {}, "response_compression");
+        parse_compression_fields(tt, site.compression, "response_compression", true);
     } catch (const std::exception& e) {
         return e.what();
     }

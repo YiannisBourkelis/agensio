@@ -87,6 +87,8 @@ void usage(std::ostream& out = std::cout) {
                  "                           (the site's response header rules, the list replaced; --no-response-headers)\n"
                  "                           --no-response-headers-baseline | --response-headers-baseline (the preset's own fields)\n"
                  "                           --decline-response-header NAME ... | --no-declined-response-headers (offered, declined)\n"
+                 "                      site-update NAME --compression on|off|main [--compression-codings br,zstd,gzip|main]\n"
+                 "                           [--compression-exclude PATH ...] [--compression-signed-in on|off|main] | --compression-reset\n"
                  "                      site-update NAME --restrict PATH=ADDR[,ADDR...] ... (only those addresses reach PATH)\n"
                  "                      site-update NAME --restrict-admin ADDR[,ADDR...] [--admin-login] [--admin-language L]...\n"
                  "                      site-update NAME --auth PATH | --auth-exact PATH | --auth-open PATH ... [--auth-realm TEXT]\n"
@@ -450,6 +452,15 @@ int main(int argc, char** argv) {
                              "                    Permissions-Policy, X-Content-Type-Options): health's response_headers_suggested and\n"
                              "                    path-check's offer stop naming it; given together they replace the list;\n"
                              "                    --no-declined-response-headers clears it\n"
+                             "        --compression on|off|main (site-create and site-update): the site's own switch of response\n"
+                             "                    compression over the main file's [response_compression] (main: the main file decides);\n"
+                             "                    --compression-codings br,zstd,gzip|main the codings in their order (br first behind\n"
+                             "                    Cloudflare, CloudFront or Fastly); --compression-exclude PATH (repeatable, given together\n"
+                             "                    they replace the list; --no-compression-exclude clears it) a path prefix never compressed;\n"
+                             "                    --compression-signed-in on|off|main the site's password and address-rule answers too;\n"
+                             "                    each flag changes its own field, the others stay; --compression-reset drops them all, so\n"
+                             "                    the site follows the main file whole. site NAME shows the values in force (own: the\n"
+                             "                    site's)\n"
                              "        path-check NAME PATH: what the site does with a GET for PATH and why, as the server decides\n"
                              "                    it: refused (by which refuse pattern or refusal by name), redirected (by which rule, to\n"
                              "                    which Location), the file served, the script run, the application it goes to; every\n"
@@ -526,6 +537,12 @@ int main(int argc, char** argv) {
             std::vector<std::pair<std::string, agensio::json::Value>> header_rules;
             agensio::json::Value header_file_rules = agensio::json::Value::array();
             bool headers_given = false;
+            // --compression, --compression-signed-in, --compression-codings, --compression-exclude: the
+            // fields of the site's own response_compression they name, merged by the server into what the
+            // site set; --compression-reset drops them all.
+            agensio::json::Value compression = agensio::json::Value::object();
+            agensio::json::Value compression_exclude = agensio::json::Value::array();
+            bool compression_given = false, compression_exclude_given = false, compression_reset = false;
             bool raw = false;
             agensio::json::Value body = agensio::json::Value::object();
             agensio::json::Value aliases = agensio::json::Value::array();
@@ -781,6 +798,31 @@ int main(int argc, char** argv) {
                     list.push(v);
                     body.set("response_headers_offer_declined", list);
                 } else if (b == "--no-declined-response-headers") body.set("response_headers_offer_declined", agensio::json::Value::array());
+                else if (b == "--compression" || b == "--compression-signed-in") {  // on | off | main (the main file decides)
+                    std::string v; value(v);
+                    if (v != "on" && v != "off" && v != "main") {
+                        std::cerr << "ctl: " << b << " takes on, off or main (the main file's [response_compression] decides)\n";
+                        return 2;
+                    }
+                    compression.set(b == "--compression" ? "enabled" : "compress_signed_in",
+                                    v == "main" ? agensio::json::Value(nullptr) : agensio::json::Value(v == "on"));
+                    compression_given = true;
+                } else if (b == "--compression-codings") {  // zstd,br,gzip in the order wanted, or main
+                    std::string v; value(v);
+                    agensio::json::Value list = agensio::json::Value::array();
+                    for (std::size_t at = 0; v != "main" && at <= v.size();) {
+                        const std::size_t comma = std::min(v.find(',', at), v.size());
+                        if (comma > at) list.push(v.substr(at, comma - at));
+                        at = comma + 1;
+                    }
+                    compression.set("codings", v == "main" ? agensio::json::Value(nullptr) : list);
+                    compression_given = true;
+                } else if (b == "--compression-exclude") {  // repeatable: given together they replace the list
+                    std::string v; value(v);
+                    compression_exclude.push(v);
+                    compression_exclude_given = true;
+                } else if (b == "--no-compression-exclude") compression_exclude_given = true;
+                else if (b == "--compression-reset") compression_reset = true;
                 else if (b == "--no-response-headers-baseline") body.set("response_headers_baseline", false);
                 else if (b == "--response-headers-baseline") body.set("response_headers_baseline", true);
                 else if (b == "--trusted-proxy") {
@@ -1024,6 +1066,15 @@ int main(int argc, char** argv) {
                 } catch (const std::exception&) {
                     socket_path = agensio::default_control_socket();  // the file may be unreadable for this user
                 }
+            }
+            if (compression_reset && (compression_given || compression_exclude_given)) {
+                std::cerr << "ctl: --compression-reset drops every field of the site's own response_compression; give it alone\n";
+                return 2;
+            }
+            if (compression_reset) body.set("response_compression", agensio::json::Value(nullptr));
+            else if (compression_given || compression_exclude_given) {
+                if (compression_exclude_given) compression.set("exclude_paths", compression_exclude);
+                body.set("response_compression", compression);
             }
             if (headers_given) {  // the whole list: the flags' rules, then the file's
                 agensio::json::Value list = agensio::json::Value::array();

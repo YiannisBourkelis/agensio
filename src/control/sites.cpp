@@ -96,6 +96,7 @@ json::Value SiteSpec::to_json() const {
     if (!response_headers.items().empty()) v.set("response_headers", response_headers);
     if (response_headers_baseline) v.set("response_headers_baseline", *response_headers_baseline);
     if (!response_headers_offer_declined.empty()) v.set("response_headers_offer_declined", strings(response_headers_offer_declined));
+    if (response_compression.is_object() && !response_compression.members().empty()) v.set("response_compression", response_compression);
     if (!login_paths.empty()) v.set("login_paths", strings(login_paths));
     if (!public_archives.empty()) v.set("public_archives", strings(public_archives));
     if (!mime_types.empty()) v.set("mime_types", mime_types_json(mime_types));
@@ -152,6 +153,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     if (v["response_headers"].is_array()) out.response_headers = v["response_headers"];
     if (v["response_headers_baseline"].type() == json::Value::Type::boolean) out.response_headers_baseline = v["response_headers_baseline"].boolean();
     out.response_headers_offer_declined = string_list(v["response_headers_offer_declined"]);
+    if (v["response_compression"].is_object()) out.response_compression = v["response_compression"];
     out.login_paths = string_list(v["login_paths"]);
     out.public_archives = string_list(v["public_archives"]);
     if (v["mime_types"].type() == json::Value::Type::object) (void)load_mime_types(v["mime_types"], out.mime_types, true);  // the TOML below is judged by the load
@@ -695,7 +697,7 @@ const std::vector<std::string_view>& site_request_fields() {
     static const std::vector<std::string_view> fields = {
         "domain", "aliases", "canonical", "https", "redirect_http", "hsts", "encoded_slashes", "app", "root", "served_dir", "upstream", "project", "entry", "user",
         "no_user", "group", "php_socket", "php_children", "php_version", "settings", "rules", "redirects", "response_headers",
-        "response_headers_baseline", "response_headers_offer_declined", "login_paths", "public_archives", "mime_types", "trusted_proxies", "access_log",
+        "response_headers_baseline", "response_headers_offer_declined", "response_compression", "login_paths", "public_archives", "mime_types", "trusted_proxies", "access_log",
         "listen_plain", "listen_tls", "confirm", "reason", "dry_run", "cut_requests", "ignore_requirements"};
     return fields;
 }
@@ -1036,6 +1038,51 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
         }
         spec.response_headers_offer_declined = names;
+    }
+    // The site's own response compression (docs/design-compression.md 9): merged field by field into
+    // what the site set before, so a later change of the main file still reaches every field it leaves
+    // out. true or false sets enabled alone; in an object a field given null goes back to the main
+    // file's and [] clears exclude_paths; null drops them all. Judged by the loader's own parse.
+    if (given(body, "response_compression")) {
+        const json::Value& g = body["response_compression"];
+        json::Value own = spec.response_compression.is_object() ? spec.response_compression : json::Value::object();
+        const auto without = [](const json::Value& o, std::string_view key) {
+            json::Value out = json::Value::object();
+            for (const auto& [k, v] : o.members())
+                if (k != key) out.set(k, v);
+            return out;
+        };
+        if (g.is_null()) {
+            own = json::Value::object();
+        } else if (g.type() == json::Value::Type::boolean) {
+            own.set("enabled", g.boolean());
+        } else if (g.is_object()) {
+            for (const auto& [k, v] : g.members()) {
+                if (k == "levels" || k == "min_size" || k == "extra_types") {
+                    error = "response_compression." + k + " is the host's tuning, the main file's [response_compression] (root's file, docs/configuration.md 20); a managed site sets enabled, exclude_paths, compress_signed_in and codings";
+                    return needs;
+                }
+                if (k == "offload" || k == "compress_event_streams") {
+                    error = "response_compression." + k + " is not offered on a managed site yet: it acts once agensio compresses streamed answers (docs/configuration.md 20)";
+                    return needs;
+                }
+                if (k != "enabled" && k != "exclude_paths" && k != "compress_signed_in" && k != "codings") {
+                    error = "response_compression has no field '" + k + "'; a managed site sets enabled, exclude_paths, compress_signed_in and codings";
+                    return needs;
+                }
+                if (v.is_null() || (k == "exclude_paths" && v.is_array() && v.items().empty())) own = without(own, k);
+                else own.set(k, v);
+            }
+        } else {
+            error = "response_compression must be true, false, an object such as {\"enabled\": true, \"codings\": [\"br\", \"zstd\", \"gzip\"]}, or null to follow the main file";
+            return needs;
+        }
+        SiteConfig probe;
+        if (const std::string why = load_site_compression(own, cfg.compression, probe); !why.empty()) {
+            error = why;
+            return needs;
+        }
+        spec.response_compression = own.members().empty() ? json::Value() : own;
     }
     // The login paths (2026-10-02): given whole, each a plain URL path (check_login_path), at
     // most 16, [] or null clears them. They change no location: the fail2ban jail counts attempts there.
@@ -1442,6 +1489,25 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
     if (!spec.response_headers_offer_declined.empty())
         out += "response_headers_offer_declined = " + toml_list(spec.response_headers_offer_declined) +
                "   # offered, declined by the owner: health and path_check no longer suggest them (docs/headers.md 7)\n";
+    // The site's own response_compression, only the fields set (load_site_compression judged them):
+    // every other comes from the main file's [response_compression].
+    if (const json::Value& rc = spec.response_compression; rc.is_object() && !rc.members().empty()) {
+        if (rc.members().size() == 1 && rc["enabled"].type() == json::Value::Type::boolean) {
+            out += std::string("response_compression = ") + (rc["enabled"].boolean() ? "true" : "false");
+        } else {
+            out += "response_compression = { ";
+            bool first = true;
+            for (const char* k : {"enabled", "exclude_paths", "compress_signed_in", "codings"}) {
+                const json::Value& v = rc[k];
+                if (v.is_null()) continue;
+                out += std::string(first ? "" : ", ") + k + " = " +
+                       (v.type() == json::Value::Type::boolean ? std::string(v.boolean() ? "true" : "false") : toml_list(string_list(v)));
+                first = false;
+            }
+            out += " }";
+        }
+        out += "   # this site's own; every other field from the main file's [response_compression] (docs/configuration.md 20)\n";
+    }
     rules_locations(out);
     // Path redirects as the site file's own tables; their keys are the reference's (load_redirect_rules
     // refused any other), their values strings or numbers.

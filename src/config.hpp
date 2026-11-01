@@ -749,6 +749,13 @@ inline constexpr std::string_view kOfferedResponseFields = "X-Frame-Options, Con
 // Proposed rules as JSON (path_check's preview), replacing the site's: the loader's parse and checks;
 // "" when they load, else why. The notes land in site.header_notes.
 std::string load_response_header_rules(const json::Value& rules, SiteConfig& site);
+// A site's own response_compression as JSON (site_update, docs/design-compression.md 9): an object of
+// the fields a table names (booleans, lists of strings), judged by the loader's own parse over the
+// main file's `server` into site.compression: "" when it loads, else the loader's reason.
+std::string load_site_compression(const json::Value& own, const CompressionConfig& server, SiteConfig& site);
+// The fields of a site's response_compression the site named itself (CompressionConfig::own), for
+// -t --explain and site_show; every other came from the main file.
+std::vector<std::string_view> compression_own_fields(const CompressionConfig& c);
 // The names a site file's [[site]] blocks claim, read as the loader reads a file set aside (its
 // text scanned when it is not TOML): what site_update names when it cannot help (alpha.80).
 std::vector<std::string> claimed_names(const std::string& file);

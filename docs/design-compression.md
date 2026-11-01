@@ -126,7 +126,7 @@ exclude_paths = ["/my-account/", "/checkout/"]
 
 | field | where | meaning |
 |---|---|---|
-| `enabled` | both | the switch; `true` covers static files, PHP, proxied and CGI answers and agensio's own pages; a site's `response_compression = true` or `false` sets it alone |
+| `enabled` | both | the switch; `true` covers static files and PHP, proxied and CGI answers; a site's `response_compression = true` or `false` sets it alone |
 | `exclude_paths` | site | where the site never compresses, whoever asks: account and checkout pages, an odd client's API; up to 32 prefixes |
 | `compress_signed_in` | both | whether an answer behind agensio's own `[[site.auth]]` password, an `[[site.access]]` admission or a browser-replayed `Authorization` is compressed (section 7); an application's own login is invisible, its pages are compressed and padded |
 | `compress_event_streams` | both | `text/event-stream` answers compressed, flushed per event; accepted, acting from step 6 |
@@ -386,7 +386,10 @@ are for.
   the user sets and no others, so a later change of the main file still reaches the site (`ctl
   --compression on|off`, `--compression-exclude PATH`, `--compression-signed-in`,
   `--compression-offload`, `--compression-events`, `--compression-codings LIST`). The main file's
-  table is a file edit (the reference's `via = file`), never `site_update`.
+  table is a file edit (the reference's `via = file`), never `site_update`. Built in alpha.119 for
+  `enabled`, `exclude_paths`, `compress_signed_in` and `codings` (`--compression on|off|main`, `main`
+  handing a field back, and `--compression-reset`); `offload` and `compress_event_streams` come with
+  step 6, where they act, and `levels`, `min_size` and `extra_types` stay the host's.
 - **`site_show`:** the effective settings, each field marked as the site's or the main file's, as
   `-t --explain` prints them.
 - **`path_check`:** two new arguments, `accept_encoding` (default: a current browser's `gzip,
@@ -496,9 +499,16 @@ Each step: unit and integration suites green, the A/B flat on the rows it touche
    whatever the sites say (before it, a site that turned compression on at a reload, or any site of
    a build without libxcrypt, got no copy of a cached file).
 6. **Streamed answers** (section 6): `CompressedBody`, flushes, the budget, SSE and
-   `compress_event_streams`, `offload`. The memory and streams rows measured.
-7. **The agent interface** (section 9): `path_check`'s arguments and reasons, health's findings
-   with the probes, status's block, the log fields, the cookbook's check.
+   `compress_event_streams`, `offload`, and those two fields on a managed site (`site_update`,
+   `ctl --compression-offload`, `--compression-events`). The memory and streams rows measured.
+7. **The agent interface** (section 9). Its first part was built before step 6, in 0.1.0-alpha.119,
+   when the test VPS could not turn compression on for one managed site: `site_create` and
+   `site_update` take the site's `enabled`, `exclude_paths`, `compress_signed_in` and `codings`,
+   merged field by field (`load_site_compression` judges them with the loader's parse), the managed
+   file carries only those, `ctl --compression on|off|main`, `--compression-codings`,
+   `--compression-exclude`, `--compression-signed-in`, `--compression-reset`, and `site_show`'s
+   values in force with `own`. Still to come: `path_check`'s arguments and reasons, health's
+   findings with the probes, status's block, the log fields, the cookbook's check.
 8. **Honouring `X-Accel-Buffering: no`, `Incremental: ?1` and `text/event-stream`** for buffered
    exchanges, its own step and commit, independent of compression.
 

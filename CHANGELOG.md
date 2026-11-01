@@ -2,6 +2,25 @@
 
 ## 0.1.0-alpha.119
 
+- **Response compression on a managed site, through the control plane.** Until this release a site
+  made through the tools could not turn compression on for itself: `site_update` refused the field
+  and `ctl` had no option, so the only way was root's main file, for every site at once (the test
+  VPS's agent, asked to turn it on for one site). `site_create` and `site_update` take the site's
+  own `response_compression`: `true` or `false` its switch, or an object of `enabled`,
+  `exclude_paths`, `compress_signed_in` and `codings`, merged field by field into what the site set
+  (a field `null` goes back to the main file's, the whole `null` drops the site's own), judged by
+  the loader's own parse (`load_site_compression`); the managed file carries only the fields set,
+  so a later change of the main file still reaches the rest. `agensio ctl site-update NAME
+  --compression on|off|main`, `--compression-codings br,zstd,gzip|main`, `--compression-exclude
+  PATH`, `--no-compression-exclude`, `--compression-signed-in on|off|main`, `--compression-reset`.
+  `site_show` gives the values in force and, in `own`, the fields the site sets. The host's tuning
+  (`levels`, `min_size`, `extra_types`) is refused there with where it lives, and `offload` and
+  `compress_event_streams`, which act from step 6 (streamed answers), come to managed sites with
+  that step. The MCP field's text tells the agent to ask first whether the site is behind a CDN
+  (brotli first behind Cloudflare, CloudFront or Fastly) and maps a PageSpeed "enable text
+  compression" finding to the switch. The first part of step 7 of `docs/design-compression.md` 11,
+  taken ahead of step 6. Also corrected: the reference's `[response_compression] enabled` row (and
+  so `docs/keys.md`) and the design's table still said agensio's own pages are compressed.
 - **Fix: one access-log line for every request, however the client ends it, with a status that
   says so.** Until this release an HTTP/2 request the client abandoned before its answer (the
   connection closed, the stream reset) left no access-log line at all, so the login jails missed

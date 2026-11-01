@@ -46,9 +46,19 @@ curl -sS --compressed https://shop.example.com/ | head -c 200       # decodes to
 agensio -t --explain -c /etc/agensio/agensio.toml | grep response_compression
 ```
 
-**On a managed site.** The control plane gets the site's own `response_compression` with step 7
-of `docs/design-compression.md` 11. Until then a managed site follows the main file's
-`[response_compression]` (next recipe), which root edits.
+**On a managed site.** The same switch through the control plane: the managed file gets the line,
+and the site is reloaded.
+
+```sh
+agensio ctl site-update shop.example.com --compression on --reason "PageSpeed: enable text compression"
+agensio ctl site shop.example.com               # response_compression: the values in force, own: the site's
+```
+
+Through MCP, `site_update` with `response_compression: true`. Behind Cloudflare, CloudFront or
+Fastly, brotli first: `--compression-codings br,zstd,gzip` (MCP: `{"codings": ["br", "zstd",
+"gzip"]}`). A path never compressed: `--compression-exclude /account/`. Each flag changes its own
+field; `--compression main` hands the switch back to the main file, `--compression-reset` every
+field.
 
 **Reference:** [Response compression](../configuration.md#20-response-compression-response_compression), [keys](../keys.md).
 

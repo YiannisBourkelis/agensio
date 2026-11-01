@@ -1325,6 +1325,27 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
         }
         if (!s.header_notes.empty()) v.set("response_header_notes", header_notes_json(s));
     }
+    // Response compression (docs/configuration.md 20): the values in force, merged at load, and in
+    // `own` the fields the site sets itself; every other is the main file's [response_compression].
+    {
+        const CompressionConfig& c = s.compression;
+        const auto list = [](const std::vector<std::string>& l) {
+            json::Value a = json::Value::array();
+            for (const auto& e : l) a.push(e);
+            return a;
+        };
+        json::Value own = json::Value::array();
+        for (const std::string_view f : compression_own_fields(c)) own.push(f);
+        v.set("response_compression", json::Value::object()
+                                          .set("enabled", c.enabled)
+                                          .set("codings", list(c.codings))
+                                          .set("exclude_paths", list(c.exclude_paths))
+                                          .set("compress_signed_in", c.compress_signed_in)
+                                          .set("min_size", static_cast<double>(c.min_size))
+                                          .set("levels", json::Value::object().set("zstd", c.level_zstd).set("br", c.level_br).set("gzip", c.level_gzip))
+                                          .set("extra_types", list(c.extra_types))
+                                          .set("own", std::move(own)));
+    }
     (void)cfg;
     return v;
 }
