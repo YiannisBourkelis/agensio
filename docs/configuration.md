@@ -1999,9 +1999,24 @@ is judged by the new groups. Before 0.1.0-alpha.61 the reference called most of 
 keys, `stream_chunk_size`, `sendfile_max_chunk` and `tcp_nodelay` reload keys while a reload kept
 them, and the role groups needed a restart.
 
-Note: the static file cache starts cold for every reloaded site (entries are keyed by
-the location the configuration created), so the first request for each file after a
-reload reads it from disk again.
+**The file cache across a reload** (since 0.1.0-alpha.120): a location that serves the same files
+the same way after the reload keeps its cached entries and their compressed copies (section 20),
+so the first answers after it are the ones served before, copies included. "The same way" is what
+an entry holds when it is filled: the `root` or `alias`, `index`, `try_files`, `symlinks`, the
+content types (`mime_types`, root's and the site's) and the site's `response_compression`
+(on, `min_size`, `extra_types`, the codings). A change to any of these, a new location, a new
+site or a renamed one (a site is the running one with the same names) starts that location's
+cache over, and the entries it had are dropped at once; a site file set aside keeps its running
+version, cache included. What a request checks on its own (`hidden_files`, `deny_suffixes`,
+`allow_suffixes`, `refuse`, `add_headers`, the access, password, redirect and response-header
+rules) is not in an entry and applies at once with the cache kept. A file changed on disk is
+caught by the revalidation (section 7) as always. The error log says what happened at level
+`info` (`cache kept across the reload for 12 site(s), 40 location(s); started over where the
+serving changed: example.com (/assets/: root)`), and `agensio ctl status` shows the cache under
+`cache` (`entries`, `bytes`, `open_files`, with their budgets). A restart starts the cache over.
+Before alpha.120 every reload started every site's cache over, and the entries of the
+configuration that ended stayed in memory until the cache was full (the test VPS's alpha.119
+report measured a site's CSS and JS going out uncompressed after a `site_update` on another site).
 
 ## 12c. One broken site file never stops the others
 

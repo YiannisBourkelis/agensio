@@ -533,7 +533,17 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   named by `control::restart_needed` in the reload's warning, `validate` and health, held to the
   reference by a unit test; the control role groups apply on reload (`Server::apply_control_groups`).
   `agensio reload` validates and signals
-  `server.pid_file`. `tests/reload.sh` proves no request fails across reloads.
+  `server.pid_file`. `tests/reload.sh` proves no request fails across reloads. The file cache
+  across a reload (2026-11-02, `carry_cache_scopes` in `config.cpp`, `docs/configuration.md` 12b):
+  a static location serving the same files the same way as the running one (root or alias, index,
+  try_files, symlinks, the merged MIME table, the site's compression facts: what `fill_entry` and
+  `copies_wanted` bake in) takes the running location's id in `prepare_reload`, so its entries and
+  copies are found again; anything else, a new or renamed site (matched by its names, listen
+  deciding between two) gets fresh ids; what a request checks itself (deny/allow suffixes,
+  hidden files, add_headers, the rules) is not in an entry. After the switch the last worker to take
+  the generation sweeps the store (`FileCache::retain_scopes`, dead scopes marked stale) and every
+  worker drops its index's stale pointers (`LocalIndex::drop_stale`); before, a reload lost every
+  entry and left the dead ones until the LRU reached them. Status `cache`; the log line at info.
 - **Plain HTTP of a site** (alpha.76, `docs/redirects.md` 2, `docs/configuration.md` 14): the site
   key `http` (`redirect` | `serve` | `off` | `{ listen, mode }`); a TLS site on 443 gets
   `SiteConfig::http_listen` (port 80 at its addresses), plain listeners routing to the same site

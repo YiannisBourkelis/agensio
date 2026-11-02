@@ -60,6 +60,23 @@ void FileCache::erase(const CacheKeyView& key, const CacheEntry* expected) {
     map_.erase(it);
 }
 
+std::size_t FileCache::retain_scopes(const std::vector<std::uint64_t>& live) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::size_t dropped = 0;
+    for (auto it = map_.begin(); it != map_.end();) {
+        if (std::binary_search(live.begin(), live.end(), it->first.scope)) {
+            ++it;
+            continue;
+        }
+        it->second->stale.store(true, std::memory_order_release);
+        total_.fetch_sub(bytes_of(*it->second), std::memory_order_relaxed);
+        open_.fetch_sub(files_of(*it->second), std::memory_order_relaxed);
+        it = map_.erase(it);
+        ++dropped;
+    }
+    return dropped;
+}
+
 std::size_t FileCache::entry_count() {
     std::lock_guard<std::mutex> lock(mutex_);
     return map_.size();

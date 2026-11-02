@@ -1189,6 +1189,13 @@ json::Value Server::status() {
             .set("copies_failed", static_cast<double>(k.failed));
         v.set("compression", std::move(c));
     }
+    // The file cache as it stands: what a reload kept or started over shows here (12b).
+    v.set("cache", json::Value::object()
+                       .set("entries", static_cast<double>(cache_.entry_count()))
+                       .set("bytes", static_cast<double>(cache_.total_bytes()))
+                       .set("max_bytes", static_cast<double>(cfg_.cache_max_size))
+                       .set("open_files", static_cast<double>(cache_.open_files()))
+                       .set("max_open_files", static_cast<double>(cfg_.cache_max_open_files)));
     // [[site.auth]]: the slow hashes the pool has run (one per login, none per request after it).
 #ifdef AGENSIO_HAS_AUTH
     v.set("auth_verifications", static_cast<double>(auth_verifier_ ? auth_verifier_->verifications() : 0));
@@ -2122,10 +2129,22 @@ bool Server::switch_to(const std::shared_ptr<Generation>& gen, std::string& erro
          gen->cfg.control.viewers != previous->cfg.control.viewers))
         apply_control_groups(gen->cfg);
     max_connections_.store(connection_ceiling(gen->cfg, fd_limit_, static_cast<unsigned>(workers_.size())), std::memory_order_relaxed);
+    // The file cache's dead scopes (the locations the generation that ends had and no live location
+    // carries on, carry_cache_scopes): swept by the last worker to switch, so nothing inserts under a
+    // dead id after the sweep, and then every worker drops the stale pointers its own index holds,
+    // which is where the bytes were still held. A request that began on the old generation and
+    // finishes after the sweep can leave one entry behind, which the LRU evicts: the sweep is
+    // bookkeeping, correctness is the id's. Until 2026-11-02 a reload left every entry behind.
+    auto live = std::make_shared<const std::vector<std::uint64_t>>(cache_scopes(gen->cfg));
+    auto pending = std::make_shared<std::atomic<std::size_t>>(workers_.size());
     for (auto& w : workers_)
-        asio::post(w->ctx, [w = w.get(), gen] {
+        asio::post(w->ctx, [this, w = w.get(), gen, live, pending] {
             w->gen = gen;
             apply_server_header(w->state, gen->cfg.server_header);  // the one key of every answer's head (alpha.110)
+            if (pending->fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+            const std::size_t dropped = cache_.retain_scopes(*live);
+            for (auto& x : workers_) asio::post(x->ctx, [x = x.get()] { x->state.local.drop_stale(); });
+            if (dropped) error_log_.info("cache: " + std::to_string(dropped) + " entr" + (dropped == 1 ? "y" : "ies") + " of locations the reload replaced dropped");
         });
     reload_h3(gen->cfg);
     sync_h3(gen);
@@ -2301,6 +2320,9 @@ std::shared_ptr<Generation> Server::prepare_reload(std::string& error, std::stri
     }
     auto gen = std::make_shared<Generation>();
     gen->cfg = std::move(fresh);
+    // The file cache (docs/configuration.md 12b): a location serving the same files the same way as
+    // the running one takes its id, so its entries and their copies are found again after the switch.
+    gen->cache_carry = carry_cache_scopes(gen->cfg, gen_->cfg);
     // The certificates the same way (C3): a site whose pair does not load is set aside, a carried
     // one keeps the material the running generation loaded (a key the server can no longer read).
     std::vector<std::string> kept_certificates;
@@ -2344,6 +2366,7 @@ bool Server::commit_reload(const std::shared_ptr<Generation>& gen, std::string& 
     error_log_.warn("reloaded " + cfg_.config_path.string() + ": " + std::to_string(gen->cfg.sites.size()) +
                     " site(s), " + std::to_string(gen->listeners.size()) + " listener(s), " +
                     std::to_string(bound) + " bound, " + std::to_string(closed) + " closed");
+    if (const std::string c = gen->cache_carry.words(); !c.empty()) error_log_.info(c);
     for (const auto& o : gen->cfg.orphan_additions)
         error_log_.warn(o.file + " holds root additions for site " + o.site + ", which is not in the configuration (disabled or deleted): ignored");
     for (const auto& n : access_notices(gen->cfg))  // the notes at level info (alpha.61 report, finding 2)

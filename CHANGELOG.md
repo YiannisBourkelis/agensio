@@ -2,6 +2,21 @@
 
 ## 0.1.0-alpha.120
 
+- **The file cache survives a reload.** A location that serves the same files the same way after
+  the reload (its `root` or `alias`, `index`, `try_files`, `symlinks`, content types and the site's
+  `response_compression` unchanged) keeps its cached entries and their brotli and gzip copies, so
+  the first answers after a reload are the ones served before, copies included; a site file set
+  aside keeps its running version, cache included. A change to any of those, a new location, a new
+  or renamed site starts that location's cache over, and the entries of the configuration that
+  ended are dropped at once instead of staying in memory until the cache was full. What a request
+  checks on its own (`deny_suffixes`, `hidden_files`, `add_headers`, the access, password, redirect
+  and response-header rules) is not in an entry and applies at once. The error log says what was
+  kept and what started over and why (level `info`); `agensio ctl status` and `server_status` show
+  the cache (`cache`: `entries`, `bytes`, `open_files`, their budgets). Before, every reload
+  started every site's cache over: the test VPS's alpha.119 report measured a site's CSS and JS
+  going out uncompressed after a `site_update` on another site of the host. `docs/configuration.md`
+  12b; `tests/reload.sh`.
+
 - **Approvals: a change no agent can make on its own word.** The owner's condition for letting the
   agent change a site's files (F12, the next step) was that no prompt injection, however clever, may
   harm the server through the control plane. The in-person confirmation `pip_install` had (row 32)

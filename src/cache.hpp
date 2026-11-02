@@ -156,6 +156,12 @@ public:
     // Removes the entry for key if it is still `expected`. Marks it stale.
     void erase(const CacheKeyView& key, const CacheEntry* expected);
 
+    // Drops every entry whose scope is not in `live` (sorted), marking each stale: after a reload,
+    // the entries of the locations the generation that ended had and no live location carries on
+    // (carry_cache_scopes in config.cpp). Until 2026-11-02 they stayed until the LRU reached them.
+    // Returns how many were dropped. Off the request path.
+    std::size_t retain_scopes(const std::vector<std::uint64_t>& live);
+
     std::size_t total_bytes() const noexcept { return total_.load(std::memory_order_relaxed); }
     std::size_t open_files() const noexcept { return open_.load(std::memory_order_relaxed); }
     std::size_t entry_count();
@@ -192,6 +198,20 @@ public:
         auto it = map_.find(key);
         if (it != map_.end()) map_.erase(it);
     }
+    // Drops every pointer to an entry marked stale (evicted, invalidated, or swept after a reload):
+    // the index's reference is what still held its bytes. On this worker's thread, after a reload;
+    // a lookup drops a stale entry on its own. Returns how many went.
+    std::size_t drop_stale() noexcept {
+        std::size_t dropped = 0;
+        for (auto it = map_.begin(); it != map_.end();) {
+            if (it->second->stale.load(std::memory_order_acquire)) {
+                it = map_.erase(it);
+                ++dropped;
+            } else ++it;
+        }
+        return dropped;
+    }
+    std::size_t size() const noexcept { return map_.size(); }
 
 private:
     const std::size_t max_entries_;

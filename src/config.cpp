@@ -3810,6 +3810,129 @@ void finalize_site(SiteConfig& site) {
                      });
 }
 
+// ---- The file cache across a reload (CacheCarry, config.hpp) ----
+
+namespace {
+
+// Whether `a` (loaded) serves the same files the same way as `b` (running): the facts an entry of the
+// static handler bakes in at fill (handlers/static.cpp serve_location, fill_entry, copies_wanted).
+// `what` names the first difference. Only static locations have entries.
+bool serving_same(const LocationConfig& a, const SiteConfig& sa, const LocationConfig& b, const SiteConfig& sb, std::string& what) {
+    if (a.kind != HandlerKind::static_ || b.kind != HandlerKind::static_ || a.handler != b.handler) return what = "handler", false;
+    if (a.root != b.root) return what = "root", false;
+    if (a.alias != b.alias) return what = "alias", false;
+    if (a.index != b.index) return what = "index", false;
+    if (a.try_files.size() != b.try_files.size()) return what = "try_files", false;
+    for (std::size_t i = 0; i < a.try_files.size(); ++i) {
+        const TryStep& x = a.try_files[i];
+        const TryStep& y = b.try_files[i];
+        if (x.kind != y.kind || x.target != y.target || x.status != y.status) return what = "try_files", false;
+    }
+    if (a.symlinks_deny != b.symlinks_deny) return what = "symlinks", false;
+    // The content types the entry's Content-Type came from: the site's and root's tables merged.
+    const bool am = a.mime_types && !a.mime_types->empty(), bm = b.mime_types && !b.mime_types->empty();
+    if (am != bm) return what = "mime_types", false;
+    if (am) {
+        auto same_table = [](const std::map<std::string, MimeType, std::less<>>& x, const std::map<std::string, MimeType, std::less<>>& y) {
+            if (x.size() != y.size()) return false;
+            for (auto i = x.begin(), j = y.begin(); i != x.end(); ++i, ++j)
+                if (i->first != j->first || i->second.type != j->second.type || i->second.encoding != j->second.encoding) return false;
+            return true;
+        };
+        if (!same_table(a.mime_types->endings, b.mime_types->endings) || !same_table(a.mime_types->paths, b.mime_types->paths))
+            return what = "mime_types", false;
+    }
+    // The copies and the Vary line follow the site's compression (copies_wanted, offered): on, the
+    // size floor, the types added, and the codings it offers.
+    const CompressionConfig& ca = sa.compression;
+    const CompressionConfig& cb = sb.compression;
+    if (ca.enabled != cb.enabled || ca.min_size != cb.min_size || ca.extra_types != cb.extra_types || ca.codings_written != cb.codings_written ||
+        sa.codings.mask != sb.codings.mask || sa.codings.order != sb.codings.order)
+        return what = "response_compression", false;
+    return true;
+}
+
+bool same_names(const std::vector<std::string>& a, const std::vector<std::string>& b) {
+    if (a.size() != b.size()) return false;
+    std::vector<std::string> x = a, y = b;
+    std::sort(x.begin(), x.end());
+    std::sort(y.begin(), y.end());
+    return x == y;
+}
+
+}  // namespace
+
+std::string CacheCarry::words() const {
+    if (sites_kept == 0 && started_over.empty() && sites_new == 0) return {};
+    std::string out = "cache kept across the reload for " + std::to_string(sites_kept) + " site(s), " + std::to_string(locations_kept) +
+                      " location(s)";
+    if (!started_over.empty()) {
+        out += "; started over where the serving changed:";
+        for (std::size_t i = 0; i < started_over.size(); ++i)
+            out += (i ? ", " : " ") + started_over[i].first + " (" + started_over[i].second + ")";
+    }
+    if (sites_new) out += "; " + std::to_string(sites_new) + " new site(s)";
+    return out;
+}
+
+CacheCarry carry_cache_scopes(Config& fresh, const Config& running) {
+    CacheCarry c;
+    std::vector<const SiteConfig*> taken;  // a running site lends its ids to one loaded site at most
+    for (SiteConfig& site : fresh.sites) {
+        if (site.carried) {  // copied whole from the running configuration, ids included
+            ++c.sites_kept;
+            c.locations_kept += site.locations.size();
+            continue;
+        }
+        const SiteConfig* r = nullptr;
+        std::size_t candidates = 0;
+        for (const SiteConfig& x : running.sites) {
+            if (std::find(taken.begin(), taken.end(), &x) != taken.end() || !same_names(x.server_names, site.server_names)) continue;
+            ++candidates;
+            if (!r || x.listen == site.listen) r = &x;
+        }
+        if (candidates > 1 && r->listen != site.listen) r = nullptr;  // two running sites with these names and neither on its addresses
+        if (!r) {
+            ++c.sites_new;
+            continue;
+        }
+        taken.push_back(r);
+        std::size_t kept = 0, total = 0;
+        std::string changed;
+        for (LocationConfig& loc : site.locations) {
+            if (loc.kind != HandlerKind::static_ || loc.handler == "deny") continue;  // no entries: nothing to keep
+            ++total;
+            const LocationConfig* rl = nullptr;
+            for (const LocationConfig& x : r->locations)
+                if (x.path == loc.path && x.exact == loc.exact && x.suffix == loc.suffix) rl = &x;
+            std::string what;
+            if (!rl) what = "new";
+            else if (serving_same(loc, site, *rl, *r, what)) {
+                loc.id = rl->id;
+                ++kept;
+                continue;
+            }
+            if (changed.empty()) changed = loc.path + ": " + what;
+        }
+        if (site.http_redirect && r->http_redirect && site.validation.root == r->validation.root) site.validation.id = r->validation.id;
+        c.locations_kept += kept;
+        if (kept == total) ++c.sites_kept;
+        else c.started_over.emplace_back(site.server_names.front(), changed);
+    }
+    return c;
+}
+
+std::vector<std::uint64_t> cache_scopes(const Config& cfg) {
+    std::vector<std::uint64_t> ids;
+    for (const SiteConfig& site : cfg.sites) {
+        for (const LocationConfig& loc : site.locations) ids.push_back(loc.id);
+        if (site.validation.id) ids.push_back(site.validation.id);
+    }
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    return ids;
+}
+
 std::string auth_users_problem(const std::string& path, const Config& cfg) {
 #ifdef AGENSIO_HAS_AUTH
     Config probe;  // a scratch configuration: the loader's checks without its cache of files read

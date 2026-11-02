@@ -713,6 +713,27 @@ std::vector<TryStep> parse_try_files(const std::vector<std::string>& items);
 // and sorts the locations for Router::location. The loader calls it; exposed for tests.
 void finalize_site(SiteConfig& site);
 
+// The file cache across a reload (2026-11-02, docs/configuration.md 12b): an entry is keyed by its
+// location's id, so a location of the loaded configuration that serves the same files the same way
+// as the running one (the facts an entry bakes in at fill: root or alias, index, try_files, the
+// symlink policy, the content types, the site's compression) takes the running location's id and
+// its entries and their compressed copies are found again; any other difference, a new site or a
+// renamed one gets fresh ids and starts over. What a request checks on its own (hidden files, the
+// endings refused or served alone, add_headers, the access, password, redirect and response-header
+// rules) is not in an entry and changes at once. A site is the running one with the same names
+// (its listen addresses decide between two with the same names); a carried site keeps everything.
+struct CacheCarry {
+    std::size_t sites_kept = 0;        // every static location kept its entries
+    std::size_t sites_new = 0;         // nothing to keep
+    std::size_t locations_kept = 0;
+    std::vector<std::pair<std::string, std::string>> started_over;  // site, and the first location with what changed ("/assets/: root")
+    std::string words() const;  // one line for the error log and the reload's answer; "" when nothing was running
+};
+CacheCarry carry_cache_scopes(Config& fresh, const Config& running);
+// The ids a generation's entries may be keyed by (every location of every site, the validation
+// location included), sorted: what FileCache::retain_scopes keeps after the switch.
+std::vector<std::uint64_t> cache_scopes(const Config& cfg);
+
 // Access by client address (2026-10-07): the checks the loader, site_update's rules.restricted
 // and the access-check command share. "" when fine, else why not.
 std::string check_access_path(std::string_view path);

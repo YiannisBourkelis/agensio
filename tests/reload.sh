@@ -25,6 +25,10 @@ ${SERVER_EXTRA:-}
 [log]
 access = "$T/logs/access.log"
 error = "$T/logs/error.log"
+level = "info"
+[control]
+socket = "$T/control.sock"
+audit = "$T/logs/audit.log"
 [[site]]
 server_name = ["*"]
 listen = ["127.0.0.1:8097"]
@@ -32,6 +36,10 @@ root = "$1"
 ${2:-}
 EOF
 }
+# The file the cache rows below warm up, written now: a file modified within the last two seconds is
+# served uncached (file_settled), so it must be older than that by the time it is asked for.
+for i in $(seq 1 200); do echo "body { margin: 0; padding: 0; color: #333; } .k$i { display: block; }"; done > "$T/v2/warm.css"
+printf '/* one */ body { margin: 0 }\n' > "$T/v1/warm.css"
 "$ROOT/build/agensio_upstream" -p 9110 >/dev/null 2>&1 & UP=$!
 write_config "$T/v1"
 "$BIN" -c "$T/agensio.toml" > "$T/server.out" 2>&1 & SRV=$!
@@ -145,6 +153,33 @@ root = \"$T/v2\""
   check "h2: the removed listener is gone again" "000" "$(code --max-time 2 http://127.0.0.1:8098/ 2>/dev/null)"
 fi
 check "removed location is gone" "404" "$(code $B/slow/json)"
+
+# The file cache across a reload (2026-11-02, the alpha.119 report): a location whose serving did
+# not change keeps its entries and their compressed copies, so the first answer after the reload is
+# the copy, made before it; a changed root starts that location over, and the entries of the
+# generation that ended are dropped at once (status's cache.entries), not left to the LRU.
+CS=$T/control.sock
+cache_config() { SERVER_EXTRA="${2:-}" write_config "$1" 'response_compression = { enabled = true, codings = ["gzip"] }'; }  # root [server extra]
+enc() { curl -sS -o /dev/null -D - -H 'Accept-Encoding: gzip' "$B/warm.css" | tr -d '\r' | awk 'tolower($1) == "content-encoding:" {print $2; f=1} END {if (!f) print "identity"}'; }
+cache_entries() { curl -sS --unix-socket "$CS" http://control/v1/status | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["cache"]["entries"]))'; }
+cache_config "$T/v2"
+"$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.3
+first=$(enc); sleep 0.6; warm=$(enc)
+logged_since() { tail -n +"$(($1 + 1))" "$T/logs/error.log" | grep -c "$2"; }  # lines the log gained after line $1
+mark=$(wc -l < "$T/logs/error.log")
+cache_config "$T/v2" 'server_header = "web"'  # a change elsewhere: the location's serving is the same
+"$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.3
+check "cache kept across a reload that changed nothing of the location: the copy answers at once, the log says so" \
+  "identity gzip gzip web 1" "$first $warm $(enc) $(curl -sS -o /dev/null -D - "$B/" | tr -d '\r' | awk 'tolower($1) == "server:" {print $2}') $(logged_since "$mark" 'cache kept across the reload for 1 site(s), 1 location(s)$')"
+entries_v2=$(cache_entries)
+mark=$(wc -l < "$T/logs/error.log")
+cache_config "$T/v1"
+"$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.5
+check "a changed root starts the location over: its old entries dropped before any request, the new file served, the log names the change" \
+  "yes 0 /* one */ 1 1" "$([ "$entries_v2" -ge 2 ] && echo yes || echo "$entries_v2") $(cache_entries) $(curl -sS "$B/warm.css" | head -c 9) $(logged_since "$mark" 'started over where the serving changed: \* (/: root)') $(logged_since "$mark" 'entries of locations the reload replaced dropped')"
+write_config "$T/v2"
+"$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.3
+check "back on v2" "version two" "$(curl -sS $B/)"
 
 # The connection limits apply on reload (audit 2026-10-07, item 2.7): a connection
 # opened after a reload that lowers idle_timeout from the boot value (15 s) to 2 s is

@@ -175,6 +175,9 @@ struct Generation {
 #endif
     SiteConfig control_site;             // the control listener's synthetic site (stable address for its router)
     std::unique_ptr<Listener> control;   // present when [control] is enabled
+    // A reload's generation: what the file cache kept from the one before (carry_cache_scopes), for
+    // the reload's log line and its answer; empty at a start and for a certificate refresh.
+    CacheCarry cache_carry;
     const Listener* find(std::string_view address) const noexcept {
         for (const auto& l : listeners)
             if (l.address == address) return &l;

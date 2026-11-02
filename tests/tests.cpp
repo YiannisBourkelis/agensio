@@ -1306,6 +1306,156 @@ static void test_cache() {
     local.insert(CacheKeyView{7, "/z"}, make(1, 0));  // exceeds max: cleared, then inserted
     CHECK(local.find(CacheKeyView{7, "/x"}) == nullptr);
     CHECK(local.find(CacheKeyView{7, "/z"}) != nullptr);
+
+    // After a reload (2026-11-02): the entries of the locations the generation that ended had, and
+    // no live location carries on, are dropped at once and marked stale (retain_scopes), and a
+    // worker's index lets go of its pointers to them (drop_stale), which is where the bytes were
+    // still held. Budgets follow. The twins go with their file.
+    {
+        FileCache store(100, 1000, 0.5, 4);
+        auto kept = make(100, 1);
+        auto dead = make(100, 2);
+        dead->br = make(60, 2);
+        auto dead_fd = make_fd(3);
+        CHECK(store.insert(CacheKeyView{11, "/a"}, kept) != nullptr);
+        CHECK(store.insert(CacheKeyView{12, "/a"}, dead) != nullptr);
+        CHECK(store.insert(CacheKeyView{12, "/big"}, dead_fd) != nullptr);
+        CHECK(store.insert(CacheKeyView{13, "/a"}, make(100, 4)) != nullptr);
+        CHECK_EQ(store.total_bytes(), 360u);
+        CHECK_EQ(store.open_files(), 1u);
+        LocalIndex mine(100);
+        mine.insert(CacheKeyView{11, "/a"}, kept);
+        mine.insert(CacheKeyView{12, "/a"}, dead);
+        mine.insert(CacheKeyView{12, "/big"}, dead_fd);
+        CHECK_EQ(store.retain_scopes({11, 13}), 2u);
+        CHECK(!kept->stale.load() && dead->stale.load() && dead_fd->stale.load());
+        CHECK(store.find(CacheKeyView{11, "/a"}) != nullptr && store.find(CacheKeyView{12, "/a"}) == nullptr && store.find(CacheKeyView{13, "/a"}) != nullptr);
+        CHECK_EQ(store.total_bytes(), 200u);
+        CHECK_EQ(store.open_files(), 0u);
+        CHECK_EQ(store.entry_count(), 2u);
+        CHECK_EQ(mine.drop_stale(), 2u);
+        CHECK(mine.find(CacheKeyView{11, "/a"}) != nullptr && mine.find(CacheKeyView{12, "/a"}) == nullptr && mine.size() == 1u);
+        CHECK_EQ(store.retain_scopes({11, 13}), 0u);  // nothing dead: nothing dropped
+        CHECK_EQ(store.retain_scopes({}), 2u);       // no live scope at all
+        CHECK_EQ(store.total_bytes(), 0u);
+    }
+}
+
+// The file cache across a reload (carry_cache_scopes, config.hpp): a location serving the same
+// files the same way keeps its id (its entries are found again); a changed serving fact, a new or a
+// renamed site gets fresh ids; what a request checks on its own does not count.
+static void test_cache_carry() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-carry-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www1" / "assets");
+    fs::create_directories(dir / "www2");
+    std::ofstream(dir / "www1" / "index.html") << "one";
+    auto load = [&](const char* name, const std::string& text) {
+        std::ofstream(dir / name) << text;
+        return load_config(dir / name);
+    };
+    const std::string a_site =
+        "[[site]]\nserver_name = [\"a.test\", \"www.a.test\"]\nlisten = [\"127.0.0.1:18771\"]\nroot = \"www1\"\n"
+        "[[site.location]]\npath = \"/assets/\"\nalias = \"www1/assets\"\nadd_headers = { \"Cache-Control\" = \"max-age=60\" }\n"
+        "[[site.location]]\npath = \"/x/\"\nroot = \"www1\"\nhidden_files = true\n"
+        "[[site.location]]\npath = \"/gone/\"\nhandler = \"deny\"\n";
+    const std::string b_site = "[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:18771\"]\nroot = \"www1\"\n"
+                               "response_compression = { enabled = true, min_size = 512 }\n";
+    const std::string c_site = "[[site]]\nserver_name = [\"c.test\"]\nlisten = [\"127.0.0.1:18771\"]\nroot = \"www1\"\nsymlinks = \"deny\"\n";
+    Config running = load("r.toml", a_site + b_site + c_site);
+    auto loc = [](const Config& c, const char* site, const char* path) -> const LocationConfig& {
+        for (const auto& s : c.sites)
+            if (std::find(s.server_names.begin(), s.server_names.end(), site) != s.server_names.end())
+                for (const auto& l : s.locations)
+                    if (l.path == path && !l.exact && !l.suffix) return l;
+        static LocationConfig none;
+        return none;
+    };
+    // The same text again: every id carried, nothing started over.
+    {
+        Config fresh = load("f0.toml", a_site + b_site + c_site);
+        const std::uint64_t before = loc(fresh, "a.test", "/").id;
+        CHECK(before != 0 && before != loc(running, "a.test", "/").id);  // fresh ids first
+        const CacheCarry c = carry_cache_scopes(fresh, running);
+        CHECK_EQ(c.sites_kept, 3u);
+        CHECK_EQ(c.sites_new, 0u);
+        CHECK(c.started_over.empty());
+        CHECK_EQ(c.locations_kept, 5u);  // a: /, /assets/, /x/ (the deny location has no entries); b: /; c: /
+        CHECK_EQ(loc(fresh, "a.test", "/").id, loc(running, "a.test", "/").id);
+        CHECK_EQ(loc(fresh, "a.test", "/assets/").id, loc(running, "a.test", "/assets/").id);
+        CHECK_EQ(loc(fresh, "b.test", "/").id, loc(running, "b.test", "/").id);
+        CHECK_EQ(c.words(), std::string("cache kept across the reload for 3 site(s), 5 location(s)"));
+        CHECK_EQ(cache_scopes(fresh).size(), cache_scopes(running).size());  // the deny location alone has a fresh id (no entries)
+    }
+    // What a request checks on its own (add_headers, hidden_files, deny_suffixes, access rules, a
+    // location added elsewhere) changes nothing for the entries: kept. A changed root, alias, index,
+    // try_files or symlink policy, or the site's compression: that location starts over, the rest kept.
+    {
+        const std::string a2 =
+            "[[site]]\nserver_name = [\"www.a.test\", \"a.test\"]\nlisten = [\"127.0.0.1:18771\"]\nroot = \"www1\"\n"
+            "[[site.location]]\npath = \"/assets/\"\nalias = \"www1/assets\"\nadd_headers = { \"Cache-Control\" = \"max-age=600\" }\ndeny_suffixes = [\".map\"]\n"
+            "[[site.location]]\npath = \"/x/\"\nroot = \"www2\"\n"
+            "[[site.location]]\npath = \"/new/\"\nroot = \"www1\"\n"
+            "[[site.location]]\npath = \"/gone/\"\nhandler = \"deny\"\n"
+            "[[site.access]]\npath = \"/\"\nallow = [\"10.0.0.0/8\"]\n";
+        const std::string b2 = "[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:18771\"]\nroot = \"www1\"\n"
+                               "response_compression = { enabled = true, min_size = 256 }\n";
+        const std::string c2 = "[[site]]\nserver_name = [\"c.test\"]\nlisten = [\"127.0.0.1:18771\"]\nroot = \"www1\"\n";
+        const std::string d2 = "[[site]]\nserver_name = [\"d.test\"]\nlisten = [\"127.0.0.1:18771\"]\nroot = \"www1\"\n";
+        Config fresh = load("f1.toml", a2 + b2 + c2 + d2);
+        const CacheCarry c = carry_cache_scopes(fresh, running);
+        CHECK_EQ(loc(fresh, "a.test", "/").id, loc(running, "a.test", "/").id);                // names in another order: the same site
+        CHECK_EQ(loc(fresh, "a.test", "/assets/").id, loc(running, "a.test", "/assets/").id);  // headers and endings are per request
+        CHECK(loc(fresh, "a.test", "/x/").id != loc(running, "a.test", "/x/").id);              // root changed
+        CHECK(loc(fresh, "a.test", "/new/").id != 0);
+        CHECK(loc(fresh, "b.test", "/").id != loc(running, "b.test", "/").id);  // min_size changed
+        CHECK(loc(fresh, "c.test", "/").id != loc(running, "c.test", "/").id);  // symlinks changed
+        CHECK_EQ(c.sites_kept, 0u);
+        CHECK_EQ(c.sites_new, 1u);
+        CHECK_EQ(c.locations_kept, 2u);
+        CHECK_EQ(c.started_over.size(), 3u);
+        CHECK_EQ(c.started_over[0].first, std::string("www.a.test"));
+        CHECK_EQ(c.started_over[0].second, std::string("/new/: new"));  // sorted longest first: /new/ before /x/
+        CHECK_EQ(c.started_over[1].second, std::string("/: response_compression"));
+        CHECK_EQ(c.started_over[2].second, std::string("/: symlinks"));
+        CHECK(c.words().find("started over where the serving changed: www.a.test (/new/: new), b.test (/: response_compression), c.test (/: symlinks); 1 new site(s)") != std::string::npos);
+        // Every fresh id is unique, and the live set holds the carried and the fresh ones alike.
+        std::vector<std::uint64_t> ids = cache_scopes(fresh);
+        CHECK_EQ(ids.size(), 8u);  // a: five locations (the deny one has an id too), b, c, d
+    }
+    // A renamed site is a new site. Two running sites with the same names: the listen addresses
+    // decide, and a running site lends its ids once.
+    {
+        Config fresh = load("f2.toml", "[[site]]\nserver_name = [\"renamed.test\"]\nlisten = [\"127.0.0.1:18771\"]\nroot = \"www1\"\n");
+        const CacheCarry c = carry_cache_scopes(fresh, running);
+        CHECK_EQ(c.sites_new, 1u);
+        CHECK_EQ(c.sites_kept, 0u);
+        Config two = load("f3.toml",
+                          "[[site]]\nserver_name = [\"t.test\"]\nlisten = [\"127.0.0.1:18772\"]\nroot = \"www1\"\n"
+                          "[[site]]\nserver_name = [\"t.test\"]\nlisten = [\"127.0.0.1:18773\"]\nroot = \"www2\"\n");
+        Config fresh2 = load("f4.toml",
+                             "[[site]]\nserver_name = [\"t.test\"]\nlisten = [\"127.0.0.1:18773\"]\nroot = \"www2\"\n"
+                             "[[site]]\nserver_name = [\"t.test\"]\nlisten = [\"127.0.0.1:18772\"]\nroot = \"www1\"\n");
+        const CacheCarry c2 = carry_cache_scopes(fresh2, two);
+        CHECK_EQ(c2.sites_kept, 2u);
+        CHECK_EQ(fresh2.sites[0].locations.back().id, two.sites[1].locations.back().id);  // by address, not by order
+        CHECK_EQ(fresh2.sites[1].locations.back().id, two.sites[0].locations.back().id);
+        Config fresh3 = load("f5.toml",
+                             "[[site]]\nserver_name = [\"t.test\"]\nlisten = [\"127.0.0.1:18774\"]\nroot = \"www2\"\n"
+                             "[[site]]\nserver_name = [\"t.test\"]\nlisten = [\"127.0.0.1:18775\"]\nroot = \"www1\"\n");
+        const CacheCarry c3 = carry_cache_scopes(fresh3, two);  // neither on a running address: nothing is guessed
+        CHECK_EQ(c3.sites_new, 2u);
+    }
+    // A site held back at the reload is carried whole, ids included: kept.
+    {
+        Config fresh = load("f6.toml", b_site);
+        fresh.sites.push_back(running.sites[0]);
+        fresh.sites.back().carried = true;
+        const CacheCarry c = carry_cache_scopes(fresh, running);
+        CHECK_EQ(c.sites_kept, 2u);
+        CHECK_EQ(c.locations_kept, 5u);  // b's one and a's four (a carried site counts every location)
+    }
+    fs::remove_all(dir);
 }
 
 // Feeds `wire` to a fresh decoder in pieces of `step` bytes with an output buffer of
@@ -13654,6 +13804,7 @@ int main() {
     test_mime();
     test_size();
     test_cache();
+    test_cache_carry();
     test_hpack_encoder();
     test_compression_config();
     test_site_protocols();

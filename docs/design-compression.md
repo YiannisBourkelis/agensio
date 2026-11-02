@@ -147,11 +147,15 @@ refused with that hint, since it would be the main file's. `agensio -t --explain
 file's table and each site's values with the fields that are its own.
 
 Why every field applies at a reload: a site keeps its merged copy, built at load and read at
-routing, and the cache keys its entries by the site's locations, whose ids a reload replaces, so
-an entry and its copies never outlive the values they were made under (the copies are made again
-after a reload, on the copy maker's thread). A site held back at a reload keeps its last good
-version whole, compression included, matching its entries. The copy maker runs from the start
-whatever the sites say, so a site that turns compression on at a reload gets its copies.
+routing, and the cache keys its entries by the site's locations, whose ids a reload replaces
+unless the location serves the same files the same way (`carry_cache_scopes`, 2026-11-02:
+`enabled`, `min_size`, `extra_types` and the codings are among the facts compared, so a site whose
+compression changed starts its cache over and its copies are made again on the copy maker's
+thread, while one whose compression did not change keeps its copies across the reload). So an
+entry and its copies never outlive the values they were made under. A site held back at a reload
+keeps its last good version whole, compression included, matching its entries. The copy maker
+runs from the start whatever the sites say, so a site that turns compression on at a reload gets
+its copies.
 
 What is deliberately not a setting:
 
@@ -200,15 +204,17 @@ has no twin on disk gets its copies made by agensio:
   queue of entries), never on a worker: brotli 11 takes 60 ms per 100 KB. Until the copy is made
   the file is served as today; the worker finds the copy on its next hit through the entry's
   pointer, which the fill thread sets last (a release store the hit path already reads). So the
-  first answers for a file after a start, or after a reload, which starts the cache over (every
-  location gets a new id and the entries keyed by the old ones are never found again), go out
-  uncompressed: the alpha.119 report measured Lighthouse right after a `site_update` on another
-  site of the host and saw every CSS and JS raw once, and asked for per-request compression
-  meanwhile. Declined 2026-11-02: it would put an encoder on a worker for every request of a
-  burst until the copy lands, the cost the design keeps off the request path; the administrator's
-  page says what happens. The open item is the cache surviving a reload for a location whose
-  serving facts did not change, which keeps the whole cache warm, copies included, and is worth
-  more than the copies alone.
+  first answers for a file after a start, or after a reload that changed how its location serves
+  (its root, index, try_files, symlinks, content types or compression: `carry_cache_scopes`,
+  `docs/configuration.md` 12b), go out uncompressed: the alpha.119 report measured Lighthouse
+  right after a `site_update` on another site of the host and saw every CSS and JS raw once, and
+  asked for per-request compression meanwhile. Declined 2026-11-02: it would put an encoder on a
+  worker for every request of a burst until the copy lands, the cost the design keeps off the
+  request path; the administrator's page says what happens. Built instead the same day: the cache
+  survives a reload for a location whose serving facts did not change (every location got a new id
+  before, so every entry was lost), which keeps the whole cache warm, copies included, and is
+  worth more than the copies alone; the report's case, a `site_update` on another site, now keeps
+  every other site's copies.
 - **Which files:** memory entries only (files up to `cache.max_file_size`), of a compressible
   type, at least `min_size`, at most 8 MB; descriptor entries and larger files are served as
   today.
