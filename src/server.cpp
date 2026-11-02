@@ -70,9 +70,9 @@ constexpr bool kHasReusePort = false;
 #endif
 
 asio::ip::tcp::endpoint parse_endpoint(const std::string& address) {
-    auto colon = address.rfind(':');
-    std::string host = address.substr(0, colon);
-    unsigned short port = static_cast<unsigned short>(std::stoi(address.substr(colon + 1)));
+    std::string host, port_text;
+    if (!split_listen(address, host, port_text)) throw std::runtime_error("invalid listen address '" + address + "'");
+    const unsigned short port = static_cast<unsigned short>(std::stoi(port_text));
     asio::error_code ec;
     auto ip = asio::ip::make_address(host, ec);
     if (ec) throw std::runtime_error("invalid listen address '" + address + "'");

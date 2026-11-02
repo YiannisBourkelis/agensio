@@ -127,10 +127,8 @@ std::vector<std::string> fetch_heads(const std::vector<CanonicalProbe>& probes, 
 
 // A site's listener as a probe asks it: its first address, a wildcard one over loopback.
 void probe_address(const SiteConfig& s, CanonicalProbe& p) {
-    const std::string& at = s.listen.front();  // normalised "host:port", an IPv6 host unbracketed
-    const std::size_t colon = at.rfind(':');
-    p.host = at.substr(0, colon);
-    p.port = at.substr(colon + 1);
+    const std::string& at = s.listen.front();  // stored "host:port", an IPv6 host in brackets
+    (void)split_listen(at, p.host, p.port);
     if (p.host == "0.0.0.0") p.host = "127.0.0.1";
     else if (p.host == "::") p.host = "::1";
 }

@@ -2,6 +2,13 @@
 
 ## 0.1.0-alpha.120
 
+- **Fix: an IPv6 listen address has one spelling, `[::]:443`.** The loader stored it without the
+  brackets, so `server_status` listed `:::80`, a bind failure said `cannot bind :::443`, and
+  `site_create`'s dry run compared the caller's `[::]:80` with the stored `:::80` and called a port the
+  server already held "not bound yet" (the test VPS's IPv6 report, items 3 and 4). The stored form is
+  now the address as the IP stack prints it with an IPv6 host in brackets (`[::0]:80` is `[::]:80`),
+  everything that reads it takes the brackets, and the dry run compares the same spelling.
+
 - **The access log names the host: `[log] format = "vhost_combined"` is the default.** Apache's
   format of that name (Debian's `other_vhosts_access.log`): the combined line with the host the
   request asked for and the listener's port in front, `example.com:443 203.0.113.7 - - [...]`. The

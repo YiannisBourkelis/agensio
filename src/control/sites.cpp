@@ -1691,8 +1691,14 @@ std::vector<Problem> preflight(const SiteSpec& spec, const Config& cfg, bool pri
     // site is served after a restart; saying so here saves the caller a failed reload that
     // looks like a permission problem.
     if (!privileged) {
-        for (const std::string& address : {spec.listen_plain, spec.listen_tls}) {
-            if (address == spec.listen_tls && spec.https == "none") continue;  // the plain port is always used (http)
+        for (const std::string& given : {spec.listen_plain, spec.listen_tls}) {
+            if (given == spec.listen_tls && spec.https == "none") continue;  // the plain port is always used (http)
+            std::string address;  // the stored spelling, so "[::]:80" written either way is the "[::]:80" the server holds
+            try {
+                address = normalise_listen(given);
+            } catch (const std::exception&) {
+                address = given;  // the loader refuses it with its own words
+            }
             bool bound = false;
             for (const auto& s : cfg.sites)
                 for (const auto& l : site_addresses(s)) bound = bound || l == address;

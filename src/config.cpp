@@ -46,11 +46,11 @@
 namespace agensio {
 
 bool loopback_listen(std::string_view listen) {
-    const std::size_t colon = listen.rfind(':');
-    const std::string_view host = colon == std::string_view::npos ? listen : listen.substr(0, colon);
+    std::string host, port;
+    if (!split_listen(listen, host, port)) host = std::string(listen);
     if (host == "localhost") return true;
     asio::error_code ec;
-    asio::ip::address a = asio::ip::make_address(std::string(host), ec);
+    asio::ip::address a = asio::ip::make_address(host, ec);
     if (ec) return false;
     if (a.is_v6() && a.to_v6().is_v4_mapped()) a = asio::ip::make_address_v4(asio::ip::v4_mapped, a.to_v6());
     return a.is_loopback();
@@ -58,7 +58,7 @@ bool loopback_listen(std::string_view listen) {
 
 std::string display_listen(std::string_view listen) {
     const std::size_t colon = listen.rfind(':');
-    if (colon == std::string_view::npos || listen.substr(0, colon).find(':') == std::string_view::npos) return std::string(listen);
+    if (colon == std::string_view::npos || listen.front() == '[' || listen.substr(0, colon).find(':') == std::string_view::npos) return std::string(listen);
     return "[" + std::string(listen.substr(0, colon)) + "]" + std::string(listen.substr(colon));
 }
 
@@ -180,8 +180,12 @@ std::vector<std::string> string_list(const toml::node_view<const toml::node>& n,
     fail(std::string(what) + " must be a string or an array of strings");
 }
 
-// Normalises a listen address to "host:port". Accepts "8080", ":8080",
-// "0.0.0.0:8080", "[::]:8080", "127.0.0.1:8080".
+}  // namespace
+
+// Normalises a listen address to its one stored spelling, "host:port" with an IPv6 host in brackets
+// ("[::]:443"), so status, the error log, the managed spec and every comparison use the same text
+// (2026-11-03, the alpha.119 IPv6 report: ":::443" was printed and compared against "[::]:443").
+// Accepts "8080", ":8080", "0.0.0.0:8080", "[::]:8080", "::1:8080", "127.0.0.1:8080".
 std::string normalise_listen(const std::string& in) {
     std::string s = in;
     auto colon = s.rfind(':');
@@ -199,8 +203,15 @@ std::string normalise_listen(const std::string& in) {
         fail("listen address '" + in + "' has no valid port");
     int p = std::stoi(port);
     if (p < 1 || p > 65535) fail("listen address '" + in + "' port out of range");
+    // An IP address as the stack prints it ("::0" is "::", "0.0.0.0" stays), a name as written.
+    asio::error_code ec;
+    const asio::ip::address a = asio::ip::make_address(host, ec);
+    if (!ec) host = a.to_string();
+    if (host.find(':') != std::string::npos) host = "[" + host + "]";
     return host + ":" + std::to_string(p);
 }
+
+namespace {
 
 fs::path resolve(const fs::path& base_dir, const std::string& p) {
     fs::path path(p);
@@ -3606,12 +3617,11 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
     // A site on [::]:P with no IPv4 address on P, next to sites on an IPv4 address with that port:
     // the kernel gives an IPv4 connection to the IPv4 socket, so it never reaches this site (the
     // cookbook report of 2026-10-09; without SO_REUSEPORT the server opens [::] IPv6-only there).
-    auto endpoint_of = [](const std::string& listen, asio::ip::address& addr, std::string& port) {  // stored unbracketed: ":::443"
-        const std::size_t colon = listen.rfind(':');
-        if (colon == std::string::npos) return false;
+    auto endpoint_of = [](const std::string& listen, asio::ip::address& addr, std::string& port) {  // stored "[::]:443"
+        std::string host;
+        if (!split_listen(listen, host, port)) return false;
         asio::error_code ec;
-        addr = asio::ip::make_address(listen.substr(0, colon), ec);
-        port = listen.substr(colon + 1);
+        addr = asio::ip::make_address(host, ec);
         return !ec;
     };
     std::set<std::string> ipv4_ports;  // the ports some site listens on with an IPv4 address

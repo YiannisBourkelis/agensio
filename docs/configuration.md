@@ -194,7 +194,11 @@ serves everything", say so with `server_name = ["*"]`, or add `default = true` t
 site. Monitors that check the IP address need the hostname, or a catch-all.
 
 **IPv4 and IPv6 on one port.** A listener on `[::]:P` takes both families while it is the
-only listener on port P. Next to a listener on an IPv4 address with the same port
+only listener on port P. An IPv6 address has one spelling everywhere, in brackets and as the IP
+stack prints it (`[::]:443`, `[2001:db8::1]:443`): the configuration, `-t --explain`, status, the
+error log and health show the same text, and `site_create` or `site_update` may write it either
+way (before 0.1.0-alpha.120 status and the error log printed `:::443`, and the dry run compared the
+two spellings and called a port the server held "not bound yet"). Next to a listener on an IPv4 address with the same port
 (`0.0.0.0:P`), IPv4 clients go to that listener's sites and `[::]:P` serves IPv6 only, as
 nginx's `ipv6only=on`; a site for both lists both addresses (`listen = ["0.0.0.0:443",
 "[::]:443"]`), and `-t` and health warn about a site on `[::]:P` alone next to IPv4 sites

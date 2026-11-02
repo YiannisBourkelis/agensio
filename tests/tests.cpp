@@ -1341,6 +1341,44 @@ static void test_cache() {
     }
 }
 
+// A listen address is stored in one canonical spelling (2026-11-03, the alpha.119 IPv6 report, items 3
+// and 4): host:port, an IPv6 host in brackets ("[::]:443"), so what status, the error log and the
+// managed spec show is one text, and the dry run's "bound already" compares the same spelling.
+static void test_listen_canonical() {
+    CHECK(normalise_listen("[::]:443") == "[::]:443" && normalise_listen("0.0.0.0:80") == "0.0.0.0:80" &&
+          normalise_listen("[::1]:8080") == "[::1]:8080" && normalise_listen("::1:8080") == "[::1]:8080" && normalise_listen("8080") == "0.0.0.0:8080" &&
+          normalise_listen("127.0.0.1:80") == "127.0.0.1:80" && normalise_listen("[2001:db8::1]:443") == "[2001:db8::1]:443");
+    CHECK(loopback_listen("[::1]:8080") && !loopback_listen("[::]:80") && !loopback_listen("[2001:db8::1]:80") && loopback_listen("::1:80"));
+    CHECK(display_listen("[::1]:18080") == "[::1]:18080" && display_listen("::1:18080") == "[::1]:18080");
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-listen-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    std::ofstream(dir / "l.toml") << "[[site]]\nserver_name = [\"*\"]\nlisten = [\"[::]:80\", \"127.0.0.1:18090\"]\nroot = \"www\"\n";
+    Config cfg = load_config(dir / "l.toml");
+    CHECK(cfg.sites[0].listen[0] == "[::]:80" && cfg.sites[0].listen[1] == "127.0.0.1:18090");
+    // The dry run of site_create: a privileged port the server holds already needs no restart, whatever
+    // spelling the caller used; one it does not hold does; an unprivileged one is bound by the reload.
+    control::SiteSpec spec;
+    spec.domain = "x.test";
+    spec.https = "none";
+    spec.app = "static";
+    spec.root = (dir / "www").string();
+    auto codes = [&](const control::SiteSpec& sp) {
+        std::string out;
+        for (const auto& p : control::preflight(sp, cfg, false)) out += p.code + " ";
+        return out;
+    };
+    spec.listen_plain = "[::]:80";
+    CHECK(codes(spec).find("needs_restart") == std::string::npos);
+    spec.listen_plain = "[::0]:80";
+    CHECK(codes(spec).find("needs_restart") == std::string::npos);  // another spelling of the same address
+    spec.listen_plain = "[::]:81";
+    CHECK(codes(spec).find("needs_restart") != std::string::npos);
+    spec.listen_plain = "0.0.0.0:18091";
+    CHECK(codes(spec).find("needs_restart") == std::string::npos);
+    fs::remove_all(dir);
+}
+
 // The file cache across a reload (carry_cache_scopes, config.hpp): a location serving the same
 // files the same way keeps its id (its entries are found again); a changed serving fact, a new or a
 // renamed site gets fresh ids; what a request checks on its own does not count.
@@ -4579,7 +4617,7 @@ static void test_acme() {
         const Config c = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"0.0.0.0:443\", \"[::]:443\", \"127.0.0.1:8443\"]\n" + root);
         const SiteConfig& s = c.sites[0];
         CHECK(s.http == SiteConfig::Http::redirect && s.http_redirect && !s.http_given && s.https_port == 443 &&
-              s.http_listen == std::vector<std::string>({"0.0.0.0:80", ":::80"}) && site_addresses(s).size() == 5);
+              s.http_listen == std::vector<std::string>({"0.0.0.0:80", "[::]:80"}) && site_addresses(s).size() == 5);
         std::ostringstream explained_out;
         explain_config(c, explained_out);
         const std::string explained = explained_out.str();
@@ -13836,6 +13874,7 @@ int main() {
     test_size();
     test_cache();
     test_cache_carry();
+    test_listen_canonical();
     test_hpack_encoder();
     test_compression_config();
     test_site_protocols();
