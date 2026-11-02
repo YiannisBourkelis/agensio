@@ -12,11 +12,13 @@
 #   - a reload keeps the cache, a changed password refuses the old one at once;
 #   - a request on the same worker answered while a slow verification runs;
 #   - a managed site's users through the control socket and MCP, without the helper (step 4b).
-# usage: tests/auth.sh build/agensio   (a build with authentication: libxcrypt and OpenSSL)
+# usage: tests/auth.sh build/agensio   (a build with authentication: libxcrypt and OpenSSL; unprivileged,
+#        in agensio-devbox:php for the PHP rows; as root the pool below runs as www-data, since php-fpm
+#        started by root refuses a pool without a user, and the PHP rows answered 502 on 2026-11-02)
 set -uo pipefail
 BIN=$(readlink -f "${1:-build/agensio}")
 ROOT=$(pwd)
-T=$ROOT/bench/tmp/authsuite; rm -rf "$T"; mkdir -p "$T/logs" "$T/sites.d" "$T/www/users.test"  # not bench/tmp/auth: the integration suite's users directory, which this root run would leave root's
+T=$ROOT/bench/tmp/authsuite; rm -rf "$T"; mkdir -p "$T/logs" "$T/sites.d" "$T/www/users.test"  # not bench/tmp/auth: the integration suite's users directory, which a run as another account would leave that account's
 pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
 code() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
@@ -63,8 +65,10 @@ printf '<?php header("Content-Type: text/plain"); foreach (["REMOTE_USER", "PHP_
 PHPFPM=$(command -v php-fpm8.4 || command -v php-fpm8.3 || command -v php-fpm || true); FPM=""
 if [ -n "$PHPFPM" ]; then
   printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ndaemonize = no\n[www]\nlisten = %s/fpm.sock\nlisten.mode = 0666\npm = static\npm.max_children = 2\n' "$T" "$T" "$T" > "$T/fpm.conf"
+  [ "$(id -u)" = 0 ] && printf 'user = www-data\ngroup = www-data\n' >> "$T/fpm.conf"   # root's php-fpm refuses a pool without one
   "$PHPFPM" -y "$T/fpm.conf" -F -p "$T" >/dev/null 2>&1 & FPM=$!
   for _ in $(seq 1 50); do [ -S "$T/fpm.sock" ] && break; sleep 0.1; done
+  check "php-fpm listens for the PHP site (else its rows would blame the server)" "yes" "$([ -S "$T/fpm.sock" ] && echo yes || cat "$T/fpm.log")"
 fi
 cat > "$T/agensio.toml" <<EOF
 include = ["sites.d/*.toml"]
