@@ -1019,7 +1019,16 @@ A preset never overrides what the site writes itself:
   locations the preset generates inherit them.
 - `php = { ... }`: every option in it reaches the preset's FastCGI location(s).
 - A `[[site.location]]` with the same `path` and `match` as a preset location replaces it
-  entirely. Other locations coexist under the normal precedence.
+  entirely. Other locations coexist under the normal precedence, with one rule since
+  0.1.0-alpha.120: a prefix location below a directory the preset shields (`no_php_under` in
+  `presets`: `wp-content/uploads/`, Grav's `user/`), whoever wrote it (the file, a root addition,
+  a managed site's `rules`), keeps the shield's refusals, its endings added to the location's own
+  `deny_suffixes` and its `serves_only` endings taken as `allow_suffixes` when the location names
+  none; and one below a directory the preset never answers (`never_served_directories`: Grav's
+  `logs/`, `cache/`) is refused at load. Before, the longest prefix won with only what it wrote: a
+  managed site's cache rule on Grav's `user/themes/` served the themes' `blueprints.yaml`,
+  `README.md` and twig templates with a week's public lifetime (the alpha.119 report). An exact
+  location naming one file stays the site's own decision.
 - A `[[site.location]]` that sets nothing but `path` (a prefix) and `add_headers` joins
   the location the preset, or the implicit `/`, makes at that path: its fields are added,
   a field of the same name replacing the preset's value, and everything else of the
@@ -1953,7 +1962,11 @@ agensio reload        # validates the file, then signals the running server
 
 No path is needed on an installed machine: the file is looked for in the working
 directory, then `/etc/agensio/agensio.toml` (and the brew locations on macOS), the same
-search every command uses; `-c` points elsewhere. The server writes its pid to
+search every command uses; `-c` points elsewhere. A file found there that the account cannot
+read is named with the cause (`cannot be read: Permission denied`, with the line to run it as
+root or as a member of the file's group, or to pass `-c`), exit 1; before 0.1.0-alpha.120 the
+lookup ended with SIGABRT, and `-c` on such a file said only that it could not be opened. The
+server writes its pid to
 `server.pid_file`, `/run/agensio.pid` by default (`""` disables it), which is how the
 command finds it; `kill -HUP $(cat /run/agensio.pid)` does the same without the
 validation step. What
@@ -2871,7 +2884,9 @@ the root is 404, never served as source (the preset's `.php` suffix location is 
 by a denying one). `cache` (PHP and static sites) names directories served straight from
 disk with `Cache-Control: public, max-age=N` (0 to a year), where nothing runs and no
 source backup is served (`deny_suffixes` = the PHP endings plus `.inc`, `.bak`, `~`,
-`.log`, `.sql`, `.sqlite`, `.sqlite3`, `.db`). `immutable: true` (0.1.0-alpha.101) adds
+`.log`, `.sql`, `.sqlite`, `.sqlite3`, `.db`; below a directory the preset shields, Grav's
+`user/` or `wp-content/uploads/`, the shield's own refusals stay too, and a directory the preset
+never answers, Grav's `logs/` or `cache/`, is refused: 0.1.0-alpha.120, section 4). `immutable: true` (0.1.0-alpha.101) adds
 `immutable` (RFC 8246): while the lifetime lasts a browser's reload asks nothing, which Firefox
 and Safari honour over HTTPS (Chrome no longer revalidates on a reload anyway). It is for a
 directory whose file names change with their content (a build's `app.3f9a1c.js`), since a file
@@ -4094,8 +4109,11 @@ response_compression = false
 
 With compression on, a site's answers go out compressed to a browser that takes it, whatever
 produced them: cached static files (copies made once, in memory, counted in `cache.max_size` with
-the file; a `.br` or `.gz` the site's build left beside a file is served as before and gets no
-copy), and PHP, proxied and CGI answers, compressed as they are sent, an application's error pages
+the file, on a thread of the server after the file's first request, so the first answers for a
+file after a start or a reload, which starts the cache over, go out as the file is and the copy
+serves from the request after it is made, some 60 ms per 100 KB later; a `.br` or `.gz` the
+site's build left beside a file is served as before and gets no copy), and PHP, proxied and CGI
+answers, compressed as they are sent, an application's error pages
 included. agensio's own error pages (404, 405, 413, 502...) are sent as they are: a few hundred
 bytes each, built once at start, with nothing for a coding to gain.
 The coding is the browser's choice among those the site offers (`Accept-Encoding`, with its

@@ -199,7 +199,16 @@ has no twin on disk gets its copies made by agensio:
 - **When:** at cache fill, on a background thread of the server (one, low priority, a bounded
   queue of entries), never on a worker: brotli 11 takes 60 ms per 100 KB. Until the copy is made
   the file is served as today; the worker finds the copy on its next hit through the entry's
-  pointer, which the fill thread sets last (a release store the hit path already reads).
+  pointer, which the fill thread sets last (a release store the hit path already reads). So the
+  first answers for a file after a start, or after a reload, which starts the cache over (every
+  location gets a new id and the entries keyed by the old ones are never found again), go out
+  uncompressed: the alpha.119 report measured Lighthouse right after a `site_update` on another
+  site of the host and saw every CSS and JS raw once, and asked for per-request compression
+  meanwhile. Declined 2026-11-02: it would put an encoder on a worker for every request of a
+  burst until the copy lands, the cost the design keeps off the request path; the administrator's
+  page says what happens. The open item is the cache surviving a reload for a location whose
+  serving facts did not change, which keeps the whole cache warm, copies included, and is worth
+  more than the copies alone.
 - **Which files:** memory entries only (files up to `cache.max_file_size`), of a compressible
   type, at least `min_size`, at most 8 MB; descriptor entries and larger files are served as
   today.

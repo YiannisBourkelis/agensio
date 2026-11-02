@@ -820,6 +820,9 @@ bool php_app(std::string_view app);
 // (control/sites.hpp) refuse below a cached directory.
 const std::vector<std::string>& php_suffixes();
 const std::vector<std::string>& source_backup_suffixes();
+// The directories a PHP preset never answers (Grav's logs/, cache/, backup/; empty for any other
+// app): a location or a rules.cache directory below one is refused (apply_preset, control's check_rules).
+std::vector<std::string> preset_never_dirs(std::string_view app);
 // What each `app` value does, for `agensio ctl presets` and the MCP tool: served root,
 // which .php runs, front controller, refused suffixes, shielded directories, files never served.
 json::Value preset_catalog();

@@ -72,6 +72,31 @@
   fails anyway. `docs/approvals.md` 1 is the whole list; security row 56. The test suites approve
   their gated commands with a fresh approver per approval (`tests/approve-lib.sh`,
   `tests/approve-code.py`), so a suite never waits for the next 30-second step.
+- **Fix: a cache rule inside a directory a preset shields kept only the PHP refusals.** Found by
+  the test VPS's check of alpha.119: `site_update` with `rules.cache` on Grav's `user/themes/` and
+  `user/plugins/` answered ok, and the rendered location, now the longest prefix, served the
+  themes' `blueprints.yaml`, `README.md`, `composer.json`, `build.sh` and twig templates with
+  `Cache-Control: public, max-age=604800`: 13 of the 14 files the preset's `user/` shield hides,
+  marked for shared caches to keep. The loader now holds the promise that a rule only narrows: a
+  prefix location below a directory the preset shields (`no_php_under` in `presets`), whoever wrote
+  it (the file, a root addition, the rules), keeps the shield's refusals (its endings added to the
+  location's `deny_suffixes`, its `serves_only` endings taken as `allow_suffixes` when the location
+  names none), and one below a directory the preset never answers (Grav's `logs/`, `cache/`) is
+  refused at load, `check_rules` refusing such a cache directory first (422). A location at the
+  shield's own path still replaces it, and an exact location naming one file is the site's
+  decision, as documented. `docs/configuration.md` 4 and 15, security row 35, the MCP text of
+  `rules.cache`.
+- **Fix: `agensio` without `-c` ended with SIGABRT when the default file could not be read.** On
+  a host whose `/etc/agensio` is `root:agensio 0750`, an account outside the group typing `agensio`
+  or `agensio -t` got a `std::filesystem` exception and exit 134 (the alpha.119 report). The lookup
+  names the file it cannot look at, and the loader says why: `cannot be read: Permission denied (run
+  as root or as a member of the file's group, or pass -c with a file you can read)`, exit 1, for the
+  default path and `-c` alike (`-c` said "File could not be opened for reading").
+- **Docs: the first answers for a static file are uncompressed.** `docs/configuration.md` 20 says
+  what `docs/design-compression.md` 5 decided: a cached file's copies are made on a thread after its
+  first request, so the first answers for each file after a start or a reload, which starts the
+  cache over, go out as the file is (the alpha.119 report measured Lighthouse right after a
+  `site_update`). Per-request compression meanwhile is declined there, with the reason.
 - **Fix: a broken chunked request body is answered 400 over HTTP/1.1, and three loose ends of
   alpha.119.** Found by the test VPS's check of alpha.119.
   - A chunked body whose framing is broken (a chunk size that is not hex) got its `400` in the

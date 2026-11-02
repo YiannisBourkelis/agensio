@@ -18,7 +18,9 @@
 #include "services/tasks.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <atomic>
 #include <map>
 #include <fstream>
@@ -1130,6 +1132,34 @@ void apply_preset(SiteConfig& site, const std::string& where) {
         loc.try_files = parse_try_files({"=404"});
         loc.handler = "deny";  // reported as such by -t --explain and site-show; the static handler answers the 404
         site.locations.push_back(std::move(loc));
+    }
+    // A prefix location the site wrote below a shield, whoever wrote it (the file, a root addition, a
+    // managed site's rules), keeps the shield's refusals: the shield's endings join its own, and the
+    // endings a shield serves alone become its own when it names none (2026-11-02, the alpha.119
+    // report: a cache rule on Grav's user/themes/, rendered final with the PHP endings and the backups,
+    // won as the longest prefix and served the themes' blueprints.yaml, README.md and twig templates
+    // with a week's public lifetime). One below a directory the preset never answers is refused: nothing
+    // there is meant to be served, cached or not. A location at the shield's own path replaces it, as
+    // documented, an exact location naming one file is the site's own decision, and another handler's
+    // location (fastcgi, proxy) or a denying one is left as written.
+    for (auto& loc : site.locations) {
+        if (loc.exact || loc.suffix || loc.kind != HandlerKind::static_ || loc.handler == "deny" || loc.origin.starts_with("preset:")) continue;
+        for (const char* dir : preset.never_dirs)
+            if (loc.path.size() > std::strlen(dir) && loc.path.starts_with(dir))
+                fail(where + ": the location " + loc.path + " lies below " + dir + ", which the " + site.app +
+                     " preset never answers (logs, caches, backups): nothing there is served; remove the location or the preset");
+        const Shield* owner = nullptr;
+        for (const Shield& sh : preset.shields)
+            if (loc.path.size() > std::strlen(sh.path) && loc.path.starts_with(sh.path) && (!owner || std::strlen(sh.path) > std::strlen(owner->path)))
+                owner = &sh;
+        if (!owner) continue;
+        auto add = [&](const std::string& e) {
+            if (std::find(loc.deny_suffixes.begin(), loc.deny_suffixes.end(), e) == loc.deny_suffixes.end()) loc.deny_suffixes.push_back(e);
+        };
+        for (const auto& e : shield_deny) add(e);
+        if (owner->extra)
+            for (const auto& e : *owner->extra) add(e);
+        if (owner->allow && loc.allow_suffixes.empty()) loc.allow_suffixes = *owner->allow;
     }
     // The same names in every backup spelling (wp-config.php.bak, wp-config.txt,
     // .wp-config.php.swp; 2026-09-20: served with the database password in them): every
@@ -2974,6 +3004,12 @@ AppContext app_context(const Config& cfg, const SiteConfig& site) {
 bool php_app(std::string_view app) { return php_preset(std::string(app)) != nullptr; }
 const std::vector<std::string>& php_suffixes() { return kPhpSuffixes; }
 const std::vector<std::string>& source_backup_suffixes() { return kSourceBackups; }
+std::vector<std::string> preset_never_dirs(std::string_view app) {
+    std::vector<std::string> out;
+    if (const PhpPreset* p = php_preset(std::string(app)))
+        for (const char* d : p->never_dirs) out.emplace_back(d);
+    return out;
+}
 
 std::string runtime_dir(const ControlConfig& control, std::string_view runtime) {
     if (runtime == "ruby") return control.runtimes.ruby;
@@ -4180,6 +4216,15 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
     cfg.config_path = fs::absolute(path, ec);
     fs::path base_dir = cfg.config_path.parent_path();
 
+    // Said with the cause (the alpha.119 report: a file in a directory the account may not enter got
+    // toml++'s "File could not be opened for reading" under -c, and the default lookup threw before).
+    if (std::FILE* f = std::fopen(path.string().c_str(), "r")) {
+        std::fclose(f);
+    } else {
+        const int err = errno;
+        fail(path.string() + ": cannot be read: " + std::strerror(err) +
+             (err == EACCES ? " (run as root or as a member of the file's group, or pass -c with a file you can read)" : ""));
+    }
     toml::table tbl;
     try {
         tbl = toml::parse_file(path.string());
@@ -4822,7 +4867,7 @@ json::Value preset_catalog() {
                       .set("php", "none").set("tasks", std::move(names)).set("never_served", std::move(never)));
     }
     return json::Value::object().set("presets", std::move(list))
-        .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. A hand-written [[site.location]] with the path of a preset's location replaces it, except one that sets only add_headers: that one adds its fields to the preset's location (a field of the same name replacing the preset's value). Every never_served name is refused in any backup spelling too, in its directory, whatever the case: name.bak, name~, name.txt, name-old, stem.bak (wp-config.bak), .name.swp, #name#; nothing to configure, and the bare stem (/readme, /license) stays a permalink.");
+        .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. A hand-written [[site.location]] with the path of a preset's location replaces it, except one that sets only add_headers: that one adds its fields to the preset's location (a field of the same name replacing the preset's value). A prefix location below a no_php_under directory keeps that shield's refusals and its serves_only endings, whoever wrote it; one below a never_served_directories entry is refused at load; an exact location naming one file is the site's own decision. Every never_served name is refused in any backup spelling too, in its directory, whatever the case: name.bak, name~, name.txt, name-old, stem.bak (wp-config.bak), .name.swp, #name#; nothing to configure, and the bare stem (/readme, /license) stays a permalink.");
 }
 
 std::vector<std::string> preset_secrets(const std::string& app) {

@@ -147,8 +147,14 @@ bool flag_value(int argc, char** argv, int& j, std::string& into, std::string_vi
 // `agensio`, `agensio -t` and `agensio reload` need no arguments on an installed machine.
 std::filesystem::path default_config() {
     for (const char* candidate : {"agensio.toml", "config/agensio.toml", "/etc/agensio/agensio.toml",
-                                  "/usr/local/etc/agensio/agensio.toml", "/opt/homebrew/etc/agensio/agensio.toml"})
-        if (std::filesystem::is_regular_file(candidate)) return candidate;
+                                  "/usr/local/etc/agensio/agensio.toml", "/opt/homebrew/etc/agensio/agensio.toml"}) {
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(candidate, ec)) return candidate;
+        // A file the account may not look at (/etc/agensio is root's and the group's, 0750): named, so
+        // the loader says why. The alpha.119 report: an administrator outside the group typed `agensio`
+        // and the filesystem_error of the throwing overload ended the process with SIGABRT.
+        if (ec == std::errc::permission_denied) return candidate;
+    }
     return "agensio.toml";
 }
 

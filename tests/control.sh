@@ -99,5 +99,16 @@ start
 check "a 1 MB body is refused with 413" "413" "$(head -c 1048576 /dev/zero | tr '\0' 'a' | curl -sS -o /dev/null -w '%{http_code}' --unix-socket "$T/run/control.sock" -X POST -H 'Content-Type: application/json' --data-binary @- http://control/v1/reload)"
 check "a site name with a slash never reaches a file" "404" "$(curl -sS -o /dev/null -w '%{http_code}' --unix-socket "$T/run/control.sock" -X POST -d '{"confirm":true}' 'http://control/v1/sites/..%2F..%2Fetc/disable')"
 stop
+# The default lookup with a file the account cannot read (/etc/agensio root's and the group's, 0750; the
+# alpha.119 report): a configuration error naming the cause and exit 1, not the filesystem_error that
+# ended the process with SIGABRT (exit 134). dave is in no group of the server's.
+if [ ! -e /etc/agensio ]; then
+  mkdir -m 0750 /etc/agensio && printf '[server]\n' > /etc/agensio/agensio.toml && chmod 640 /etc/agensio/agensio.toml
+  check "the default configuration path an account cannot read: exit 1 and the cause, not an abort; -c on the same file the same" "1 Permission denied 1 Permission denied" \
+    "$({ cd /tmp && su -s /bin/sh dave -c "'$BIN' -t" > "$T/unreadable.out" 2>&1; echo -n "$? "; grep -o 'Permission denied' "$T/unreadable.out" | head -1; su -s /bin/sh dave -c "'$BIN' -t -c /etc/agensio/agensio.toml" > "$T/unreadable2.out" 2>&1; echo -n "$? "; grep -o 'Permission denied' "$T/unreadable2.out" | head -1; } | tr '\n' ' ' | sed 's/ $//')"
+  rm -rf /etc/agensio
+else
+  echo "skip the unreadable default path check: /etc/agensio exists on this host"
+fi
 echo "control: $pass passed, $fail failed"
 [ $fail = 0 ]

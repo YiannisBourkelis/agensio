@@ -951,7 +951,13 @@ when serving.
   renderer turns them into locations the loader already knows (`handler = "deny"` is the
   one addition to the site-file grammar: a location that answers 404 whatever exists),
   each marked `# rules: ...`, so `--explain` shows what the file does and nothing moves at
-  request time: the router, the handlers and the hot path are unchanged (no A/B).
+  request time: the router, the handlers and the hot path are unchanged (no A/B). The loader
+  holds the promise where the renderer cannot see (2026-11-02, the alpha.119 report: a cache
+  rule on Grav's `user/themes/` won as the longest prefix and carried only the PHP endings and
+  the backups, so the themes' `blueprints.yaml`, `README.md` and twig templates went out with a
+  week's public lifetime): a prefix location below a preset's shield, whoever wrote it, keeps the
+  shield's refusals and its serves-only endings, and one below a directory the preset never
+  answers is refused at load, `check_rules` refusing such a cache directory first.
 - **Validated against the preset, twice.** `check_rules` runs on the request against the
   app as it stands after the request; `apply_request` runs it again on the kept rules at
   the end of every later change, so a site switched from `php` to `proxy` is refused until

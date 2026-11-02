@@ -185,6 +185,12 @@ root = "{root}/tests/grav"
 app = "grav"
 php = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}
 
+[[site.location]]   # a cache rule's rendering below the user/ shield (the alpha.119 report; the row by the shield checks)
+path = "/user/themes/"
+final = true
+deny_suffixes = [".php", ".bak"]
+add_headers = {{ "Cache-Control" = "public, max-age=604800" }}
+
 [[site]]
 server_name = ["gravmis.test"]
 default = true
@@ -2862,6 +2868,14 @@ print(len(deny), n404, readme[0]["handler"] if readme else "-")')"
   shield_check "grav user/" $G/user/pages/01.home tests/grav/user/pages/01.home
   shield_check "grav system/" $G/system/assets tests/grav/system/assets
   shield_check "grav root" $G tests/grav
+  # A location the site wrote below a shield (the fixture's /user/themes/, a cache rule's rendering) keeps the
+  # shield's refusals (the alpha.119 report: a cache on Grav's user/themes/ served blueprints.yaml, README.md and
+  # the twig templates with a week's public lifetime, since the longest prefix carried only the PHP endings).
+  THEMED="blueprints.yaml quark.yml README.md composer.json build.sh templates/default.html.twig"
+  mkdir -p tests/grav/user/themes/quark/templates; for f in $THEMED; do printf 'THEMESECRET' > "tests/grav/user/themes/quark/$f"; done
+  check "grav: a location below user/ (a cache rule's rendering) keeps the shield's refusals: yaml, yml, md, json, sh and twig 404, css served with its header, nothing leaked" "404 404 404 404 404 404 200 public, max-age=604800 0" \
+    "$(for f in $THEMED; do code $G/user/themes/quark/$f; echo -n ' '; done)$(curl -sS -D - -o /dev/null $G/user/themes/quark/css/theme.css | tr -d '\r' | sed -n 's/^HTTP\/1.1 \([0-9]*\).*/\1/p; s/^Cache-Control: //p' | tr '\n' ' ')$(for f in $THEMED; do curl -sS $G/user/themes/quark/$f; done | grep -c THEMESECRET)"
+  for f in $THEMED; do rm -f "tests/grav/user/themes/quark/$f"; done; rmdir tests/grav/user/themes/quark/templates
   backup_check "grav" $G/user/config tests/grav/user/config security.yaml
   check "grav: every location reported as deny answers 404, files, directories and their bare names; the presets catalogue lists the directories" "30 30 /logs/,/backup/,/cache/,/bin/,/tests/,/tmp/,/webserver-configs/,/user/config/,/user/env/" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/sites/grav.test | python3 -c '
 import json,sys,urllib.request

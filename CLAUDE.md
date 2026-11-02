@@ -400,7 +400,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   preset; `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any
   `.php` runs, `wp-content/uploads` and `wp-includes` are `final` prefix locations, nginx
   `^~`, with `deny_suffixes` so PHP there is 404 and never executed); hand-written
-  locations win over the preset's (one that sets only `add_headers` joins it instead); a
+  locations win over the preset's (one that sets only `add_headers` joins it instead; one below
+  a shielded directory keeps the shield's refusals and serves-only endings, whoever wrote it,
+  and one below a directory the preset never answers is refused at load, `check_rules` first for
+  a cache rule: alpha.120, the alpha.119 report's cache on Grav's `user/themes/`); a
   directory's index is a file the site would answer by name (`refused_request` in
   `handlers/static.hpp`, shared with `path_check`): another location's index is routed there, a
   refused one is passed over as if missing so `try_files` goes on to the front controller

@@ -1910,6 +1910,45 @@ static void test_presets() {
     CHECK(gimg.path == "/images/" && gimg.final && refuses(gimg, ".sh") && refuses(gimg, ".py") && refuses(gimg, ".php") && !refuses(gimg, ".jpg") &&
           gimg.try_files.size() == 2 && gimg.try_files[1].target == "/index.php" && Router::location(g, "/assets/x.py").path == "/assets/");
     CHECK(refuses(gsys, ".json") && refuses(gsys, ".htm") && refuses(guser, ".json") && refuses(gother, ".php2"));
+    // A location the site wrote below a shield (2026-11-02, the alpha.119 report: a managed site's cache
+    // rule on user/themes/, rendered final with the PHP endings and the backups, won as the longest
+    // prefix and served the themes' blueprints.yaml, README.md and twig templates with a week's public
+    // lifetime) keeps the shield's refusals: the shield's endings join its own, the endings a shield
+    // serves alone become its own when it names none; its headers and the site's try_files stay. A
+    // location at the shield's own path replaces it (documented); an exact one naming a file is the
+    // site's decision; one below a directory the preset never answers is refused.
+    write("grav2.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"grav\"\napp = \"grav\"\n"
+                        "php = { socket = \"unix:/run/php/fpm.sock\" }\n"
+                        "[[site.location]]\npath = \"/user/themes/\"\nfinal = true\ndeny_suffixes = [\".php\", \".bak\"]\n"
+                        "add_headers = { \"Cache-Control\" = \"public, max-age=604800\" }\n"
+                        "[[site.location]]\npath = \"/user/accounts/avatars/\"\nfinal = true\ndeny_suffixes = [\".php\"]\n"
+                        "[[site.location]]\npath = \"/user/data/media/\"\nfinal = true\nallow_suffixes = [\".pdf\"]\n"
+                        "[[site.location]]\npath = \"/logs/keep.txt\"\nmatch = \"exact\"\n");
+    const Config g2cfg = load_config(dir / "grav2.toml");
+    const SiteConfig& g2 = g2cfg.sites[0];
+    const LocationConfig& g2themes = Router::location(g2, "/user/themes/quark/blueprints.yaml");
+    CHECK(g2themes.path == "/user/themes/" && g2themes.origin.empty() && g2themes.final && refuses(g2themes, ".yaml") && refuses(g2themes, ".yml") &&
+          refuses(g2themes, ".md") && refuses(g2themes, ".twig") && refuses(g2themes, ".json") && refuses(g2themes, ".sh") && refuses(g2themes, ".py") &&
+          refuses(g2themes, ".php") && refuses(g2themes, ".phtml") && refuses(g2themes, ".bak") && refuses(g2themes, ".inc") && refuses(g2themes, ".log") &&
+          !refuses(g2themes, ".css") && !refuses(g2themes, ".jpg") && g2themes.allow_suffixes.empty() && g2themes.add_headers.size() == 1 &&
+          g2themes.add_headers[0].second == "public, max-age=604800" && g2themes.try_files.empty());  // as parsed: none written, the site's decided later
+    CHECK(Router::location(g2, "/user/themes/quark/css/theme.css").path == "/user/themes/" && !refuses(Router::location(g2, "/user/themes/x.css"), ".css"));
+    const LocationConfig& g2av = Router::location(g2, "/user/accounts/avatars/admin.png");
+    CHECK(g2av.path == "/user/accounts/avatars/" && allows(g2av, ".png") && !allows(g2av, ".yaml") && g2av.allow_suffixes == gacc.allow_suffixes &&
+          refuses(g2av, ".yaml") && refuses(g2av, ".php"));
+    const LocationConfig& g2media = Router::location(g2, "/user/data/media/x.pdf");
+    CHECK(g2media.allow_suffixes.size() == 1 && allows(g2media, ".pdf") && refuses(g2media, ".json") && refuses(g2media, ".php"));  // its own serves-only list kept
+    CHECK(Router::location(g2, "/logs/keep.txt").exact && Router::location(g2, "/logs/keep.txt").handler != "deny" && Router::location(g2, "/logs/x.log").handler == "deny");
+    CHECK(Router::location(g2, "/user/pages/01.home/default.md").path == "/user/" && refuses(Router::location(g2, "/user/pages/x"), ".md"));
+    write("grav3.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"grav\"\napp = \"grav\"\n"
+                        "php = { socket = \"unix:/run/php/fpm.sock\" }\n[[site.location]]\npath = \"/logs/archive/\"\n");
+    std::string refused_why;
+    try {
+        load_config(dir / "grav3.toml");
+    } catch (const std::exception& e) {
+        refused_why = e.what();
+    }
+    CHECK(refused_why.find("/logs/archive/") != std::string::npos && refused_why.find("never answers") != std::string::npos);
     // The drupal preset on the same files, the report's shape: the .zip is served, the .log is not.
     write("gravmis.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"grav\"\napp = \"drupal\"\n"
                           "php = { socket = \"unix:/run/php/fpm.sock\" }\n");
@@ -5401,6 +5440,17 @@ static void test_control_sites() {
                                     R"({"private":["/static/"],"cache":[{"path":"/static/js/","max_age":1}]})"})
                 if (rules(bad).empty()) std::printf("rules accepted %s\n", bad);
             CHECK(!rules(R"({"private":["/"]})").empty() && !rules(R"({"entry_points":["/x.php"],"front_controller":"/index.php"})").empty());
+            // A cached directory below one a preset never answers (Grav's logs/, cache/) is refused here,
+            // before the loader would (2026-11-02); one below a shield is taken, the loader keeping the
+            // shield's refusals on it (test_presets).
+            {
+                SiteSpec gv = ok;
+                gv.app = "grav";
+                gv.php_socket = "unix:/run/php/fpm.sock";
+                const std::string under = rules(R"({"cache":[{"path":"/cache/assets/","max_age":60}]})", &gv);
+                CHECK(under.find("/cache/assets/") != npos && under.find("never answers") != npos && !rules(R"({"cache":[{"path":"/logs/","max_age":60}]})", &gv).empty() &&
+                      rules(R"({"cache":[{"path":"/user/themes/","max_age":604800}]})", &gv).empty() && rules(R"({"cache":[{"path":"/cache/","max_age":60}]})", &kb).empty());
+            }
             // immutable (RFC 8246, the review's D8): kept and rendered; meaningless without a lifetime,
             // since it holds only while the answer is fresh (2); an unknown field refused (it was dropped,
             // so the agent was told of a lifetime the file did not carry).

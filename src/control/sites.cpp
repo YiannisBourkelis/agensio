@@ -597,6 +597,14 @@ std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Va
                        "revalidates as before";
             for (const auto& pr : priv)
                 if (p == pr || (pr.back() == '/' && p.starts_with(pr))) return "rules: the cached directory " + p + " lies under the private path " + pr;
+            // Below a directory the preset never answers (Grav's logs/, cache/, backup/) nothing is served,
+            // cached or not: refused here with the reason, where the loader would refuse the rendered
+            // location (2026-11-02). Below a shield (Grav's user/, wp-content/uploads/) the directory is
+            // taken: the loader keeps the shield's refusals on it.
+            for (const std::string& d : preset_never_dirs(spec.app))
+                if (p == d || p.starts_with(d))
+                    return "rules.cache: the directory " + p + " lies under " + d + ", which the " + spec.app +
+                           " preset never answers (logs, caches, backups): nothing there is served, so nothing there is cached";
             json::Value entry = json::Value::object().set("path", p).set("max_age", age.num());
             if (immutable) entry.set("immutable", true);
             cache.push(std::move(entry));
