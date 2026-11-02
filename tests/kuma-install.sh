@@ -52,7 +52,8 @@ CFG
 "$BIN" -c $T/agensio.toml >> $T/server.out 2>&1 &
 for _ in $(seq 1 50); do [ -S $T/run/control.sock ] && break; sleep 0.1; done; sleep 0.2
 CS=$T/run/control.sock
-ctl() { "$BIN" ctl "$@" --socket $CS; }
+source "$(dirname "$0")/approve-lib.sh"; gated_setup "$BIN" $T/agensio.toml $CS
+ctl() { gated "$BIN" ctl "$@" --socket $CS; }
 j() { python3 -c "import json,sys; d=json.load(open('$T/out')); print($1)"; }
 APP=$T/www/kuma.test/app
 task() {  # task NAME [--param k=v]: runs it, prints ok exit seconds, keeps the answer in $T/out

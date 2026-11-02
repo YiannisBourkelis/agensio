@@ -20,10 +20,18 @@ after it was queued.
 | `site_task` `pip_install` (`agensio ctl site-task NAME pip_install --param packages=...`): installs Python packages the caller names into a site's virtualenv, so their code runs as the site's account | 0.1.0-alpha.120 |
 | every change to a site's files: `site_file_write`, `site_file_edit`, `site_dir_create`, `site_path_move`, `site_path_delete`, `site_file_restore` (`agensio ctl site-file-write`, ...); what waits shows the diff and what the site does with the path (served as a file, or RUNS as a script) | 0.1.0-alpha.120 |
 | reading a credential or database file of a site (`site_file_read` of `.env`, `wp-config.php`, `*.key`, `*.pem`, `.git/`, a SQLite file): its content would leave the server for whoever asked; once approved, it is handed out once (`approvals_list` with the id) | 0.1.0-alpha.120 |
+| `site_install` from any source, and `site_copy`: files the site then serves or runs; the preview names the source, the target and what the install creates | 0.1.0-alpha.120 |
+| the site's environment: `site_env_set` (the preview names the variables, never a value) and `site_env` with `reveal` (the values are handed out once, by id) | 0.1.0-alpha.120 |
+| a `site_update` that makes other files run (`app`, `root`, `served_dir`, `rules.entry_points`, `rules.front_controller`), sends visitors elsewhere (`upstream`, a redirect to a host that is none of the site's names) or removes or widens a password or address rule (a rule gone, an allow list or `skip_for` grown, `open`, report mode, the password over plain HTTP); the preview is the managed file's diff. A `site_create` whose root already holds PHP files, whose upstream is off this host, or with a redirect to another host | 0.1.0-alpha.120 |
+| `site_auth_user_set`: who may log in; a generated password is handed out once, by id | 0.1.0-alpha.120 |
+| `trash_delete`, `trash_expire`: nothing brings the files back | 0.1.0-alpha.120 |
 
-Application installs, `site_copy`, a site environment's secrets, the `site_update` changes that make
-files run or send visitors elsewhere, password users and the trash's deletions join this list in the
-next release (`docs/design-site-operations.md` 27.2 lists them all). Everything else is made at once, as before, with
+That is the whole list of `docs/design-site-operations.md` 27.2. Everything else is made at once with
+the caller's `confirm`: HSTS, response headers, compression, `canonical`, redirects within the site,
+`login_paths`, MIME types, limits, a protection added or narrowed, disable and enable, reload,
+`cert-renew`, `site_delete` (to the trash), the other site tasks, and a new site into an empty
+directory. None of it runs code, moves a secret or data off the host, grants access, or destroys
+beyond undo. Everything else is made at once, as before, with
 the caller's `confirm`: none of it runs code, moves a secret off the host, grants access, or destroys
 beyond undo.
 

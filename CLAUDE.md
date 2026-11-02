@@ -665,7 +665,13 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   at a terminal asks at once; MCP `approvals_list`, `approvals_ask` (elicitation); no tool takes a
   code. Health `approvals_not_set_up`, `approver_file_unsafe`, `approvals_without_helper`,
   `approval_code_failures`, `approvals_forgeable`. Step 1 gates `pip_install` (security rows 32,
-  50 to 52); step 2 the site's files; the rest of design 27.2 follows.
+  50 to 52); step 2 the site's files; step 3 (2026-11-02, row 56) the rest of design 27.2: installs,
+  copies, the environment (a reveal's values handed out once by id), password users (a generated
+  password once by id), the trash's deletes, and a `site_update` judged against the managed spec
+  (`ApprovalContext`: `app`/`root`/`served_dir`/entry points/front controller changed, `upstream`
+  changed, a redirect to a host not the site's, a protection removed or widened) or a `site_create`
+  whose root runs files, whose upstream is off the host or with a redirect elsewhere; the suites
+  approve through `tests/approve-lib.sh` (`gated`, `cpost`) and `tests/approve-code.py`.
 - **The site's files** (F12, alpha.120, `services/files.*`, `services/history.*`, design section 3
   and 27.6, `docs/configuration.md` 15): `site_files_list`, `site_file_read`, `site_file_write`,
   `site_file_edit`, `site_dir_create`, `site_path_move`, `site_path_delete`, `site_file_history`,

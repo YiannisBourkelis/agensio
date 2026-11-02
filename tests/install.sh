@@ -53,7 +53,8 @@ start() { "$BIN" -c $T/agensio.toml >> $T/server.out 2>&1 & for _ in $(seq 1 50)
 stop() { kill "$(cat $T/agensio.pid)" 2>/dev/null; sleep 0.3; }
 start
 CS=$T/run/control.sock
-ctl() { "$BIN" ctl "$@" --socket $CS; }
+source "$(dirname "$0")/approve-lib.sh"; gated_setup "$BIN" $T/agensio.toml $CS
+ctl() { gated "$BIN" ctl "$@" --socket $CS; }
 check "the uploads directory belongs to the server, 0700, under the state directory" "agensio 700" "$(stat -c '%U %a' $T/state/uploads)"
 
 # A site with its own account, made by the helper; then its files, written as that account.

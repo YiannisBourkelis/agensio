@@ -68,7 +68,7 @@ class Server:
         return int(out[1]), (json.loads(out[0]) if out[0].strip() else {})
 
     def approve(self, *ids):
-        out = subprocess.run([sys.executable, str(HERE / "approve-code.py"), self.sock, self.approver, *ids], capture_output=True, text=True).stdout
+        out = subprocess.run([sys.executable, str(HERE / "approve-code.py"), "--raw", self.sock, str(self.root / "agensio.toml"), self.binary, *ids], capture_output=True, text=True).stdout
         return json.loads(out) if out.strip() else {}
 
     def page(self, host, path):

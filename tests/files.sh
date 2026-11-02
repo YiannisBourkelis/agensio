@@ -46,7 +46,7 @@ CS=$T/run/control.sock
 ctl() { "$BIN" ctl "$@" --socket $CS < /dev/null; }
 j() { python3 -c "import json,sys; d=json.load(open('$T/out')); print($1)"; }
 "$BIN" approver-add suite -c $T/agensio.toml > /dev/null
-approve() { python3 "$HERE/approve-code.py" $CS $T/approvers/suite.totp "$@"; }
+approve() { python3 "$HERE/approve-code.py" --raw $CS $T/agensio.toml "$BIN" "$@"; }
 api() { curl -sS -o $T/out -w '%{http_code}' --unix-socket $CS -X "$1" -H 'Content-Type: application/json' -d "$3" "http://control$2"; }
 A=$T/www/a.test/web; B=$T/www/b.test/web; H=$T/www/.history
 

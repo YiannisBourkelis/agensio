@@ -234,10 +234,18 @@ int approve_with_code(const std::string& socket, const std::vector<std::string>&
     bool all_done = true;
     std::cout << "approved by " << v.get("approved_by") << "\n";
     for (const auto& r : v["results"].items()) {
-        const std::string state(r.get("state"));
+        const std::string state(r.get("state")), rid(r.get("id"));
         all_done = all_done && state == "done";
-        std::cout << "[" << r.get("id") << "] " << state << " (" << static_cast<int>(r["status"].num()) << "): "
-                  << agensio::control::escape_for_terminal(r["result"].dump()) << "\n";
+        agensio::json::Value shown = r["result"];
+        // A secret (a revealed value, a generated password, a credential file) is handed out once, by
+        // id: this is the person's own terminal, so it is fetched and shown here.
+        if (shown.is_object() && std::string(shown.get("note")).find("handed out once") != std::string::npos) {
+            agensio::ControlReply one;
+            agensio::json::Value o;
+            if (agensio::control_request(socket, "GET", "/v1/approvals/" + rid, "", one, error) && one.status == 200 && agensio::json::parse(one.body, o, perr)) shown = o["result"];
+        }
+        std::cout << "[" << rid << "] " << state << " (" << static_cast<int>(r["status"].num()) << "): "
+                  << agensio::control::escape_for_terminal(shown.dump()) << "\n";
     }
     return all_done ? 0 : 1;
 }

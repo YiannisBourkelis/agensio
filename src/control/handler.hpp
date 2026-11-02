@@ -173,7 +173,8 @@ private:
     void site_install(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void site_copy(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void site_task(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
-    void site_env_show(Stream& s, std::string_view name, std::function<void()> done);
+    // `reveal_given`: the names to reveal, from an approved change (else the GET's ?reveal=).
+    void site_env_show(Stream& s, std::string_view name, std::function<void()> done, const json::Value* reveal_given = nullptr);
     // A Rails site's application service: its unit's state (viewer) or its journal (admin,
     // audited), through the helper's app_status / app_logs.
     void site_service(Stream& s, std::string_view name, bool logs, std::function<void()> done);
@@ -218,6 +219,9 @@ private:
     bool queue_for_approval(Stream& s, WorkerState& ws, std::string_view path, std::string_view action, const json::Value& body, std::string_view reason,
                             std::vector<std::string> why, std::function<void()>& done);
     std::string approval_preview(std::string_view path, const json::Value& body);
+    // The preview of a change whose dry run passed: the install's or copy's answer, a site file's diff
+    // (update, create), a task's argv; `reasons` gains the path's verdict for a file.
+    std::string checked_preview(std::string_view path, std::string_view action, const json::Value& body, const json::Value& checked, std::vector<std::string>& reasons);
     // The site's files (F12, docs/design-site-operations.md 3, 27.6): GET /v1/sites/NAME/files (list, or
     // read with read=1), GET /v1/sites/NAME/history?path=, POST /v1/sites/NAME/file {op, ...}; every
     // change and a secret's read wait for approval (the gate). `args` is the body, or the GET's query.

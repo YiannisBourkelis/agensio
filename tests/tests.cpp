@@ -8048,6 +8048,94 @@ static void test_pending_changes() {
     CHECK(control::approval_reasons("/v1/sites/dj.test/task", "task", body).size() == 1);  // the handler runs it and says it would wait
     CHECK(json::parse(R"J({"task": "venv_create"})J", body, err));
     CHECK(control::approval_reasons("/v1/sites/dj.test/task", "task", body).empty());
+    // Step 3 of design 27.7: the rest of 27.2, judged against the site as it is (ApprovalContext).
+    const auto reasons = [&](const char* path, const char* action, const char* text, const control::ApprovalContext& ctx = {}) {
+        json::Value b;
+        std::string e;
+        CHECK(json::parse(text, b, e));
+        std::string all;
+        for (const auto& r : control::approval_reasons(path, action, b, ctx)) all += r + " | ";
+        return all;
+    };
+    CHECK(reasons("/v1/sites/a.test/install", "install", R"({"url":"https://x.example/a.tgz"})").find("installs an application's files") != std::string::npos);
+    CHECK(reasons("/v1/sites/a.test/install", "install", R"({"file":"a.tgz","path":"wp-content/plugins/x"})").find("under wp-content/plugins/x from the upload a.tgz") != std::string::npos);
+    CHECK(reasons("/v1/sites/a.test/copy", "copy", R"({"from":"a","to":"b"})").find("copies a to b") != std::string::npos);
+    CHECK(reasons("/v1/sites/a.test/env", "env", R"({"set":{"DATABASE_URL":"x"},"generate":["KEY"]})").find("environment (DATABASE_URL, KEY)") != std::string::npos);
+    CHECK(reasons("/v1/sites/a.test/env", "env", R"({"reveal":["A","B"]})").find("reveals the values of A, B") != std::string::npos);
+    CHECK(reasons("/v1/sites/a.test/auth-users", "auth-users", R"({"user":"anna","generate":true})").find("password user anna") != std::string::npos);
+    CHECK(reasons("/v1/sites/a.test/auth-users/delete", "auth-users/delete", R"({"user":"anna"})").empty());
+    CHECK(reasons("/v1/trash/a.test-20261101-120000/delete", "", "{}").find("removes the trash entry a.test-20261101-120000 for good") != std::string::npos);
+    CHECK(reasons("/v1/trash/expire", "", "{}").find("every expired trash entry") != std::string::npos);
+    CHECK(reasons("/v1/trash/a.test-20261101-120000/restore", "", "{}").empty());
+    // site_update against the managed spec: what runs, where visitors go, what opens.
+    control::SiteSpec cur;
+    cur.domain = "a.test";
+    cur.aliases = {"www.a.test"};
+    cur.app = "static";
+    cur.root = "/srv/www/a.test/web";
+    cur.upstream = "http://127.0.0.1:3000";
+    CHECK(json::parse(R"J({"restricted": [{"path": "/admin/", "allow": ["10.0.0.1"]}], "admin": {"allow": ["10.0.0.1"], "login": true},
+        "auth": [{"path": "/private/", "skip_for": ["10.0.0.1"]}]})J", cur.rules, err));
+    CHECK(json::parse(R"J([{"from": "/old", "to": "https://b.example/x", "status": 301}])J", cur.redirects, err));
+    control::ApprovalContext ctx;
+    ctx.current = &cur;
+    ctx.site_names = {"a.test", "www.a.test"};
+    CHECK(reasons("/v1/sites/a.test", "", R"({"hsts":"1y","response_headers":[]})", ctx).empty());
+    CHECK(reasons("/v1/sites/a.test", "", R"({"app":"static"})", ctx).empty());
+    CHECK(reasons("/v1/sites/a.test", "", R"({"app":"php"})", ctx).find("app static becomes php") != std::string::npos);
+    CHECK(reasons("/v1/sites/a.test", "", R"({"root":"/srv/www/a.test/other"})", ctx).find("another directory") != std::string::npos);
+    CHECK(reasons("/v1/sites/a.test", "", R"({"served_dir":"public"})", ctx).find("another directory of the project") != std::string::npos);
+    CHECK(reasons("/v1/sites/a.test", "", R"({"upstream":"http://127.0.0.1:3000"})", ctx).empty());
+    CHECK(reasons("/v1/sites/a.test", "", R"({"upstream":"http://127.0.0.1:3001"})", ctx).find("another application: http://127.0.0.1:3001 | ") != std::string::npos);
+    CHECK(reasons("/v1/sites/a.test", "", R"({"upstream":"http://10.0.0.9:3000"})", ctx).find(", off this host") != std::string::npos);
+    CHECK(reasons("/v1/sites/a.test", "", R"({"redirects":[{"from":"/old","to":"https://b.example/x","status":301}]})", ctx).empty());  // as it is
+    CHECK(reasons("/v1/sites/a.test", "", R"({"redirects":[{"from":"/new","to":"https://www.a.test/x","status":301},{"from":"/p","to":"/q","status":301}]})", ctx).empty());
+    CHECK(reasons("/v1/sites/a.test", "", R"({"redirects":[{"from":"/new","to":"https://evil.example/x","status":302}]})", ctx).find("redirects /new to another host: https://evil.example/x") != std::string::npos);
+    // The protections: narrowing or adding is free, removing or widening waits.
+    CHECK(reasons("/v1/sites/a.test", "", R"({"rules":{"restricted":[{"path":"/admin/","allow":["10.0.0.1"]}],"admin":{"allow":["10.0.0.1"],"login":true},"auth":[{"path":"/private/","skip_for":["10.0.0.1"]}]}})", ctx).empty());
+    CHECK(reasons("/v1/sites/a.test", "", R"({"rules":{"restricted":[{"path":"/admin/","allow":["10.0.0.1"]},{"path":"/x/","allow":["10.0.0.2"]}],"admin":{"allow":["10.0.0.1"],"login":true},"auth":[{"path":"/private/","skip_for":["10.0.0.1"]},{"path":"/more/"}]}})", ctx).empty());
+    const std::string widened = reasons("/v1/sites/a.test", "", R"({"rules":{"restricted":[{"path":"/admin/","allow":["10.0.0.1","10.0.0.2"],"mode":"report"}],"admin":{"allow":["10.0.0.1"]},"auth":[{"path":"/private/","skip_for":["10.0.0.1","10.0.0.3"],"plain_http":"allow"},{"path":"/private/open/","open":true}]}})", ctx);
+    CHECK(widened.find("widens the address rule on /admin/ to 10.0.0.2") != std::string::npos && widened.find("report mode") != std::string::npos &&
+          widened.find("opens the login page") != std::string::npos && widened.find("lets 10.0.0.3 in without a password on /private/") != std::string::npos &&
+          widened.find("over plain HTTP") != std::string::npos && widened.find("opens /private/open/ inside") != std::string::npos);
+    const std::string removed = reasons("/v1/sites/a.test", "", R"({"rules":{}})", ctx);
+    CHECK(removed.find("removes the address rule on /admin/") != std::string::npos && removed.find("removes the admin rule") != std::string::npos &&
+          removed.find("removes the password on /private/") != std::string::npos);
+    CHECK(reasons("/v1/sites/a.test", "", R"({"rules":{"restricted":[{"path":"/admin/","allow":["10.0.0.1"]}],"admin":{"allow":["10.0.0.1"],"login":true},"auth":[{"path":"/private/","skip_for":["10.0.0.1"],"open":true}]}})", ctx).find("opens /private/") != std::string::npos);
+    CHECK(reasons("/v1/sites/a.test", "", R"({"rules":{"entry_points":["/index.php"],"front_controller":"/index.php"}})", ctx).find("which PHP files of the site run") != std::string::npos);
+    // As the gate compares: the spec holds the rules as check_rules stored them ("/admin", no slash),
+    // the body says "/admin/"; the raw body against the stored spec would read as a rule removed, the
+    // body normalised the same way (ApprovalContext::rules_after) is the same list, or one address more.
+    control::SiteSpec stored = cur;
+    json::Value given, norm, same_after, wider_after;
+    CHECK(json::parse(R"J({"restricted": [{"path": "/admin/", "allow": ["10.0.0.1"]}]})J", given, err) && control::check_rules(given, stored, norm).empty());
+    CHECK(norm["restricted"].items()[0].get("path") == "/admin");
+    stored.rules = norm;
+    control::ApprovalContext sctx = ctx;
+    sctx.current = &stored;
+    const std::string same = R"({"rules":{"restricted":[{"path":"/admin/","allow":["10.0.0.1"]}]}})", wider = R"({"rules":{"restricted":[{"path":"/admin/","allow":["10.0.0.1","10.0.0.2"]}]}})";
+    CHECK(reasons("/v1/sites/a.test", "", same.c_str(), sctx).find("removes the address rule on /admin") != std::string::npos);  // raw: the false alarm
+    json::Value same_body, wider_body;
+    CHECK(json::parse(same, same_body, err) && control::check_rules(same_body["rules"], stored, same_after).empty());
+    CHECK(json::parse(wider, wider_body, err) && control::check_rules(wider_body["rules"], stored, wider_after).empty());
+    sctx.rules_after = &same_after;
+    CHECK(reasons("/v1/sites/a.test", "", same.c_str(), sctx).empty());
+    sctx.rules_after = &wider_after;
+    CHECK(reasons("/v1/sites/a.test", "", wider.c_str(), sctx) == "widens the address rule on /admin to 10.0.0.2 | ");
+    // site_create: free, unless the root already runs files, the upstream is off the host or a redirect leaves.
+    control::ApprovalContext cctx;
+    cctx.site_names = {"n.test"};
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"php","root":"/srv/www/n.test/web"})", cctx).empty());
+    cctx.root_runs_files = true;
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"php","root":"/srv/www/n.test/web"})", cctx).find("already holds PHP files") != std::string::npos);
+    cctx.root_runs_files = false;
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"proxy","upstream":"http://127.0.0.1:8080"})", cctx).empty());
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"proxy","upstream":"unix:/run/app.sock"})", cctx).empty());
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"proxy","upstream":"http://203.0.113.5:8080"})", cctx).find("off this host") != std::string::npos);
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"static","redirects":[{"from":"/","to":"https://n.test/x","status":301}]})", cctx).empty());
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"static","redirects":[{"from":"/","to":"https://other.example/","status":301}]})", cctx).find("another host") != std::string::npos);
+    CHECK(control::url_host("https://User:pw@Example.COM:8443/p?q") == "example.com" && control::url_host("http://[::1]:3000/") == "::1" && control::url_host("unix:/x").empty());
+    CHECK(control::upstream_off_host("http://localhost:3000") == false && control::upstream_off_host("http://[::1]:3000") == false && control::upstream_off_host("https://app.example:443"));
 }
 
 // Response compression on managed sites (docs/design-compression.md 9, alpha.119; the test VPS could

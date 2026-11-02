@@ -1838,7 +1838,14 @@ the reasons approval would be needed, and stores nothing.
    by hard link and rename (a delete of any size, no copy). A read's content is handed out once, by
    `GET /v1/approvals/ID` only, so a person listing what waits does not take it from the agent.
 3. The rest of 27.2: `site_install`, `site_copy`, secret reads, `site_env` reveal and set, the
-   `site_update` and `site_create` changes, `site_auth_user_set`, the trash deletes.
+   `site_update` and `site_create` changes, `site_auth_user_set`, the trash deletes. Built 2026-11-02
+   (alpha.120): the gate judges a `site_update` against the managed spec (`ApprovalContext`), so only
+   a change that makes other files run, sends visitors elsewhere or removes or widens a protection
+   waits, and a `site_create` only when its root already runs files, its upstream is off the host or
+   a redirect leaves; install, copy, update and create are dry-run first and previewed from it (the
+   managed file's diff); a revealed value and a generated password are handed out once, by id. The
+   suites approve their gated commands through `tests/approve-lib.sh` with a fresh approver per
+   approval (`tests/approve-code.py`), so no suite waits for the next 30-second step.
 
 ### 27.8 Decisions (2026-11-01, the owner)
 

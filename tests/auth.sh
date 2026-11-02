@@ -16,7 +16,7 @@
 set -uo pipefail
 BIN=$(readlink -f "${1:-build/agensio}")
 ROOT=$(pwd)
-T=$ROOT/bench/tmp/auth; rm -rf "$T"; mkdir -p "$T/logs" "$T/sites.d" "$T/www/users.test"
+T=$ROOT/bench/tmp/authsuite; rm -rf "$T"; mkdir -p "$T/logs" "$T/sites.d" "$T/www/users.test"  # not bench/tmp/auth: the integration suite's users directory, which this root run would leave root's
 pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
 code() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
@@ -308,9 +308,10 @@ check "a changed password: the old one refused at once, the new one served" "401
 # this side, so only a hash crosses the socket; the listing never shows a hash; MCP generates and
 # never relays a hash or a password.
 CS="$T/control.sock"
-ctl() { "$BIN" ctl "$@" --socket "$CS"; }
+source "$(dirname "$0")/approve-lib.sh"; GATED_REPLY="$T/out"; gated_setup "$BIN" "$T/agensio.toml" "$CS"
+ctl() { gated "$BIN" ctl "$@" --socket "$CS"; }
 jv() { python3 -c "import json; d=json.load(open('$T/out')); print($1)"; }
-cpost() { curl -sS -o "$T/out" -w '%{http_code}' --unix-socket "$CS" -X POST -d "$2" "http://control$1"; }
+# cpost: tests/approve-lib.sh's, the body in $T/out
 ctl site-create --domain users.test --app static --no-user --https none --root "$T/www/users.test" --listen-plain 127.0.0.1:18132 --yes --reason auth > "$T/out"
 check "a managed static site to hold the users" "True" "$(jv 'd.get("ok")')"
 ctl site-auth-user-set users.test anna --generate --expires 2099-01-01 --note 'Anna, Acme' --yes --reason staging > "$T/out"; PW=$(jv 'd.get("password", "")')
@@ -355,7 +356,7 @@ check "deleting a user: refused at once; the last user of a file a rule uses sta
   "$(jv 'd.get("action")') $(code -u bob:typed-pass $U/private/doc.html) $(python3 -c "import json; d=json.load(open('$T/out.last')); print(d.get('ok'), 'yes' if 'the last user' in d.get('error', '') else d)") $(code -u "anna:$PW2" $U/private/doc.html)"
 # MCP: the three tools (admin), a generated password answered, a hash from the agent refused (it
 # was dropped before 0.1.0-alpha.99, whose bridge refuses an argument the schema does not list).
-python3 - "$BIN" "$CS" > "$T/mcp.out" <<'PYT'
+python3 - "$BIN" "$CS" "$T/agensio.toml" "$(dirname "$0")" > "$T/mcp.out" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 def rpc(i, method, params=None):
@@ -365,8 +366,11 @@ tools = {t["name"]: t for t in rpc(1, "tools/list")["tools"]}
 out = [str(tools["site_auth_users"]["annotations"]["readOnlyHint"]), str(tools["site_auth_user_delete"]["annotations"]["destructiveHint"]),
        "hash" if "hash" in tools["site_auth_user_set"]["inputSchema"]["properties"] else "nohash"]
 r = rpc(2, "tools/call", {"name": "site_auth_user_set", "arguments": {"name": "users.test", "user": "carol", "generate": True, "confirm": True, "reason": "mcp"}})
-pw = r["structuredContent"].get("password", "")
-out.append("pw" if len(pw) == 19 else repr(r))
+# The change waits for a person's code (docs/approvals.md); approved, the generated password is handed out once, by id.
+pending = r["structuredContent"].get("pending") and r["structuredContent"].get("password") is None
+ap = json.loads(subprocess.run([sys.executable, sys.argv[4] + "/approve-code.py", sys.argv[2], sys.argv[3], sys.argv[1], r["structuredContent"].get("id", "")], capture_output=True, text=True).stdout)
+pw = ap.get("results", [{}])[0].get("result", {}).get("password", "")
+out.append("pw" if pending and len(pw) == 19 else repr(r) + repr(ap))
 h = open(sys.argv[2].replace("control.sock", "auth/users.test.users")).read().split("anna:")[1].split(":")[0].split("\n")[0]
 r = rpc(3, "tools/call", {"name": "site_auth_user_set", "arguments": {"name": "users.test", "user": "dave", "hash": h, "confirm": True, "reason": "mcp"}})
 out.append("refused" if r["isError"] and "never through the agent" in r["content"][-1]["text"] else repr(r))
@@ -375,7 +379,7 @@ out.append(",".join(u["name"] for u in r["structuredContent"]["users"]))
 p.stdin.close(); p.wait()
 print(" ".join(out))
 PYT
-check "mcp: site_auth_users read-only, site_auth_user_delete destructive, no hash argument; a generated password answered; a hash the agent sends is refused, no user made" \
+check "mcp: site_auth_users read-only, site_auth_user_delete destructive, no hash argument; a generated password waits for the code and is handed out once by id; a hash the agent sends is refused, no user made" \
   "True True nohash pw refused anna,carol" "$(cat "$T/mcp.out")"
 # rules.auth on a managed site (2026-10-09, step 4c): refused until the site has a user and on a new
 # site; then the site asks where the rule says, an open rule frees one file, site_show and path_check

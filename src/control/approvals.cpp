@@ -1,6 +1,7 @@
 #include "control/approvals.hpp"
 
 #include <algorithm>
+#include <cctype>
 
 #include "services/tasks.hpp"
 
@@ -264,9 +265,114 @@ std::string unified_diff(std::string_view before, std::string_view after, std::s
     return out;
 }
 
-std::vector<std::string> approval_reasons(std::string_view path, std::string_view action, const json::Value& body, bool secret_read) {
+std::string url_host(std::string_view url) {
+    const std::size_t scheme = url.find("://");
+    if (scheme == std::string_view::npos) return "";
+    std::string_view rest = url.substr(scheme + 3);
+    const std::size_t end = rest.find_first_of("/?#");
+    std::string_view hp = end == std::string_view::npos ? rest : rest.substr(0, end);
+    if (const std::size_t at = hp.rfind('@'); at != std::string_view::npos) hp = hp.substr(at + 1);
+    std::string host;
+    if (!hp.empty() && hp.front() == '[') {
+        const std::size_t close = hp.find(']');
+        host = std::string(hp.substr(1, close == std::string_view::npos ? std::string_view::npos : close - 1));
+    } else {
+        const std::size_t colon = hp.rfind(':');
+        host = std::string(colon == std::string_view::npos ? hp : hp.substr(0, colon));
+    }
+    for (char& c : host) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return host;
+}
+
+bool upstream_off_host(std::string_view upstream) {
+    if (upstream.starts_with("unix:")) return false;
+    const std::string host = url_host(upstream);
+    if (host.empty()) return false;  // not a URL this reads: the loader refuses it anyway
+    return !(host == "localhost" || host == "::1" || host.starts_with("127."));
+}
+
+namespace {
+
+bool has_name(const std::vector<std::string>& names, std::string_view host) {
+    for (const auto& n : names) {
+        if (n.size() != host.size()) continue;
+        bool same = true;
+        for (std::size_t i = 0; i < n.size() && same; ++i) same = std::tolower(static_cast<unsigned char>(n[i])) == std::tolower(static_cast<unsigned char>(host[i]));
+        if (same) return true;
+    }
+    return false;
+}
+
+std::vector<std::string> strings_of(const json::Value& v) {
+    std::vector<std::string> out;
+    for (const auto& e : v.items())
+        if (e.is_string()) out.push_back(std::string(e.str()));
+    return out;
+}
+
+bool contains(const std::vector<std::string>& v, const std::string& s) { return std::find(v.begin(), v.end(), s) != v.end(); }
+
+const json::Value* rule_at(const json::Value& list, std::string_view path) {
+    for (const auto& r : list.items())
+        if (r.get("path") == path) return &r;
+    return nullptr;
+}
+
+// A site's protections before and after a site_update's `rules`: what the change removes or widens
+// (docs/design-site-operations.md 27.2, "granting access"); adding or narrowing is free.
+void rules_widened(const json::Value& before, const json::Value& after, std::vector<std::string>& out) {
+    for (const auto& old : before["restricted"].items()) {
+        const std::string path(old.get("path"));
+        const json::Value* now = rule_at(after["restricted"], path);
+        if (!now) {
+            out.push_back("removes the address rule on " + path + ": every client reaches it");
+            continue;
+        }
+        const std::vector<std::string> was = strings_of(old["allow"]), is = strings_of((*now)["allow"]);
+        for (const auto& a : is)
+            if (!contains(was, a)) out.push_back("widens the address rule on " + path + " to " + a);
+        if (now->get("mode") == "report" && old.get("mode") != "report") out.push_back("turns the address rule on " + path + " to report mode: nothing is refused");
+    }
+    if (before["admin"].is_object()) {
+        const json::Value& old = before["admin"];
+        if (!after["admin"].is_object()) {
+            out.push_back("removes the admin rule: the administration pages open to every client");
+        } else {
+            const json::Value& now = after["admin"];
+            const std::vector<std::string> was = strings_of(old["allow"]), is = strings_of(now["allow"]);
+            for (const auto& a : is)
+                if (!contains(was, a)) out.push_back("widens the admin rule to " + a);
+            if (now.get("mode") == "report" && old.get("mode") != "report") out.push_back("turns the admin rule to report mode: nothing is refused");
+            if (old["login"].boolean() && !now["login"].boolean()) out.push_back("opens the login page the admin rule covered");
+        }
+    }
+    for (const auto& old : before["auth"].items()) {
+        const std::string path(old.get("path"));
+        if (old["open"].boolean()) continue;
+        const json::Value* now = rule_at(after["auth"], path);
+        if (!now) {
+            out.push_back("removes the password on " + path);
+            continue;
+        }
+        if ((*now)["open"].boolean()) out.push_back("opens " + path + ": no password asked there any more");
+        const std::vector<std::string> was = strings_of(old["skip_for"]), is = strings_of((*now)["skip_for"]);
+        for (const auto& a : is)
+            if (!contains(was, a)) out.push_back("lets " + a + " in without a password on " + path);
+        if (now->get("plain_http") == "allow" && old.get("plain_http") != "allow") out.push_back("lets the password on " + path + " be sent over plain HTTP");
+    }
+    for (const auto& now : after["auth"].items())  // a new open rule inside a protected tree opens it
+        if (now["open"].boolean() && !rule_at(before["auth"], now.get("path"))) out.push_back("opens " + std::string(now.get("path")) + " inside the site's password rules");
+}
+
+}  // namespace
+
+std::vector<std::string> approval_reasons(std::string_view path, std::string_view action, const json::Value& body, const ApprovalContext& ctx) {
     std::vector<std::string> out;
     const bool site_path = path.starts_with("/v1/sites/");
+    // A task whose caller names what gets installed (pip_install, row 32): code from a package index
+    // runs as the site's account.
+    if (site_path && action == "task" && tasks::needs_user_confirmation(body.get("task")))
+        out.push_back("installs the Python packages it names into the site's virtualenv: their code runs as the site's account");
     // The site's files (F12): every change, whatever it is; a read only of a secret, which would leave
     // the server for whoever asked (docs/design-site-operations.md 27.2).
     if (site_path && action == "file") {
@@ -277,12 +383,71 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
         else if (op == "move") out.push_back("moves " + rel + " to " + std::string(body.get("to")) + " in the site");
         else if (op == "delete") out.push_back("deletes " + rel + " from the site");
         else if (op == "restore") out.push_back("puts an earlier version of " + rel + " back into the site");
-        else if (op == "read" && secret_read) out.push_back("reveals " + rel + ", a credential or database file, to whoever asked");
+        else if (op == "read" && ctx.secret_read) out.push_back("reveals " + rel + ", a credential or database file, to whoever asked");
     }
-    // A task whose caller names what gets installed (pip_install, row 32): code from a package index
-    // runs as the site's account.
-    if (site_path && action == "task" && tasks::needs_user_confirmation(body.get("task")))
-        out.push_back("installs the Python packages it names into the site's virtualenv: their code runs as the site's account");
+    // Code and installs: an archive from anywhere, a copy within the site.
+    if (site_path && action == "install") {
+        const std::string url(body.get("url")), file(body.get("file")), target(body.get("path"));
+        out.push_back("installs an application's files into the site" + (target.empty() ? std::string() : " under " + target) + " from " +
+                      (!url.empty() ? url : !file.empty() ? "the upload " + file : std::string("its preset's official archive")) + ": whatever they hold, the site then serves or runs them");
+    }
+    if (site_path && action == "copy")
+        out.push_back("copies " + std::string(body.get("from")) + " to " + std::string(body.get("to")) + " within the site: what the site serves, or runs, changes");
+    // Secrets leaving, and data sent elsewhere: the site's environment.
+    if (site_path && action == "env") {
+        if (body["reveal"].is_array() && body["set"].is_null() && body["unset"].is_null() && body["generate"].is_null()) {
+            std::string names;
+            for (const auto& n : body["reveal"].items()) names += (names.empty() ? "" : ", ") + std::string(n.is_string() ? n.str() : "?");
+            out.push_back("reveals the values of " + names + " from the site's environment to whoever asked");
+        } else {
+            std::string names;
+            for (const auto& [k, v] : body["set"].members()) names += (names.empty() ? "" : ", ") + k;
+            for (const char* key : {"unset", "generate"})
+                for (const auto& n : body[key].items()) names += (names.empty() ? "" : ", ") + std::string(n.is_string() ? n.str() : "?");
+            out.push_back("changes the site's application environment (" + (names.empty() ? std::string("its variables") : names) +
+                          "): where the application keeps its data, what it trusts, its secrets");
+        }
+    }
+    // Granting access: a password user.
+    if (site_path && action == "auth-users") out.push_back("adds or changes the password user " + std::string(body.get("user")) + " of the site: who may log in");
+    // Destroying beyond undo: the trash.
+    if (path.starts_with("/v1/trash/") && path.ends_with("/delete"))
+        out.push_back("removes the trash entry " + std::string(path.substr(10, path.size() - 10 - 7)) + " for good: nothing brings its files back");
+    if (path == "/v1/trash/expire") out.push_back("removes every expired trash entry for good: nothing brings their files back");
+    // Making files run, sending visitors or data elsewhere, widening access: a site's fields.
+    const bool update = site_path && action.empty(), create = path == "/v1/sites";
+    if (update || create) {
+        const SiteSpec* cur = ctx.current;
+        const auto changed = [&](const char* key, const std::string& was) {
+            return body[key].is_string() && (create || !cur || std::string(body[key].str()) != was);
+        };
+        if (update && changed("app", cur ? cur->app : "")) out.push_back("changes what the site runs: app " + (cur ? cur->app : std::string("?")) + " becomes " + std::string(body["app"].str()));
+        if (update && changed("root", cur ? cur->root : "")) out.push_back("serves, or runs, files from another directory: " + std::string(body["root"].str()));
+        if (update && changed("served_dir", cur ? cur->served_dir : "")) out.push_back("serves, or runs, files from another directory of the project: " + std::string(body["served_dir"].str()));
+        if (create && ctx.root_runs_files) out.push_back("the directory " + std::string(body.get("root")) + " already holds PHP files, which the site would run as soon as it exists");
+        if (body["rules"].is_object()) {
+            const json::Value& r = ctx.rules_after ? *ctx.rules_after : body["rules"];
+            const json::Value& before = cur ? cur->rules : json::Value();
+            if (update && (!r["entry_points"].is_null() || !r["front_controller"].is_null()) &&
+                (r["entry_points"].dump() != before["entry_points"].dump() || r["front_controller"].dump() != before["front_controller"].dump()))
+                out.push_back("changes which PHP files of the site run (entry points, the front controller)");
+            if (update && cur) rules_widened(before, r, out);
+        }
+        if (body["upstream"].is_string()) {
+            const std::string up(body["upstream"].str());
+            if (update && (!cur || up != cur->upstream)) out.push_back("sends the site's visitors to another application: " + up + (upstream_off_host(up) ? ", off this host" : ""));
+            else if (create && upstream_off_host(up)) out.push_back("sends the site's visitors to an application off this host: " + up);
+        }
+        for (const auto& rule : body["redirects"].items()) {
+            const std::string to(rule.get("to"));
+            const std::string host = url_host(to);
+            if (host.empty() || has_name(ctx.site_names, host)) continue;
+            bool had = false;
+            if (cur)
+                for (const auto& old : cur->redirects.items()) had = had || (old.get("from") == rule.get("from") && old.get("to") == to);
+            if (!had) out.push_back("redirects " + std::string(rule.get("from")) + " to another host: " + to);
+        }
+    }
     return out;
 }
 

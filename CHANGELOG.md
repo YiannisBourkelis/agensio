@@ -56,6 +56,22 @@
   - Security rows 53 to 55, `docs/configuration.md` 15, the cookbook's "Change a page of a site, the
     favicon or robots.txt", `docs/mcp.md`, `docs/approvals.md`. Also fixed in the approvals of this
     release: the answer that queued a change said it was 56 years old.
+- **The rest of the approvals: installs, the environment, password users, the trash, and the site
+  changes that matter.** Step 3 of `docs/design-site-operations.md` 27.7, the whole of 27.2. What
+  waits now, beyond `pip_install` and the file tools: `site_install` from any source and `site_copy`
+  (previewed from a dry run: the source, the target, what is created); `site_env_set` (the variables
+  named, never a value) and a `site_env` reveal (the values handed out once, by `approvals_list` with
+  the id, never in the list); `site_auth_user_set` (a generated password handed out once, by id);
+  `trash_delete` and `trash_expire`; a `site_update` that changes `app`, `root`, `served_dir`, the
+  entry points or the front controller, changes `upstream`, redirects to a host that is none of the
+  site's names, or removes or widens a password or address rule (judged against the managed file as
+  it is, previewed as its diff); a `site_create` only when its root already holds PHP files, its
+  upstream is off this host, or a redirect leaves. Everything else is made at once, as before: a new
+  static site, HSTS, headers, compression, a protection added or narrowed. Install, copy, update and
+  create are checked by a dry run before they wait, so a person is never asked about a change that
+  fails anyway. `docs/approvals.md` 1 is the whole list; security row 56. The test suites approve
+  their gated commands with a fresh approver per approval (`tests/approve-lib.sh`,
+  `tests/approve-code.py`), so a suite never waits for the next 30-second step.
 - **Fix: a broken chunked request body is answered 400 over HTTP/1.1, and three loose ends of
   alpha.119.** Found by the test VPS's check of alpha.119.
   - A chunked body whose framing is broken (a chunk size that is not hex) got its `400` in the

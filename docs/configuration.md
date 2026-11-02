@@ -3131,6 +3131,16 @@ first). `[control] file_history = { versions = 5, days = 30 }`: the versions one
 oldest going first, and for how many days worker 0's hourly check leaves them; `versions = 0` keeps
 nothing, and a delete then removes for good, at most 10,000 entries a call.
 
+**What waits for a person's approval.** Through the control plane, a change that can run code,
+move a secret or data off the host, grant access or destroy beyond undo is not made on the caller's
+`confirm` alone: it waits for a person's code from an authenticator app (`docs/approvals.md`). Among
+the commands here: `site-install`, `site-copy`, `site-env-set`, `site-env --reveal`,
+`site-auth-user-set`, `trash-delete`, `trash-expire`, every file change, and a `site-update` that
+changes `app`, `root`, `served_dir`, the entry points or the front controller, changes `upstream`,
+redirects to a host that is none of the site's names, or removes or widens a password or address
+rule; a `site-create` only when its root already holds PHP files, its upstream is off this host, or a
+redirect leaves. Typed at a terminal, such a command asks for the code at once.
+
 **The site's environment.** An application reads settings and secrets from its
 environment: a Rails application without credentials (every ONCE application such as
 Writebook, every Kamal or twelve-factor deployment) reads `SECRET_KEY_BASE` there and

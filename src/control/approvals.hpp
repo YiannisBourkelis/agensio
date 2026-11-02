@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 
+#include "control/sites.hpp"
 #include "services/json.hpp"
 
 namespace agensio::control {
@@ -41,6 +42,9 @@ struct PendingChange {
     int status = 0;            // the answer's status once it ran
     json::Value result;        // the answer's body once it ran
     bool result_taken = false;  // a read's content is handed out once
+    // The result holds a secret (a credential file's content, a revealed variable, a generated
+    // password): handed out once, by GET /v1/approvals/ID only, never in the list or the approval's answer.
+    bool secret_result = false;
 };
 
 const char* state_name(PendingChange::State s) noexcept;
@@ -74,12 +78,29 @@ json::Value pending_json(const PendingChange& c, std::time_t now, bool with_resu
 // `max_lines`: lines of the preview shown, the rest counted (agensio ctl approve --show prints them all).
 std::string pending_text(const PendingChange& c, std::time_t now, std::size_t max_lines = 0);
 
-// Why a mutation waits for approval, in the server's words; empty when it does not
-// (docs/design-site-operations.md 27.2). `action` is the part after /v1/sites/NAME/. A dry run gets
-// the same reasons: the handler runs it as it is and says it would wait.
-// `secret_read`: the request reads a credential or database file (files::secret_path), which only
-// the handler can judge against the site's credential files.
-std::vector<std::string> approval_reasons(std::string_view path, std::string_view action, const json::Value& body, bool secret_read = false);
+// What the gate knows beyond the request (docs/design-site-operations.md 27.2): whether a file read
+// is of a credential or database file (files::secret_path, judged by the handler against the site's
+// credential files); the site's managed spec as it is now, so a site_update is judged by what it
+// changes; the site's names, so a redirect to one of them is not "elsewhere"; and for a site_create
+// whether the root already holds files the app would run.
+struct ApprovalContext {
+    bool secret_read = false;
+    const SiteSpec* current = nullptr;
+    // The body's `rules` as check_rules stores them (prefix paths without their slash, addresses
+    // canonical), so a site_update's rules compare with the spec's like with like; null when the
+    // body has none or they do not check, in which case the handler refuses the change anyway.
+    const json::Value* rules_after = nullptr;
+    std::vector<std::string> site_names;
+    bool root_runs_files = false;
+};
+// Why a mutation waits for approval, in the server's words; empty when it does not. `action` is the
+// part after /v1/sites/NAME/. A dry run gets the same reasons: the handler runs it as it is and says
+// it would wait.
+std::vector<std::string> approval_reasons(std::string_view path, std::string_view action, const json::Value& body, const ApprovalContext& ctx = {});
+// Whether an upstream URL names a host that is not this one (unix: sockets and loopback are here).
+bool upstream_off_host(std::string_view upstream);
+// The host of an http(s) URL, lower-case, without the port; "" for anything else.
+std::string url_host(std::string_view url);
 
 // The change from `before` to `after` as a unified diff of lines (3 lines of context, hunks with
 // @@ -l,s +l,s @@), at most `max_lines` lines of it with the count of the rest; a file replaced
