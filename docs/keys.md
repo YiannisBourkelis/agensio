@@ -124,7 +124,7 @@ section of `docs/configuration.md` that explains the key.
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
 | `access` | path or "off" | logs/access.log next to the configuration | The access log every site uses unless it sets access_log, and the log of a request no site took (421 on a listener without a catch-all); "off" logs nothing. | reload | file | 8 |
-| `format` | enum: combined \| json | combined | Apache/nginx combined (fail2ban-compatible) or one JSON object per line with the upstream outcome. | reload | file | 8 |
+| `format` | enum: vhost_combined \| combined \| json | vhost_combined | The access logs' line. vhost_combined: Apache's, the combined line with the requested host and the listener's port in front (host:port), so a file several sites share, and the 421 lines of a scan by bare address, say which name was asked (GoAccess reads it as VCOMBINED); combined: the classic Apache/nginx line, for a pipeline that expects it; json: one object per line with host and the upstream outcome. The shipped fail2ban filters read both combined forms, not JSON. | reload | file | 8 |
 | `error` | path or "stderr" | stderr | Where the error log goes. | reload | file | 8 |
 | `level` | enum: error \| warn \| info | warn | Error-log verbosity; info logs reloads, certificate work, the helper's start. | reload | file | 8 |
 ## `[control]`

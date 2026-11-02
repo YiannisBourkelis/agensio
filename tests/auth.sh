@@ -259,7 +259,7 @@ check "a protected answer is Cache-Control: private; a public one carries none" 
   "$(curl -sS -u anna:secret -D - -o /dev/null $B/private/doc.html | tr -d '\r' | grep -i '^cache-control:' | cut -d' ' -f2)|$(curl -sS -D - -o /dev/null $B/ | tr -d '\r' | grep -i '^cache-control:' | cut -d' ' -f2)"
 sleep 1.2
 check "the access log names the verified user, never the one a refused request claimed" "anna -" \
-  "$(grep '/private/doc.html' "$T/logs/access.log" | grep '" 200 ' | tail -1 | cut -d' ' -f3) $(grep '/private/doc.html' "$T/logs/access.log" | grep '" 401 ' | tail -1 | cut -d' ' -f3)"
+  "$(grep '/private/doc.html' "$T/logs/access.log" | grep '" 200 ' | tail -1 | cut -d' ' -f4) $(grep '/private/doc.html' "$T/logs/access.log" | grep '" 401 ' | tail -1 | cut -d' ' -f4)"
 check "one auth failed line per failure, with the user, the client and the reason; none for the challenge; never the password" "yes yes 0" \
   "$(grep -q 'auth failed: client 127.0.0.1 site .* realm "Private" user "anna" (wrong password)' "$T/logs/error.log" && echo yes) $(grep -q 'auth failed: .*user "old" .*expired' "$T/logs/error.log" && echo yes) $(grep -c 'secret\|wrong1' "$T/logs/error.log")"
 

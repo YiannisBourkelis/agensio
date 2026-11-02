@@ -501,9 +501,15 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   live checks and skip when the bed is down. `app = "proxy"` with a site-level `upstream`
   is the preset both use; recipes for Node, Rails, Django, Rocket.Chat and ThingsBoard in
   `docs/examples/proxy.md` (the cookbook, `docs/examples.md`).
-- **Logging** (A5, `src/services/log.*`): access log in Apache/nginx "combined" format
-  (same escaping, so fail2ban filters work) or JSON, per site (`access_log`) with the
-  `[log] access` default; one descriptor per path opened `O_APPEND`, per-worker buffers
+- **Logging** (A5, `src/services/log.*`): access log in Apache's `vhost_combined` format by
+  default (2026-11-02: `host:port ` in front of the combined line, the requested host lower case
+  without its port and the listener's port, `format_vhost_combined`; the parser in
+  `control/loglines.cpp` reads the prefix into `host`, so `logs --site` attributes shared-file
+  lines; the five shipped fail2ban filters take the prefix as optional, `^(?:\S+:\d+ )?<HOST>`,
+  so one filter set reads both forms, and a filter of an older build is `fail2ban_filter_stale`),
+  the classic "combined" (same escaping as nginx, so stock filters work) or JSON, per site
+  (`access_log`) with the `[log] access` default; `format` applies on reload
+  (`WorkerLogs::set_format` from the worker's switch handler); one descriptor per path opened `O_APPEND`, per-worker buffers
   flushed at 32 KB or by a 1 s timer, `SIGUSR1` reopens every file (the replaced
   descriptor is kept until the next reopen so a racing worker never writes to a recycled
   fd). A line goes to the request's own site: HTTP/1 keeps it per connection (until

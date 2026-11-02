@@ -342,8 +342,10 @@ json::Value logs(const Config& cfg, const LogQuery& q) {
                     if (&o != s && o.access_log == s->access_log)
                         for (const auto& n : o.server_names) other_names.push_back(n);
                 const bool catch_all = is_catch_all(*s);
-                const bool json_lines = std::any_of(lines.begin(), lines.end(), [](const LogLine& l) { return !l.host.empty(); });
-                if (json_lines)
+                // Lines that name the host asked for: JSON, and vhost_combined's prefix (the default since
+                // alpha.120); the combined format carries none, so its lines cannot be attributed.
+                const bool named_lines = std::any_of(lines.begin(), lines.end(), [](const LogLine& l) { return !l.host.empty(); });
+                if (named_lines)
                     lines.erase(std::remove_if(lines.begin(), lines.end(),
                                                [&](const LogLine& l) {
                                                    if (l.host.empty()) return false;
@@ -356,9 +358,9 @@ json::Value logs(const Config& cfg, const LogQuery& q) {
                 for (const auto& o : others) shared.push(o);
                 out.set("shared", true).set("shared_with", std::move(shared));
                 out.set("note", s->server_names.front() + " has no access log of its own: it writes into the server-wide log " + s->access_log + " with " +
-                                    std::to_string(others.size()) + " other site(s)" + (json_lines ? ", whose JSON lines carry the host, so these are the lines for its names" + std::string(catch_all ? " and for every host no other site claims" : "")
-                                                                                                   : "; the combined format carries no host name, so these lines cannot be attributed to this site alone") +
-                                    ". A site with its own access_log (site_update access_log, or the key in its file) is queried alone" + (json_lines ? "." : "; [log] format = \"json\" puts the host into every line."));
+                                    std::to_string(others.size()) + " other site(s)" + (named_lines ? ", whose lines carry the host asked for (vhost_combined's host:port in front, or JSON), so these are the lines for its names" + std::string(catch_all ? " and for every host no other site claims" : "")
+                                                                                                    : "; the combined format carries no host name, so these lines cannot be attributed to this site alone") +
+                                    ". A site with its own access_log (site_update access_log, or the key in its file) is queried alone" + (named_lines ? "." : "; [log] format = \"vhost_combined\" (the default) or \"json\" puts the host into every line."));
             }
             // The error log's lines about this site name.
             std::vector<LogLine> err;

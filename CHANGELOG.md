@@ -2,6 +2,26 @@
 
 ## 0.1.0-alpha.120
 
+- **The access log names the host: `[log] format = "vhost_combined"` is the default.** Apache's
+  format of that name (Debian's `other_vhosts_access.log`): the combined line with the host the
+  request asked for and the listener's port in front, `example.com:443 203.0.113.7 - - [...]`. The
+  default file is shared by every site without an `access_log` of its own and by the 421 lines, and
+  the prefix is what tells one site's lines from another's there, and a stray domain still pointing
+  at the host from a scan by bare address (`203.0.113.9:80`, or `-:80` for a request naming no
+  host), which the test VPS's alpha.119 report asked for. GoAccess reads it as `VCOMBINED`;
+  `agensio ctl logs --site NAME` and `logs_query` answer a site's own lines from the shared file,
+  which only JSON allowed before; the five shipped fail2ban filters take the `host:port` prefix as
+  optional, so one filter set reads both forms (their date pattern steps over a bracketed IPv6
+  host, `[2001:db8::1]:443`, whose `[` came before the stamp's), and `tests/protection.sh` bans
+  through the real jails over the new lines. `format = "combined"` keeps the classic line for a pipeline that expects
+  exactly it; `json` is unchanged. `format` applies at a reload (the reference said so; it took a
+  restart). `docs/configuration.md` 8 has the three lines side by side.
+  - Upgrading: a host running fail2ban over agensio's logs reinstalls the filters, as health's
+    `fail2ban_filter_stale` says (`install -m 644 /usr/share/agensio/fail2ban/filter.d/agensio-*.conf
+    /etc/fail2ban/filter.d/ && fail2ban-client reload`); an older filter anchors on the client address
+    and sees nothing in a `vhost_combined` log. A tool told the log is `COMBINED` must be told
+    `VCOMBINED`, or the main file set `format = "combined"`.
+
 - **The file cache survives a reload.** A location that serves the same files the same way after
   the reload (its `root` or `alias`, `index`, `try_files`, `symlinks`, content types and the site's
   `response_compression` unchanged) keeps its cached entries and their brotli and gzip copies, so

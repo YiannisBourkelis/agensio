@@ -22,6 +22,7 @@
 #include "core/site_fields.hpp"
 #include "handlers/encoding.hpp"
 #include "net/cidr.hpp"
+#include "services/log.hpp"
 #include "services/json.hpp"
 #include "upstream/options.hpp"
 
@@ -530,7 +531,9 @@ std::string runtime_dir(const ControlConfig& control, std::string_view runtime);
 struct LogConfig {
     std::string access;     // default access log path for sites, "" = off; the loader defaults it to
                             // "logs/access.log" next to the configuration file (measured: 0.1-0.2 us/request)
-    bool json = false;      // format = "json" instead of "combined"
+    // format: vhost_combined (Apache's, host:port in front of the combined line; the default since
+    // 0.1.0-alpha.120), combined (the classic line) or json. Applies on reload (WorkerLogs::set_format).
+    AccessLogFormat format = AccessLogFormat::vhost_combined;
     std::string error = "stderr";  // "stderr" or a path
     std::string level = "warn";    // error | warn | info
     // `access` as a sink (Server::assign_log_sinks), -1 when off: a request no site took (a 421 on a

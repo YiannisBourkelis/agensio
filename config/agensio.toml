@@ -39,7 +39,8 @@ access = "logs/access.log" # default access log for every site: a path (relative
                          # this is also the built-in default. A site can set its own `access_log = "path"`
                          # or "off". Buffered per worker, flushed each second; SIGUSR1 reopens all log
                          # files (logrotate). Measured cost: 0.1-0.2 us per request.
-format = "combined"      # "combined" (Apache/nginx, fail2ban-compatible) or "json" (one object per line)
+format = "vhost_combined"  # the default: Apache's vhost_combined (the combined line with host:port in front,
+                           # fail2ban-compatible); "combined" (the classic line) or "json" (one object per line)
 error = "stderr"         # "stderr" or a path
 level = "warn"           # error | warn | info
 

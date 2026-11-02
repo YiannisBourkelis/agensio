@@ -57,7 +57,7 @@ const std::vector<KeyDef>& key_defs() {
         {"[cache]", "max_open_files", "int", "1024", "How many streamed files may keep an open descriptor in the cache (0 = none).", "restart", "file", "1"},
         {"[cache]", "precompressed", "bool", "true", "Serve name.br or name.gz beside a cached file to a client whose Accept-Encoding takes it (Content-Encoding, Vary), cached with the file and revalidated with it; a twin older than the file is ignored.", "restart", "file", "1"},
         {"[log]", "access", "path or \"off\"", "logs/access.log next to the configuration", "The access log every site uses unless it sets access_log, and the log of a request no site took (421 on a listener without a catch-all); \"off\" logs nothing.", "reload", "file", "8"},
-        {"[log]", "format", "enum: combined | json", "combined", "Apache/nginx combined (fail2ban-compatible) or one JSON object per line with the upstream outcome.", "reload", "file", "8"},
+        {"[log]", "format", "enum: vhost_combined | combined | json", "vhost_combined", "The access logs' line. vhost_combined: Apache's, the combined line with the requested host and the listener's port in front (host:port), so a file several sites share, and the 421 lines of a scan by bare address, say which name was asked (GoAccess reads it as VCOMBINED); combined: the classic Apache/nginx line, for a pipeline that expects it; json: one object per line with host and the upstream outcome. The shipped fail2ban filters read both combined forms, not JSON.", "reload", "file", "8"},
         {"[log]", "error", "path or \"stderr\"", "stderr", "Where the error log goes.", "reload", "file", "8"},
         {"[log]", "level", "enum: error | warn | info", "warn", "Error-log verbosity; info logs reloads, certificate work, the helper's start.", "reload", "file", "8"},
         {"[control]", "socket", "path", "/run/agensio/control.sock", "The unix socket of the control API; its presence enables the control plane (agensio ctl, agensio mcp). Never a TCP port.", "restart", "file", "15"},
@@ -321,7 +321,7 @@ json::Value running_value(const Config& c, const std::string& table, const std::
         if (key == "max_open_files") return V(static_cast<double>(c.cache_max_open_files));
     } else if (table == "[log]") {
         if (key == "access") return V(c.log.access.empty() ? "off" : c.log.access);
-        if (key == "format") return V(c.log.json ? "json" : "combined");
+        if (key == "format") return V(std::string(access_log_format_name(c.log.format)));
         if (key == "error") return V(c.log.error);
         if (key == "level") return V(c.log.level);
     } else if (table == "[control]") {

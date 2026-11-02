@@ -4506,9 +4506,11 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
     if (auto a = log["access"].value<std::string>())
         cfg.log.access = (*a == "off" || a->empty()) ? std::string() : resolve(base_dir, *a).string();
     else cfg.log.access = resolve(base_dir, "logs/access.log").string();  // on by default (see CLAUDE.md)
-    std::string format = to_lower(log["format"].value_or(std::string("combined")));
-    if (format != "combined" && format != "json") fail("log.format must be \"combined\" or \"json\"");
-    cfg.log.json = format == "json";
+    const std::string format = to_lower(log["format"].value_or(std::string("vhost_combined")));
+    if (format == "vhost_combined") cfg.log.format = AccessLogFormat::vhost_combined;
+    else if (format == "combined") cfg.log.format = AccessLogFormat::combined;
+    else if (format == "json") cfg.log.format = AccessLogFormat::json;
+    else fail("log.format must be \"vhost_combined\" (the default: Apache's, the requested host and the port first), \"combined\" or \"json\"");
     if (auto e = log["error"].value<std::string>())
         cfg.log.error = (*e == "stderr" || e->empty()) ? std::string("stderr") : resolve(base_dir, *e).string();
     cfg.log.level = to_lower(log["level"].value_or(std::string("warn")));

@@ -15,11 +15,11 @@ struct LogLine {
     std::string source;  // "error", "access" (the server-wide access log) or a site's name (its own log)
     std::string level;   // error | warn | info, or "" for access lines
     int status = 0;      // access lines
-    std::string host;    // JSON access lines: the Host asked for; "" for combined lines, which carry none
+    std::string host;    // the host asked for (JSON lines, and the host:port in front of a vhost_combined line, port dropped); "" for combined lines, which carry none, and for a request without one
     std::string text;    // the line without its newline
 };
 
-// Parses one line of any of the three formats (error log, combined, JSON access log).
+// Parses one line of any of the formats (error log, combined and vhost_combined, JSON access log).
 // False when the line is none of them.
 bool parse_log_line(std::string_view line, LogLine& out);
 

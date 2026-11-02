@@ -270,7 +270,7 @@ get("/?%s-after" % marker, "203.0.113.31")
 print("ok")
 PYT
 }
-first() { grep -F "$1" "$T/logs/access.log" | tail -1 | cut -d' ' -f1; }
+first() { grep -F "$1" "$T/logs/access.log" | tail -1 | cut -d' ' -f2; }  # the client: the second field of a vhost_combined line (host:port first)
 r1=$(trust_case h1 trust-h1-other 'trusted_proxies = ["10.255.255.1"]')
 r2=$(trust_case h1 trust-h1-none '')
 if python3 -c 'import h2' 2>/dev/null; then r3=$(trust_case h2 trust-h2-other 'trusted_proxies = ["10.255.255.1"]'); fi

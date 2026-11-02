@@ -10,8 +10,11 @@
 //    the worker's flush timer fires. The local time string is formatted once per second.
 //  * ErrorLog: server-wide, level-filtered, nginx-like lines ("2026/09/17 10:15:32 [error] ...").
 //
-// Formats: "combined" is byte-compatible with Apache/nginx (fail2ban filters work
-// unchanged); "json" is one object per line. Both escape the client-controlled fields.
+// Formats: "vhost_combined" (the default since 2026-11-02) is Apache's: the combined line with
+// the requested host and the listener's port in front (%v:%p), what a shared file needs to tell a
+// stray domain from a scan by bare address, read by GoAccess as VCOMBINED and by the shipped
+// fail2ban filters, which take the prefix as optional; "combined" is the classic line, byte-
+// compatible with Apache/nginx; "json" is one object per line. All escape the client's fields.
 #pragma once
 
 #include <atomic>
@@ -26,7 +29,11 @@
 namespace agensio {
 
 enum class LogLevel { error = 0, warn = 1, info = 2 };
-enum class AccessLogFormat { combined, json };
+enum class AccessLogFormat { combined, json, vhost_combined };
+
+inline std::string_view access_log_format_name(AccessLogFormat f) noexcept {
+    return f == AccessLogFormat::json ? "json" : f == AccessLogFormat::vhost_combined ? "vhost_combined" : "combined";
+}
 
 class LogFile {
 public:
@@ -78,7 +85,8 @@ private:
 // What one access log line needs; every view is borrowed for the duration of the call.
 struct AccessRecord {
     std::string_view remote;  // client address
-    std::string_view host;    // Host header (json only)
+    std::string_view host;    // Host header as sent (json, and vhost_combined's prefix: lower case, port dropped)
+    std::uint16_t port = 0;   // the listener's port (vhost_combined's prefix)
     std::string_view method;
     std::string_view target;
     int version_minor = 1;
@@ -107,7 +115,10 @@ public:
     // Formatters, exposed for tests. `time_local` is "17/Sep/2026:10:15:32 +0300",
     // `time_iso` is "2026-09-17T10:15:32+03:00".
     static void format_combined(std::string& out, std::string_view time_local, const AccessRecord& r);
+    static void format_vhost_combined(std::string& out, std::string_view time_local, const AccessRecord& r);
     static void format_json(std::string& out, std::string_view time_iso, const AccessRecord& r);
+    // [log] format applies on reload: set from the worker's own loop when it takes the generation.
+    void set_format(AccessLogFormat format) noexcept { format_ = format; }
 
 private:
     void refresh_time(std::time_t now);

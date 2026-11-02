@@ -226,6 +226,7 @@ void WorkerLogs::log(int sink, std::time_t now, const AccessRecord& r) {
     refresh_time(now);
     std::string& buf = buffers_[static_cast<std::size_t>(sink)];
     if (format_ == AccessLogFormat::json) format_json(buf, time_iso_, r);
+    else if (format_ == AccessLogFormat::vhost_combined) format_vhost_combined(buf, time_local_, r);
     else format_combined(buf, time_local_, r);
     if (buf.size() >= kFlushSize) {
         registry_->sink(sink).write(buf);
@@ -268,6 +269,51 @@ void WorkerLogs::format_combined(std::string& out, std::string_view time_local, 
     if (r.user_agent.empty()) out.push_back('-');
     else append_escaped(out, r.user_agent);
     out.append("\"\n");
+}
+
+// Apache's vhost_combined (Debian's other_vhosts_access.log: `LogFormat "%v:%p %h %l %u %t ..."`):
+// host:port and a space in front of the combined line. The host is the one the request asked for,
+// lower case and without its port ("[2001:db8::1]" keeps its brackets), "-" when it sent none
+// (HTTP/1.0); the port is the listener's, the one the client connected to. A parser of the combined
+// line that reads the first field as the client (fail2ban's <HOST>, GoAccess's COMBINED) must be told
+// of the prefix: the shipped filters take it as optional, GoAccess reads it as VCOMBINED.
+void WorkerLogs::format_vhost_combined(std::string& out, std::string_view time_local, const AccessRecord& r) {
+    std::string_view host = r.host;
+    if (host.empty()) {
+        out.push_back('-');
+    } else {
+        if (host.front() == '[') {  // an IPv6 literal: the port, if any, follows the bracket
+            if (const std::size_t close = host.find(']'); close != std::string_view::npos) host = host.substr(0, close + 1);
+        } else if (const std::size_t colon = host.rfind(':'); colon != std::string_view::npos) {
+            host = host.substr(0, colon);
+        }
+        // Lower case, escaped by append_escaped's rule (a Host is a token the parser checked, so the
+        // escape is rare): one scan, then the whole host appended at once when nothing needs changing.
+        bool plain = true;
+        for (unsigned char c : host)
+            if ((c >= 'A' && c <= 'Z') || c == '"' || c == '\\' || c < 0x20 || c >= 0x7f) {
+                plain = false;
+                break;
+            }
+        if (plain) {
+            out.append(host);
+        } else {
+            static constexpr char kHex[] = "0123456789ABCDEF";
+            for (unsigned char c : host) {
+                if (c == '"' || c == '\\' || c < 0x20 || c >= 0x7f) {
+                    out.append("\\x");
+                    out.push_back(kHex[c >> 4]);
+                    out.push_back(kHex[c & 15]);
+                } else {
+                    out.push_back(static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c));
+                }
+            }
+        }
+    }
+    out.push_back(':');
+    append_uint(out, r.port);
+    out.push_back(' ');
+    format_combined(out, time_local, r);
 }
 
 void WorkerLogs::format_json(std::string& out, std::string_view time_iso, const AccessRecord& r) {

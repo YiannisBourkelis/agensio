@@ -1751,6 +1751,26 @@ static void test_log_format() {
     WorkerLogs::format_combined(out, "17/Sep/2026:10:15:32 +0300", r);
     CHECK_EQ(out, std::string("203.0.113.9 - - [17/Sep/2026:10:15:32 +0300] \"GET /a\\x22b?x=1 HTTP/1.1\" 200 1024 "
                               "\"-\" \"curl/8.0 \\x5C \\x01\"\n"));
+    // vhost_combined (the default since alpha.120): Apache's host:port in front; the host lower case
+    // without its port (an IPv6 literal keeps its brackets), "-" without one; the listener's port.
+    r.port = 443;
+    out.clear();
+    WorkerLogs::format_vhost_combined(out, "17/Sep/2026:10:15:32 +0300", r);
+    CHECK_EQ(out, std::string("example.com:443 203.0.113.9 - - [17/Sep/2026:10:15:32 +0300] \"GET /a\\x22b?x=1 HTTP/1.1\" 200 1024 "
+                              "\"-\" \"curl/8.0 \\x5C \\x01\"\n"));
+    r.host = "WWW.Example.COM:8443";
+    out.clear();
+    WorkerLogs::format_vhost_combined(out, "t", r);
+    CHECK(out.starts_with("www.example.com:443 203.0.113.9 - - [t] "));
+    r.host = "[2001:DB8::1]:8443";
+    out.clear();
+    WorkerLogs::format_vhost_combined(out, "t", r);
+    CHECK(out.starts_with("[2001:db8::1]:443 203.0.113.9 - - [t] "));
+    r.host = "";
+    out.clear();
+    WorkerLogs::format_vhost_combined(out, "t", r);
+    CHECK(out.starts_with("-:443 203.0.113.9 - - [t] "));
+    r.host = "example.com";
     out.clear();
     WorkerLogs::format_json(out, "2026-09-17T10:15:32+03:00", r);
     CHECK_EQ(out, std::string("{\"time\":\"2026-09-17T10:15:32+03:00\",\"remote\":\"203.0.113.9\","
@@ -2153,7 +2173,7 @@ static void test_config_locations() {
     Config cfg = load_config(dir / "ok.toml");
     CHECK_EQ(cfg.sites.size(), 1u);
     const SiteConfig& site = cfg.sites[0];
-    CHECK(cfg.log.json && cfg.log.level == "info" && cfg.log.error == "stderr");
+    CHECK(cfg.log.format == AccessLogFormat::json && cfg.log.level == "info" && cfg.log.error == "stderr");
     CHECK(cfg.log.access.size() > 16 &&
           cfg.log.access.compare(cfg.log.access.size() - 16, 16, "/logs/access.log") == 0);
     CHECK(site.access_log == cfg.log.access);  // inherited
@@ -4694,6 +4714,17 @@ static void test_control_commands() {
     CHECK(parse_log_line("127.0.0.1 - - [18/Sep/2026:21:44:39 +0300] \"GET /x?y HTTP/1.1\" 404 150 \"-\" \"curl\"", l));
     CHECK(l.status == 404 && l.level.empty());
     const std::time_t combined = l.time;
+    CHECK(l.host.empty());
+    // vhost_combined (the default since alpha.120): the host asked for, lower case, without its port;
+    // "-" is none. A combined line with an IPv6 client is still three fields before the stamp.
+    CHECK(parse_log_line("Example.com:443 127.0.0.1 - - [18/Sep/2026:21:44:39 +0300] \"GET /x HTTP/1.1\" 404 150 \"-\" \"curl\"", l));
+    CHECK(l.status == 404 && l.host == "example.com" && l.time == combined);
+    CHECK(parse_log_line("[2001:DB8::1]:443 2001:db8::9 - anna [18/Sep/2026:21:44:39 +0300] \"GET / HTTP/2.0\" 200 1 \"-\" \"-\"", l));
+    CHECK(l.host == "[2001:db8::1]" && l.status == 200);
+    CHECK(parse_log_line("-:80 198.51.100.4 - - [18/Sep/2026:21:44:39 +0300] \"GET / HTTP/1.0\" 421 0 \"-\" \"-\"", l));
+    CHECK(l.host.empty() && l.status == 421);
+    CHECK(parse_log_line("2001:db8::9 - - [18/Sep/2026:21:44:39 +0300] \"GET / HTTP/1.1\" 200 1 \"-\" \"-\"", l));
+    CHECK(l.host.empty() && l.status == 200);
     CHECK(parse_log_line(R"({"time":"2026-09-18T21:44:39+03:00","remote":"127.0.0.1","status":502,"bytes":1})", l));
     CHECK(l.status == 502 && l.time == combined);  // the same instant in both formats
     CHECK(parse_log_line(R"({"time":"2026-09-18T18:44:39+00:00","status":200})", l) && l.time == combined);  // zone applied
@@ -4790,7 +4821,7 @@ static void test_control_commands() {
                                  "{\"time\":\"2026-10-02T10:00:03+00:00\",\"remote\":\"203.0.113.5\",\"host\":\"B.test:8080\",\"method\":\"GET\",\"target\":\"/y\",\"proto\":\"HTTP/1.1\",\"status\":500,\"bytes\":1}\n";
         r = logs(cfg, one);
         CHECK(r["count"].num() == 2 && r["lines"].items()[0].get("text").find("/x") != std::string_view::npos && r["lines"].items()[1].get("text").find("/y") != std::string_view::npos &&
-              r.get("note").find("JSON lines carry the host") != std::string_view::npos);
+              r.get("note").find("lines carry the host asked for") != std::string_view::npos);
         one.site = "*";
         CHECK(find_site(cfg, "*") != nullptr);
         r = logs(cfg, one);
@@ -6813,7 +6844,7 @@ static void test_protection() {
         kb.login_jails = {LoginJail{"agensio-login", "/var/log/agensio/access.log", {"kb.test"}, {{"/?controller=AuthController&action=check", true, false}, {"/ucp.php?mode=login", true, false}, {"/x+y", false, false}}}};
         CHECK(render_jail(kb).find("filter    = agensio-login[paths=\"" + login_paths_regex(kb.login_jails[0].paths) + "\"]") != std::string::npos && render_jail(kb).find('%') == std::string::npos &&
               render_jail(kb).find("# Credentials posted to a login path of kb.test: ten in ten minutes bans for an hour.") != std::string::npos);
-        CHECK(protection_filters()[0].text.find("failregex = (?i)^<HOST> \\S+ \\S+ \\[\\] \"POST (?:<paths>) HTTP/\\S+\" \\d{3} ") != std::string::npos &&
+        CHECK(protection_filters()[0].text.find("failregex = (?i)^(?:\\S+:\\d+ )?<HOST> \\S+ \\S+ \\[\\] \"POST (?:<paths>) HTTP/\\S+\" \\d{3} ") != std::string::npos &&
               protection_filters()[0].text.find("paths = " + login_paths_regex(default_protection_input().login_jails[0].paths) + "\n") != std::string::npos &&
               protection_filters()[0].text.find('%') == std::string::npos);
     }

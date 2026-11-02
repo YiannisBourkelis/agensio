@@ -932,7 +932,7 @@ acme = { email = "admin@example.com" }
 
 [log]
 access = "/var/log/agensio/access.log"   # every site without an access_log of its own
-format = "json"                          # every access log; "combined", the default, is what fail2ban reads
+format = "json"                          # every access log; the default is "vhost_combined", which fail2ban reads
 error = "/var/log/agensio/error.log"
 level = "warn"
 ```
@@ -951,10 +951,13 @@ access_log = "/var/log/agensio/sites/example.com/access.log"   # the port-80 red
 `access_log = "off"` writes nothing for that site. Lines are buffered per worker and written
 every second. A JSON line has `time`, `remote`, `host`, `method`, `target`, `proto`, `status`,
 `bytes`, `referer` and `user_agent`, plus `user` behind a password and `upstream` (the outcome
-of a PHP or proxied request) when there is one; `host` is what lets a tool tell sites apart in
-a shared file, which the combined format cannot. The format is one setting for every access
-log, and the trade-off is fail2ban: its filters read the combined format, so with JSON no jail
-can count login attempts (`agensio ctl health` says `fail2ban_log_format`). A site with its own
+of a PHP or proxied request) when there is one. The default, `vhost_combined`, is Apache's text
+line with `host:port` in front (`example.com:443 203.0.113.7 - - [...] "GET / HTTP/1.1" 200 ...`),
+so a shared file tells sites apart too, and a scan by bare address shows as `203.0.113.9:80`;
+`combined` is the classic line without the prefix, for a pipeline that expects exactly it. The
+format is one setting for every access log, and the trade-off of JSON is fail2ban: its filters
+read the two combined forms, so with JSON no jail can count login attempts (`agensio ctl health`
+says `fail2ban_log_format`). A site with its own
 `user` gets its log made `agensio:<site group>` `0640` at start, so the account can read it.
 The package's logrotate rule rotates `/var/log/agensio/*.log` and the sites' own logs,
 `/var/log/agensio/sites/*.log` (where `site-create` puts them) and `/var/log/agensio/sites/*/*.log`,

@@ -143,8 +143,12 @@ for p in '/?controller=AuthController&action=check' '/index.php?controller=AuthC
 for p in '/login.html' '/login/x' '/signinx' '/?controller=TaskController&action=save' '/signin/reset' '/index.php' '/index.php?option=com_content&task=article.save' '/index.php?controller=BoardAjaxController&action=save'; do
   i=$((i+1)); printf '203.0.113.9 - - [02/Oct/2026:10:00:%02d +0000] "POST %s HTTP/1.1" 302 0 "-" "x"\n' $i "$p" >> $T/spell.log; done
 printf '203.0.113.9 - - [02/Oct/2026:10:00:40 +0000] "GET /login HTTP/1.1" 200 0 "-" "x"\n' >> $T/spell.log
+# The vhost_combined form (the default since alpha.120, host:port in front): the same filter reads both.
+printf 'one.test:18880 203.0.113.9 - - [02/Oct/2026:10:00:41 +0000] "POST /login HTTP/1.1" 302 0 "-" "x"\n' >> $T/spell.log
+printf '[2001:db8::1]:443 2001:db8::9 - - [02/Oct/2026:10:00:42 +0000] "POST /signin HTTP/1.1" 302 0 "-" "x"\n' >> $T/spell.log
+printf -- '-:80 198.51.100.4 - - [02/Oct/2026:10:00:43 +0000] "GET /login HTTP/1.0" 421 0 "-" "x"\n' >> $T/spell.log  # printf -- : a line starting with - is no option
 PATHS=$(ctl protection --jail | sed -n 's/^filter    = agensio-login\[paths="\(.*\)"\]$/\1/p' | head -1)
-check "the rendered login filter matches all seventeen spellings of the sites' logins (percent-encoding in either case, encoded slashes and dots, repeated slashes, dot segments, case, trailing slash, the PHP front controller before the path, query order and extra parameters) and none of the nine that are not logins (a format suffix or path info on a plain path, index.php alone or with another query)" "17 matched, 9 missed" "$(fail2ban-regex $T/spell.log "agensio-login[paths=\"$PATHS\"]" 2>&1 | sed -n 's/^Lines: [0-9]* lines, [0-9]* ignored, \([0-9]* matched, [0-9]* missed\)$/\1/p')"
+check "the rendered login filter matches all seventeen spellings of the sites' logins (percent-encoding in either case, encoded slashes and dots, repeated slashes, dot segments, case, trailing slash, the PHP front controller before the path, query order and extra parameters), and two vhost_combined lines (a name, an IPv6 literal, in front), and none of the ten that are not logins (a format suffix or path info on a plain path, index.php alone or with another query, a GET with the prefix)" "19 matched, 10 missed" "$(fail2ban-regex $T/spell.log "agensio-login[paths=\"$PATHS\"]" 2>&1 | sed -n 's/^Lines: [0-9]* lines, [0-9]* ignored, \([0-9]* matched, [0-9]* missed\)$/\1/p')"
 # The alpha.45 report's pathological lines: "./" repeated to 4, 8 and 16 KB and "a/../" to 16 KB before
 # the login path; the grammar is unambiguous, so all four match within the time limit (2.3 s and worse before).
 python3 - "$T/slow.log" <<'PYT'

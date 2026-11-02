@@ -1600,8 +1600,7 @@ void Server::run() {
     for (auto& w : workers_) {
         guards_.push_back(
             std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(w->ctx.get_executor()));
-        w->state.logs.attach(&logs_,
-                             cfg_.log.json ? AccessLogFormat::json : AccessLogFormat::combined);
+        w->state.logs.attach(&logs_, cfg_.log.format);
         arm_flush(*w);  // always: a reload may add the first access log later
     }
     for (std::size_t i = 0; i < acceptors_.size(); ++i)
@@ -2141,6 +2140,7 @@ bool Server::switch_to(const std::shared_ptr<Generation>& gen, std::string& erro
         asio::post(w->ctx, [this, w = w.get(), gen, live, pending] {
             w->gen = gen;
             apply_server_header(w->state, gen->cfg.server_header);  // the one key of every answer's head (alpha.110)
+            w->state.logs.set_format(gen->cfg.log.format);          // [log] format applies on reload (2026-11-02)
             if (pending->fetch_sub(1, std::memory_order_acq_rel) != 1) return;
             const std::size_t dropped = cache_.retain_scopes(*live);
             for (auto& x : workers_) asio::post(x->ctx, [x = x.get()] { x->state.local.drop_stale(); });

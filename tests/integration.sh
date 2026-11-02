@@ -607,8 +607,8 @@ check "strict: OPTIONS * with an unknown Host is 421" "421" "$(printf 'OPTIONS *
 curl -s -o /dev/null -H 'Host: four21.invalid' $S/four21-probe-h1
 curl -s -o /dev/null --http2-prior-knowledge -H 'Host: four21.invalid' $S/four21-probe-h2
 sleep 1.3
-check "strict: a 421 over HTTP/1 and HTTP/2 is in the server's access log ([log] access)" "1 1" \
-  "$(grep -c '"GET /four21-probe-h1 HTTP/1.1" 421 ' bench/tmp/access.log) $(grep -c '"GET /four21-probe-h2 HTTP/2.0" 421 ' bench/tmp/access.log)"
+check "strict: a 421 over HTTP/1 and HTTP/2 is in the server's access log ([log] access), its line starting with the name asked for and the port (vhost_combined); an HTTP/1.0 request without Host starts with -:port" "1 1 1" \
+  "$(grep -c '^four21.invalid:8099 127.0.0.1 - - .*"GET /four21-probe-h1 HTTP/1.1" 421 ' bench/tmp/access.log) $(grep -c '^four21.invalid:8099 127.0.0.1 - - .*"GET /four21-probe-h2 HTTP/2.0" 421 ' bench/tmp/access.log) $(grep -c '^-:8099 127.0.0.1 - - .*"GET / HTTP/1.0" 421 ' bench/tmp/access.log)"
 sni() { echo | openssl s_client -connect 127.0.0.1:8446 "$@" 2>/dev/null | openssl x509 -noout -subject 2>/dev/null | sed 's/.*CN *= *//'; }
 check "sni: each site gets its own certificate" "a.test b.test" "$(sni -servername a.test) $(sni -servername b.test)"
 check "sni: a name no site lists is refused, no other site's certificate shown" "" "$(sni -servername c.test)"
@@ -1352,7 +1352,7 @@ check "boundaries: an unrecognised method is 405 and the line is logged, escaped
 # jails rendered for this host, read without a helper; every listener here is loopback, so
 # nothing is exposed and health stays quiet; the packaged copies are the renderer's default
 # output; login_paths through the control plane and the command line.
-check "protection: rendered for this host; loopback only, so nothing is exposed and health has no protection finding; one file alone with --nft, --jail (the four host-wide jails, a login jail for the server-wide log and one per site log), --filter; the packaged copies are the renderer's default output" "200 False [] combined loopback 0 0 #!/usr/sbin/nft -f 4 both 1 same same same same" "$(curl -sS -o bench/tmp/prot.json -w '%{http_code}' --unix-socket $CS http://control/v1/protection) $(python3 -c 'import json; d=json.load(open("bench/tmp/prot.json")); print(d["exposed"], d["ports"]["tcp"], d["log_format"], "loopback" if d["summary"].startswith("every listener is on loopback") else d["summary"], len(d["findings"]))') $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len([f for f in d["findings"] if f["code"].startswith(("firewall_", "fail2ban_", "protection_"))]))') $(ctl protection --nft --socket $CS | head -1) $(ctl protection --jail --socket $CS | grep -c -E '^\[agensio-(auth|denied|scan|post)\]') $(grep -q '^\[agensio-login\]' <<< "$(ctl protection --jail --socket $CS)" && grep -q '^\[agensio-login-' <<< "$(ctl protection --jail --socket $CS)" && echo both) $(ctl protection --filter agensio-auth --socket $CS | grep -c '^failregex') $(diff -q <("$BIN" protection --defaults --nft) packaging/firewall/agensio.nft > /dev/null && echo same) $(diff -q <("$BIN" protection --defaults --jail) packaging/fail2ban/jail.d/agensio.conf > /dev/null && echo same) $(diff -q <("$BIN" protection --defaults --unit) packaging/agensio-firewall.service > /dev/null && echo same) $(for f in agensio-login agensio-auth agensio-scan agensio-post agensio-denied; do diff -q <("$BIN" protection --defaults --filter $f) packaging/fail2ban/filter.d/$f.conf > /dev/null || echo differ; done; echo same)"
+check "protection: rendered for this host; loopback only, so nothing is exposed and health has no protection finding; one file alone with --nft, --jail (the four host-wide jails, a login jail for the server-wide log and one per site log), --filter; the packaged copies are the renderer's default output" "200 False [] vhost_combined loopback 0 0 #!/usr/sbin/nft -f 4 both 1 same same same same" "$(curl -sS -o bench/tmp/prot.json -w '%{http_code}' --unix-socket $CS http://control/v1/protection) $(python3 -c 'import json; d=json.load(open("bench/tmp/prot.json")); print(d["exposed"], d["ports"]["tcp"], d["log_format"], "loopback" if d["summary"].startswith("every listener is on loopback") else d["summary"], len(d["findings"]))') $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len([f for f in d["findings"] if f["code"].startswith(("firewall_", "fail2ban_", "protection_"))]))') $(ctl protection --nft --socket $CS | head -1) $(ctl protection --jail --socket $CS | grep -c -E '^\[agensio-(auth|denied|scan|post)\]') $(grep -q '^\[agensio-login\]' <<< "$(ctl protection --jail --socket $CS)" && grep -q '^\[agensio-login-' <<< "$(ctl protection --jail --socket $CS)" && echo both) $(ctl protection --filter agensio-auth --socket $CS | grep -c '^failregex') $(diff -q <("$BIN" protection --defaults --nft) packaging/firewall/agensio.nft > /dev/null && echo same) $(diff -q <("$BIN" protection --defaults --jail) packaging/fail2ban/jail.d/agensio.conf > /dev/null && echo same) $(diff -q <("$BIN" protection --defaults --unit) packaging/agensio-firewall.service > /dev/null && echo same) $(for f in agensio-login agensio-auth agensio-scan agensio-post agensio-denied; do diff -q <("$BIN" protection --defaults --filter $f) packaging/fail2ban/filter.d/$f.conf > /dev/null || echo differ; done; echo same)"
 # The files root loads, written by agensio itself (the alpha.94 report): --out creates them with their
 # own mode whatever root's umask, replaces a looser file, and leaves the file as it was when the render
 # fails (a `>` emptied it first, or filled it with the error); health names a group-writable one; no
@@ -3219,13 +3219,13 @@ check "Expect: 100-continue not read by handler: final answer, no 100, close" "4
 check "unknown transfer coding: 501" "HTTP/1.1 501 Not Implemented" "$(printf 'POST / HTTP/1.1\r\nHost: l\r\nTransfer-Encoding: gzip\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | tr -d '\r')"
 check "Expect other than 100-continue: 417" "HTTP/1.1 417 Expectation Failed" "$(printf 'POST / HTTP/1.1\r\nHost: l\r\nContent-Length: 1\r\nExpect: x\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | tr -d '\r')"
 check "curl POST 405 keeps the connection for the next request" "0" "$(curl -sS -o /dev/null -o /dev/null -w '%{num_connects}\n' -d 'a=b' http://127.0.0.1:8080/ http://127.0.0.1:8080/ | tail -1)"
-# ---- access log (A5): combined format, buffered per worker, flushed each second ----
+# ---- access log (A5): vhost_combined format (host:port in front, the default since alpha.120), buffered per worker, flushed each second ----
 curl -sS -o /dev/null -A 'agensio-test/1.0' -e 'http://ref.example/' http://127.0.0.1:8080/
 curl -sS -o /dev/null -I http://127.0.0.1:8080/
 curl -sS -o /dev/null http://127.0.0.1:8080/nope
 sleep 1.2
 IDXLEN=$(wc -c < bench/www/index.html | tr -d ' ')
-check "access log: GET line with status, size, referer, agent" "1" "$(grep -c "^127.0.0.1 - - \[.*\] \"GET / HTTP/1.1\" 200 $IDXLEN \"http://ref.example/\" \"agensio-test/1.0\"$" bench/tmp/access.log)"
+check "access log: GET line with status, size, referer, agent" "1" "$(grep -c "^127.0.0.1:8080 127.0.0.1 - - \[.*\] \"GET / HTTP/1.1\" 200 $IDXLEN \"http://ref.example/\" \"agensio-test/1.0\"$" bench/tmp/access.log)"
 check "access log: HEAD counts no body bytes" "yes" "$(grep -q '"HEAD / HTTP/1.1" 200 0 ' bench/tmp/access.log && echo yes)"
 check "access log: 404 logged" "yes" "$(grep -q '"GET /nope HTTP/1.1" 404 ' bench/tmp/access.log && echo yes)"
 check "access log: 405 POST logged" "yes" "$(grep -q '"POST / HTTP/1.1" 405 ' bench/tmp/access.log && echo yes)"
@@ -3237,13 +3237,13 @@ kill -USR1 $PID; sleep 0.3
 curl -sS -o /dev/null http://127.0.0.1:8080/style.css; sleep 1.2
 check "access log: SIGUSR1 reopens the file" "yes" "$([ -s bench/tmp/access.log ] && grep -q '"GET /style.css HTTP/1.1" 200 ' bench/tmp/access.log && echo yes)"
 curl -sS -o /dev/null -H 'X-Forwarded-For: 198.51.100.7' http://127.0.0.1:8080/style.css; sleep 1.2
-check "access log: client address from a trusted proxy" "yes" "$(grep -q '^198.51.100.7 - - .*"GET /style.css' bench/tmp/access.log && echo yes)"
+check "access log: client address from a trusted proxy" "yes" "$(grep -q '^127.0.0.1:8080 198.51.100.7 - - .*"GET /style.css' bench/tmp/access.log && echo yes)"
 # An X-Forwarded-For entry with a port, as some load balancers write it (alpha.52 report,
 # finding 3): the address without the port, for IPv4 and for a bracketed IPv6.
 curl -sS -o /dev/null -H 'X-Forwarded-For: 198.51.100.9:1234' 'http://127.0.0.1:8080/style.css?xff-port4'
 curl -sS -o /dev/null -H 'X-Forwarded-For: [2001:db8::9]:443' 'http://127.0.0.1:8080/style.css?xff-port6'
 curl -sS -o /dev/null -H 'X-Forwarded-For: 198.51.100.9:99999' 'http://127.0.0.1:8080/style.css?xff-portbad'; sleep 1.2
-check "access log: an X-Forwarded-For entry with a port is the address without it (IPv4, [IPv6]); a port above 65535 is garbage, so the client is the proxy" "198.51.100.9 2001:db8::9 127.0.0.1" "$(grep -F 'xff-port4' bench/tmp/access.log | tail -1 | cut -d' ' -f1) $(grep -F 'xff-port6' bench/tmp/access.log | tail -1 | cut -d' ' -f1) $(grep -F 'xff-portbad' bench/tmp/access.log | tail -1 | cut -d' ' -f1)"
+check "access log: an X-Forwarded-For entry with a port is the address without it (IPv4, [IPv6]); a port above 65535 is garbage, so the client is the proxy" "198.51.100.9 2001:db8::9 127.0.0.1" "$(grep -F 'xff-port4' bench/tmp/access.log | tail -1 | cut -d' ' -f2) $(grep -F 'xff-port6' bench/tmp/access.log | tail -1 | cut -d' ' -f2) $(grep -F 'xff-portbad' bench/tmp/access.log | tail -1 | cut -d' ' -f2)"
 # A dual-stack listener records an IPv4 client as IPv4, never as ::ffff:127.0.0.1 (2026-10-07),
 # and an IPv6 client as itself; a mapped X-Forwarded-For entry is unmapped too.
 # A server of its own, because a listener on [::] is public and the main configuration's
@@ -3286,8 +3286,8 @@ PYABORT
 sleep 1.2
 kill $DUALPID 2>/dev/null; wait $DUALPID 2>/dev/null
 check "access log: a client that resets mid-response is named in its line, over plain HTTP, TLS and IPv6 (alpha.57 report: \"-\")" "127.0.0.1 127.0.0.1 ::1" \
-  "$(for a in plain tls v6; do grep -F "agensio-abort-$a" bench/tmp/dual/access.log | tail -1 | cut -d' ' -f1; done | tr '\n' ' ' | sed 's/ $//')"
-check "access log: a dual-stack listener records an IPv4 client as IPv4, an IPv6 one as IPv6; a mapped X-Forwarded-For entry unmapped" "127.0.0.1 ::1 198.51.100.8" "$(grep -F 'dual-v4' bench/tmp/dual/access.log | tail -1 | cut -d' ' -f1) $(grep -F 'dual-v6' bench/tmp/dual/access.log | tail -1 | cut -d' ' -f1) $(grep -F 'dual-xff' bench/tmp/access.log | tail -1 | cut -d' ' -f1)"
+  "$(for a in plain tls v6; do grep -F "agensio-abort-$a" bench/tmp/dual/access.log | tail -1 | cut -d' ' -f2; done | tr '\n' ' ' | sed 's/ $//')"
+check "access log: a dual-stack listener records an IPv4 client as IPv4, an IPv6 one as IPv6; a mapped X-Forwarded-For entry unmapped" "127.0.0.1 ::1 198.51.100.8" "$(grep -F 'dual-v4' bench/tmp/dual/access.log | tail -1 | cut -d' ' -f2) $(grep -F 'dual-v6' bench/tmp/dual/access.log | tail -1 | cut -d' ' -f2) $(grep -F 'dual-xff' bench/tmp/access.log | tail -1 | cut -d' ' -f2)"
 printf '<html><body>changed</body></html>\n' > bench/www/sub/index.html; sleep 1.2
 check "revalidation picks up change" "changed" "$(curl -sS http://127.0.0.1:8080/sub/ | sed 's/<[^>]*>//g')"
 printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html

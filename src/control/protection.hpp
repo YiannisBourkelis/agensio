@@ -102,7 +102,8 @@ struct ProtectionInput {
     std::string error_log;                    // the error log's file; empty when it goes to stderr
     bool error_log_warn = true;               // [log] level writes warn lines (the auth failed lines are warn)
     std::vector<std::string> auth_sites;      // sites with a password on some path, ascending
-    bool combined = true;                     // [log] format = "combined": the filters read that format only
+    bool combined = true;                     // [log] format is vhost_combined or combined: what the filters read (not JSON)
+    std::string log_format = "vhost_combined";  // its name, for the report
     bool exposed = false;                     // at least one listener is not loopback
     std::string firewall_file;                // where this host keeps the ruleset: <config dir>/firewall.nft
     std::string host_protection = "check";    // [control] host_protection

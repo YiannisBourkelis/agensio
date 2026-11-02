@@ -1379,6 +1379,7 @@ private:
         AccessRecord rec;
         rec.remote = s.stream.conn.client_address.empty() ? std::string_view(remote_) : s.stream.conn.client_address;
         rec.host = req.host;
+        rec.port = listener_->port;
         rec.method = req.method_name;
         rec.target = req.target;
         rec.version_minor = 1;

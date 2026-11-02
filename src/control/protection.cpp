@@ -273,7 +273,8 @@ std::string login_filter_text() {
            "# application an optional .format suffix, and for a login routed through the query string its\n"
            "# parameters in any order with others allowed. The grammar is unambiguous, so a long request\n"
            "# line costs linear time. agensio ctl protection renders the same from each site's paths, one\n"
-           "# agensio-login jail per access log.\n"
+           "# agensio-login jail per access log. The line is agensio's vhost_combined (host:port first, the\n"
+           "# default) or combined access log: the prefix is optional, the client address follows it.\n"
            "\n"
            "[INCLUDES]\n"
            "before = common.conf\n"
@@ -285,9 +286,9 @@ std::string login_filter_text() {
            "paths = " + paths + "\n"
            "\n"
            "[Definition]\n"
-           "failregex = (?i)^<HOST> \\S+ \\S+ \\[\\] \"POST (?:<paths>) HTTP/\\S+\" \\d{3} \n"
+           "failregex = (?i)^(?:\\S+:\\d+ )?<HOST> \\S+ \\S+ \\[\\] \"POST (?:<paths>) HTTP/\\S+\" \\d{3} \n"
            "ignoreregex =\n"
-           "datepattern = ^[^\\[]*\\[({DATE})\n";
+           "datepattern = ^(?:\\[[^\\]]*\\]:\\d+ )?[^\\[]*\\[({DATE})\n";
 }
 
 // Failed passwords on [[site.auth]] paths (2026-10-08), from the error log as fail2ban's own
@@ -317,36 +318,39 @@ const char* kFilterDenied =
     "# fail2ban filter for agensio (docs/configuration.md 18): requests refused with 403.\n"
     "# An address outside a site's access rule, a password asked for over plain HTTP, an application\n"
     "# refusing. A 401 is not counted: every browser meets one first on a password-protected path\n"
-    "# (agensio-auth counts the failed passwords themselves, from the error log).\n"
+    "# (agensio-auth counts the failed passwords themselves, from the error log). The line is agensio's\n"
+    "# vhost_combined (host:port first, the default) or combined access log: the prefix is optional.\n"
     "\n"
     "[INCLUDES]\n"
     "before = common.conf\n"
     "\n"
     "[Definition]\n"
-    "failregex = ^<HOST> \\S+ \\S+ \\[\\] \"\\S+ \\S+ HTTP/\\S+\" 403 \n"
+    "failregex = ^(?:\\S+:\\d+ )?<HOST> \\S+ \\S+ \\[\\] \"\\S+ \\S+ HTTP/\\S+\" 403 \n"
     "ignoreregex =\n"
-    "datepattern = ^[^\\[]*\\[({DATE})\n";
+    "datepattern = ^(?:\\[[^\\]]*\\]:\\d+ )?[^\\[]*\\[({DATE})\n";
 
 const char* kFilterScan =
     "# fail2ban filter for agensio (docs/configuration.md 18): paths that do not exist, in numbers.\n"
     "# A browser meets a 404 now and then; a scanner probing for wp-login.php, phpmyadmin and\n"
     "# backups meets dozens a minute (the agensio presets answer those 404 themselves). A 421 is\n"
-    "# a name no site answers on that address: a scanner going by IP gets one per request.\n"
+    "# a name no site answers on that address: a scanner going by IP gets one per request. The line is\n"
+    "# agensio's vhost_combined (host:port first, the default) or combined access log: the prefix is optional.\n"
     "\n"
     "[INCLUDES]\n"
     "before = common.conf\n"
     "\n"
     "[Definition]\n"
-    "failregex = ^<HOST> \\S+ \\S+ \\[\\] \"(?:GET|POST|HEAD) \\S+ HTTP/\\S+\" (?:404|421) \n"
+    "failregex = ^(?:\\S+:\\d+ )?<HOST> \\S+ \\S+ \\[\\] \"(?:GET|POST|HEAD) \\S+ HTTP/\\S+\" (?:404|421) \n"
     "ignoreregex =\n"
-    "datepattern = ^[^\\[]*\\[({DATE})\n";
+    "datepattern = ^(?:\\[[^\\]]*\\]:\\d+ )?[^\\[]*\\[({DATE})\n";
 
 const char* kFilterPost =
     "# fail2ban filter for agensio (docs/configuration.md 18): POST requests, whatever the path.\n"
     "# The catch-all behind agensio-login for an application whose login path nobody named: the\n"
     "# jail's threshold is high (a POST a second, sustained), so a user never reaches it and a\n"
     "# brute-force tool does. An API clients legitimately post to that often is excluded with\n"
-    "# the `ignore` parameter: filter = agensio-post[ignore=\"/api/|/jsonrpc\\.php\"] in the jail.\n"
+    "# the `ignore` parameter: filter = agensio-post[ignore=\"/api/|/jsonrpc\\.php\"] in the jail. The line is\n"
+    "# agensio's vhost_combined (host:port first, the default) or combined access log: the prefix is optional.\n"
     "\n"
     "[INCLUDES]\n"
     "before = common.conf\n"
@@ -355,9 +359,9 @@ const char* kFilterPost =
     "ignore = (?!)\n"
     "\n"
     "[Definition]\n"
-    "failregex = ^<HOST> \\S+ \\S+ \\[\\] \"POST \\S+ HTTP/\\S+\" \\d{3} \n"
-    "ignoreregex = ^<HOST> \\S+ \\S+ \\[\\] \"POST (?:<ignore>)\n"
-    "datepattern = ^[^\\[]*\\[({DATE})\n";
+    "failregex = ^(?:\\S+:\\d+ )?<HOST> \\S+ \\S+ \\[\\] \"POST \\S+ HTTP/\\S+\" \\d{3} \n"
+    "ignoreregex = ^(?:\\S+:\\d+ )?<HOST> \\S+ \\S+ \\[\\] \"POST (?:<ignore>)\n"
+    "datepattern = ^(?:\\[[^\\]]*\\]:\\d+ )?[^\\[]*\\[({DATE})\n";
 
 const std::vector<ProtectionFilter>& shipped_filters() {
     static const std::vector<ProtectionFilter> kFilters = {
@@ -479,7 +483,8 @@ ProtectionInput protection_input(const Config& cfg, const UidLookup& uid_of, std
     in.firewall_file = (cfg.config_path.parent_path() / "firewall.nft").string();
     in.host_protection = cfg.control.host_protection;
     for (const auto& c : cfg.trusted_proxies) in.trusted_proxies.push_back(c.text());
-    in.combined = !cfg.log.json;
+    in.combined = cfg.log.format != AccessLogFormat::json;
+    in.log_format = std::string(access_log_format_name(cfg.log.format));
     if (cfg.log.error != "stderr") in.error_log = cfg.log.error;
     in.error_log_warn = cfg.log.level != "error";
     for (const auto& s : cfg.sites) {
@@ -1131,7 +1136,7 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
     const Verdict v = judge(in, probe, files);
     json::Value r = json::Value::object().set("ok", true).set("host_protection", in.host_protection).set("exposed", in.exposed);
     r.set("ports", json::Value::object().set("tcp", ports_json(in.tcp_ports)).set("udp", ports_json(in.udp_ports)));
-    r.set("logs", strings_json(in.logs)).set("log_format", in.combined ? "combined" : "json").set("login_paths", strings_json(in.login_paths));
+    r.set("logs", strings_json(in.logs)).set("log_format", in.log_format).set("login_paths", strings_json(in.login_paths));
     if (!in.unlogged.empty()) r.set("unlogged_sites", strings_json(in.unlogged));
     json::Value ljs = json::Value::array();
     for (const auto& j : in.login_jails) {

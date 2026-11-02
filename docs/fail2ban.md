@@ -65,7 +65,11 @@ Two tiers of jails come out of that file.
 ### 2a. The attempt tier: the access logs
 
 These jails need nothing from the application. They read agensio's access logs, which are
-in the combined format (`[log] format = "combined"`, the default; JSON logs are not read)
+in the `vhost_combined` format (`[log] format`, the default since 0.1.0-alpha.120: Apache's
+`host:port` in front of the combined line) or the `combined` one, the prefix optional in every
+filter (JSON logs are not read; a filter installed by an older build knows no prefix and sees
+nothing in a `vhost_combined` log, which health reports as `fail2ban_filter_stale` with the
+install line)
 with the client address first. Behind a load balancer or CDN, `server.trusted_proxies`
 makes that address the real client's, so bans hit the right one. A trusted proxy itself is
 never banned: every agensio jail lists the trusted proxies, with loopback, in `ignoreip`. A

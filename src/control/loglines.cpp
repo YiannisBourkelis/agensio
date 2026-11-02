@@ -112,8 +112,25 @@ bool parse_log_line(std::string_view line, LogLine& out) {
         return true;
     }
     // Combined: remote - - [18/Sep/2026:21:44:39 +0300] "GET / HTTP/1.1" 404 153 "-" "-"
+    // vhost_combined (the default since alpha.120): host:port in front, so four fields before the
+    // stamp instead of three; the host without its port, "-" for a request that sent none.
     const std::size_t open = line.find(" [");
     if (open == std::string_view::npos) return false;
+    {
+        std::size_t spaces = 0, first = std::string_view::npos;
+        for (std::size_t i = 0; i < open; ++i)
+            if (line[i] == ' ') {
+                if (first == std::string_view::npos) first = i;
+                ++spaces;
+            }
+        if (spaces == 3 && first > 0) {
+            std::string_view vh = line.substr(0, first);
+            const std::size_t close = vh.front() == '[' ? vh.find(']') : std::string_view::npos;
+            const std::size_t colon = vh.rfind(':');
+            if (colon != std::string_view::npos && (close == std::string_view::npos || close < colon)) vh = vh.substr(0, colon);
+            if (vh != "-") out.host = lower(vh);
+        }
+    }
     const std::string_view stamp = line.substr(open + 2);
     long off = 0;
     if (stamp.size() < 26 || !digits(stamp, 0, 2, d) || stamp[2] != '/' || stamp[6] != '/' || !digits(stamp, 7, 4, y) ||

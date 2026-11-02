@@ -1444,7 +1444,7 @@ discovered or named in `[php.runtimes."X.Y"]`.
 ```toml
 [log]
 access = "logs/access.log"   # default: this path next to the config file; "off" disables
-format = "combined"          # Apache/nginx combined (fail2ban filters work) or "json"
+format = "vhost_combined"    # the default: Apache's, host:port first; or "combined", or "json"
 error = "stderr"             # or a file
 level = "warn"               # error | warn | info
 ```
@@ -1453,8 +1453,39 @@ A site sets `access_log = "path"` or `"off"` to differ. A request no site takes 
 name no site answers on a listener without a catch-all, a scanner going by the bare address)
 is written to `[log] access` whatever the sites log, so the fail2ban jails see it (section 18;
 before 0.1.0-alpha.70 it was in no log). Logs are buffered per worker and
-flushed every second; `kill -USR1 <pid>` reopens all files after rotation. The escaping is
-nginx's (`ngx_http_log_escape`): in the combined format `"`, `\`, control bytes and every
+flushed every second; `kill -USR1 <pid>` reopens all files after rotation.
+
+**The line.** `format` is one setting for every access log. The three forms, for the same request:
+
+```
+example.com:443 203.0.113.7 - - [02/Nov/2026:14:03:11 +0200] "GET /wp-login.php HTTP/1.1" 404 153 "-" "Mozilla/5.0"
+203.0.113.7 - - [02/Nov/2026:14:03:11 +0200] "GET /wp-login.php HTTP/1.1" 404 153 "-" "Mozilla/5.0"
+{"time":"2026-11-02T14:03:11+02:00","remote":"203.0.113.7","host":"example.com","method":"GET","target":"/wp-login.php","proto":"HTTP/1.1","status":404,"bytes":153,"referer":"","user_agent":"Mozilla/5.0"}
+```
+
+- `vhost_combined`, the default since 0.1.0-alpha.120: Apache's format of that name (Debian's
+  `other_vhosts_access.log`, `%v:%p %h %l %u %t "%r" %>s %O "%{Referer}i" "%{User-Agent}i"`): the
+  combined line with the host the request asked for, lower case and without its port, and the
+  port of the listener it came in on, in front. The default file is shared by every site without
+  an `access_log` of its own and by the 421 lines, and this is what tells one site's lines from
+  another's there, and a stray domain still pointing at the host (`old-domain.example:443`) from
+  a scan by bare address (`203.0.113.9:80`, or `-:80` for a request that named no host). GoAccess
+  reads it as `VCOMBINED`; the shipped fail2ban filters read it (section 18); `agensio ctl logs
+  --site NAME` on the shared file answers the site's own lines (section 15). A site's own log
+  carries the prefix too, which tells its names apart (`www.example.com` from `example.com`).
+- `combined`: the classic Apache and nginx line, for a pipeline that expects exactly it
+  (AWStats' `LogFormat=1`, GoAccess `COMBINED`, fail2ban's stock `apache-*` and `nginx-*`
+  access-log filters, which anchor on the client address). It carries no host name, so lines of
+  a shared file belong to no site in particular. The default before alpha.120.
+- `json`: one object per line, for a log collector: `time`, `remote`, `host`, `method`,
+  `target`, `proto`, `status`, `bytes`, `referer`, `user_agent`, plus `user` behind a password
+  and `upstream` (the outcome of a PHP or proxied request) when there is one. The shipped
+  fail2ban filters do not read it (health: `fail2ban_log_format`).
+
+The `remote` field is the client agensio believes: the real client behind `trusted_proxies`,
+never the proxy. The user is the one a password check verified (`[[site.auth]]`), never the name
+a refused request claimed. A change of `format` applies at a reload. The escaping is
+nginx's (`ngx_http_log_escape`): in the combined forms `"`, `\`, control bytes and every
 byte from 0x7F up are written `\xHH`, so a line is ASCII whatever a client sent; a JSON line
 keeps well-formed UTF-8 and writes a stray byte as `\xHH` too (a TLS ClientHello sent to
 port 80 used to land raw, 2026-10-02). `agensio ctl logs` and `logs_query` escape the same
@@ -3538,8 +3569,9 @@ belongs:
   byte reaches the server; your provider's DDoS protection or a CDN handles what fills the
   pipe.
 - Brute force on logins and APIs (`wp-login.php`, `xmlrpc.php`, Kanboard's `jsonrpc.php`):
-  fail2ban or CrowdSec reading the access log, whose combined format and escaping are
-  nginx's so their stock filters apply, banning through the firewall for a while.
+  fail2ban or CrowdSec reading the access log, whose line and escaping are Apache's and
+  nginx's (`vhost_combined` with the host in front, or `combined`, section 8) so the shipped
+  filters, and with `combined` their stock ones, apply, banning through the firewall for a while.
 - Slow and idle clients, protocol abuse (HTTP/2 reset floods, QUIC address validation):
   agensio's own timeouts and budgets, which only the server can judge (sections 16 and 17).
 
@@ -3599,8 +3631,9 @@ configuration kept elsewhere. A manual `systemctl restart nftables` on Debian ru
 agensio-firewall` puts the table back (health names an enabled unit whose table is gone), or add
 `include "/etc/agensio/firewall.nft"` to that file instead of the unit.
 
-*fail2ban.* Jails over agensio's access logs (combined format; the filters do not read
-JSON logs) and its error log, rendered for this host's logs, ports and sites: `agensio-login`
+*fail2ban.* Jails over agensio's access logs (the `vhost_combined` and `combined` formats, the
+host:port prefix optional in every filter; the filters do not read JSON logs) and its error log,
+rendered for this host's logs, ports and sites: `agensio-login`
 counts credentials posted to the sites' login paths, ten in ten minutes bans for an hour (a
 failed and a successful login look alike in an access log, so this counts attempts: no one
 types ten passwords in ten minutes, every tool does); `agensio-auth` the error log's `auth
