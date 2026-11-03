@@ -721,8 +721,10 @@ std::vector<AccessNotice> access_notices_for(const SiteSpec& spec, const Config&
     SiteConfig site;
     site.server_names = {spec.domain};
     site.listen = spec_listen(spec, cfg, site.http_listen, site.listen_default);
+    site.managed = true;  // the file this request writes: the notices' way is the site's command (the alpha.122 report: the dry run said "remove the line in ")
+    site.source = site_file(cfg, spec.domain).string();
     // The other sites' addresses, so a listen of this site's own beside theirs is judged (1c:
-    // listen_family_split, listen_ipv6_only); their names and listeners only.
+    // listen_family_split, listen_ipv6_only); their names, listeners and files only.
     for (const SiteConfig& o : cfg.sites) {
         if (std::find(o.server_names.begin(), o.server_names.end(), spec.domain) != o.server_names.end()) continue;  // the site itself, being updated
         SiteConfig c;
@@ -730,6 +732,8 @@ std::vector<AccessNotice> access_notices_for(const SiteSpec& spec, const Config&
         c.listen = o.listen;
         c.http_listen = o.http_listen;
         c.listen_default = o.listen_default;
+        c.managed = o.managed;
+        c.source = o.source;
         view.sites.push_back(std::move(c));
     }
     json::Value all = json::Value::array();

@@ -1454,12 +1454,24 @@ static void test_listen_defaults() {
         // (the alpha.121 report, problem A: the VPS's only public address); one of several does not.
 #ifdef __linux__
         set_host_addresses(HostAddresses{{"192.0.2.10"}});
+        // both.test on 0.0.0.0:8080 is cut off by the specific socket too, and from outside answers on no
+        // address; the advice names the address to add, not 0.0.0.0 (the alpha.122 report, problem D).
         Config one = load("h.toml", "[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\"]\nacme = { email = \"me@x.test\" }\n"
                                         "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n"
-                                        "[[site]]\nserver_name = [\"own.test\"]\nlisten = [\"192.0.2.10:8080\"]\n" + root);
-        CHECK(codes_of(one).find("listen_family_split:own.test") != std::string::npos && codes_of(one).find("listen_ipv6_only:t.test") != std::string::npos);
-        for (const auto& n : access_notices(one))
-            if (n.code == "listen_family_split") CHECK(n.text.find("192.0.2.10:8080 of its own, the host's one IPv4 address apart from loopback") != std::string::npos);
+                                        "[[site]]\nserver_name = [\"own.test\"]\nlisten = [\"192.0.2.10:8080\"]\n" + root +
+                                        "[[site]]\nserver_name = [\"both.test\"]\nlisten = [\"0.0.0.0:8080\"]\n" + root);
+        CHECK(codes_of(one).find("listen_family_split:own.test") != std::string::npos && codes_of(one).find("listen_ipv6_only:t.test") != std::string::npos &&
+              codes_of(one).find("listen_ipv6_only:both.test") != std::string::npos);
+        for (const auto& n : access_notices(one)) {
+            if (n.code == "listen_family_split" && n.site == "own.test")
+                CHECK(n.text.find("192.0.2.10:8080 of its own, the host's one IPv4 address apart from loopback") != std::string::npos && n.text.find("both.test") != std::string::npos &&
+                      n.text.find("cut off from IPv4 clients") != std::string::npos);
+            if (n.code == "listen_ipv6_only" && n.site == "t.test")
+                CHECK(n.text.find("add 192.0.2.10:8080 to this site's listen") != std::string::npos && n.text.find("reachable over IPv6 only") != std::string::npos &&
+                      n.fix.find("listen = [\"[::]:8080\", \"192.0.2.10:8080\"]") != std::string::npos);
+            if (n.code == "listen_ipv6_only" && n.site == "both.test")
+                CHECK(n.text.find("listens on 0.0.0.0:8080 and not on 192.0.2.10:8080") != std::string::npos && n.text.find("from outside it is reachable on no address") != std::string::npos);
+        }
         set_host_addresses(HostAddresses{{"192.0.2.10", "198.51.100.7"}});
         Config two = load("h.toml", "[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\"]\nacme = { email = \"me@x.test\" }\n"
                                         "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n"
@@ -1525,9 +1537,28 @@ static void test_listen_defaults() {
         CHECK(codes(spec, e).find("listen_unbound") == std::string::npos);  // named in the file: open at start
         Config f = load("i.toml", "[server]\nlisten_plain = [\"[::]:8080\"]\n[[site]]\nserver_name = [\"p.test\"]\n" + root);
         spec.listen_plain = "0.0.0.0:8080";
-        std::string warn;
-        for (const auto& n : control::access_notices_for(spec, f)) warn += n.code + ":" + n.site + " ";
+        std::string warn, fix;
+        for (const auto& n : control::access_notices_for(spec, f)) {
+            warn += n.code + ":" + n.site + " ";
+            if (n.code == "listen_family_split") fix = n.fix;
+        }
         CHECK(warn.find("listen_family_split:m.test") != std::string::npos);
+        // The site the dry run judges is the managed file this request writes: its way is its command
+        // (the alpha.122 report, problem C: the warning said "remove the listen line of NAME in  and reload").
+        CHECK(fix.find("agensio ctl site-update m.test --listen-default --yes --reason") == 0);
+    }
+    // The default route's interfaces (the alpha.122 report, problem A): a Docker bridge counted as the
+    // host's second address and silenced the one-address check on the VPS.
+    {
+        std::istringstream route("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+                                 "ens3\t00000000\t0115E8CA\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+                                 "docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
+                                 "ens3\t003CE8CA\t00000000\t0001\t0\t0\t100\t00FCFFFF\t0\t0\t0\n"
+                                 "wg0\t00000000\t00000000\t0000\t0\t0\t0\t00000000\t0\t0\t0\n");  // a default route that is down does not count
+        CHECK(default_route_interfaces(route) == std::set<std::string>{"ens3"});
+        std::istringstream none("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+                                "d0\t0002C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n");
+        CHECK(default_route_interfaces(none).empty());
     }
     set_ipv6_facts(std::nullopt);
     fs::remove_all(dir);

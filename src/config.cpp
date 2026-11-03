@@ -247,13 +247,37 @@ std::optional<Ipv6Facts> g_ipv6_facts;  // the tests' override
 
 void set_ipv6_facts(std::optional<Ipv6Facts> facts) { g_ipv6_facts = facts; }
 
+std::set<std::string> default_route_interfaces(std::istream& route) {
+    std::set<std::string> out;
+    std::string line;
+    std::getline(route, line);  // the header
+    while (std::getline(route, line)) {
+        std::istringstream fields(line);
+        std::string iface, destination, gateway, flags;
+        if (!(fields >> iface >> destination >> gateway >> flags)) continue;
+        unsigned long f = 0;
+        try {
+            f = std::stoul(flags, nullptr, 16);
+        } catch (...) {
+            continue;
+        }
+        if (destination == "00000000" && (f & 1u)) out.insert(iface);  // RTF_UP
+    }
+    return out;
+}
+
 HostAddresses probe_host_addresses() {
     HostAddresses h;
 #ifndef _WIN32
+    std::set<std::string> routed;
+#ifdef __linux__
+    if (std::ifstream route("/proc/net/route"); route) routed = default_route_interfaces(route);
+#endif
     ifaddrs* list = nullptr;
     if (::getifaddrs(&list) != 0) return h;
     for (const ifaddrs* i = list; i; i = i->ifa_next) {
         if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !(i->ifa_flags & IFF_UP)) continue;
+        if (!routed.empty() && (!i->ifa_name || !routed.count(i->ifa_name))) continue;
         sockaddr_in sin{};  // copied, not cast: the entry is a sockaddr of the family checked above
         std::memcpy(&sin, i->ifa_addr, sizeof sin);
         const asio::ip::address_v4 a(ntohl(sin.sin_addr.s_addr));
@@ -274,8 +298,7 @@ void set_host_addresses(std::optional<HostAddresses> addresses) { g_host_address
 
 HostAddresses host_addresses() {
     if (g_host_addresses) return *g_host_addresses;
-    static const HostAddresses probed = probe_host_addresses();
-    return probed;
+    return probe_host_addresses();  // each time: the host's addresses change after the start (DHCP, a bridge brought up)
 }
 
 Ipv6Facts ipv6_facts() {
@@ -3746,12 +3769,12 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
     // 127.0.0.1:P takes loopback alone); without it [::]:P is opened IPv6-only beside any IPv4 listener.
     const bool families_routed = kernel_routes_families(cfg);
     const HostAddresses host = host_addresses();
-    // An IPv4 address of a site's own that cuts the [::]:P sites off IPv4: 0.0.0.0 always; with
-    // SO_REUSEPORT also the host's one IPv4 address apart from loopback, since the kernel hands the
-    // specific socket every connection sent to it and from outside there is nowhere else (the
-    // alpha.121 report: a site on the VPS's only public address cut the others off and nothing said
-    // so), a loopback or one of several addresses never; without SO_REUSEPORT any IPv4 listener,
-    // since [::] is opened IPv6-only beside it.
+    // An IPv4 address of a site's own that cuts other sites of its port off IPv4: 0.0.0.0 always; with
+    // SO_REUSEPORT also the host's one IPv4 address outside visitors reach (the alpha.121 report: a
+    // site on the VPS's only public address cut the others off and nothing said so), since the kernel
+    // hands the specific socket every connection sent to it and from outside there is nowhere else; a
+    // loopback address or one of several never; without SO_REUSEPORT any IPv4 listener, since [::] is
+    // opened IPv6-only beside it.
     auto cuts_off = [&](const asio::ip::address& a) {
         if (!a.is_v4()) return false;
         if (a.to_v4().is_unspecified() || !families_routed) return true;
@@ -3771,93 +3794,139 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
         return s.managed ? "agensio ctl site-update " + s.server_names.front() + " --listen-default --yes --reason \"the server's addresses\""
                          : "remove the listen line of " + s.server_names.front() + " in " + s.source + " and reload";
     };
-    std::map<std::string, std::vector<const SiteConfig*>> ipv4_ports;  // port -> the sites whose own IPv4 address there cuts [::] off
-    for (const auto& site : cfg.sites)
-        for (const auto& l : site_addresses(site)) {
-            asio::ip::address a;
-            std::string p;
-            if (!endpoint_of(l, a, p) || !cuts_off(a)) continue;
-            auto& sites = ipv4_ports[p];
-            if (std::find(sites.begin(), sites.end(), &site) == sites.end()) sites.push_back(&site);
-        }
-    for (const auto& site : cfg.sites) {
-        std::set<std::string> own_ipv4;
-        const std::vector<std::string> addresses = site_addresses(site);
-        for (const auto& l : addresses) {
-            asio::ip::address a;
-            std::string p;
-            if (endpoint_of(l, a, p) && a.is_v4()) own_ipv4.insert(p);
-        }
-        for (const auto& l : addresses) {
-            asio::ip::address a;
-            std::string p;
-            if (!endpoint_of(l, a, p) || !a.is_v6() || !a.to_v6().is_unspecified() || !ipv4_ports.count(p) || own_ipv4.count(p)) continue;
-            const std::string& name = site.server_names.front();
-            std::string others, commands;  // the sites to hand back, and the way for each
-            for (const SiteConfig* o : ipv4_ports[p]) {
-                others += (others.empty() ? "" : ", ") + o->server_names.front();
-                commands += std::string(commands.empty() ? "" : "; ") + hand_back(*o);
-            }
-            out.push_back({"listen_ipv6_only", "warning", name,
-                           name + " listens on [::]:" + p + " and on no IPv4 address with that port, while other sites listen on IPv4 there (" + others +
-                               "): it is reachable over IPv6 only (an IPv4 connection goes to the IPv4 listener); give those sites the server's addresses "
-                               "(1c), one after another, or add 0.0.0.0:" + p + " to this site's listen to serve IPv4 clients too",
-                           // The fix is on the sites that cut it off: a managed site has one address of its own per kind, so
-                           // "both families" is a hand-written site's line (the alpha.120 report, problem C).
-                           "hand the sites on IPv4 there back to the server's addresses, one after another, in one go: " + commands +
-                               " (MCP site_update with listen_tls: \"\" and listen_plain: \"\" for a managed site); a site handed back answers over IPv6 only until the last leaves" +
-                               (families_routed ? "" : "; without SO_REUSEPORT a restart follows") + ". A hand-written site meant for one family keeps its line, and the one cut off lists both: listen = [\"[::]:" + p + "\", \"0.0.0.0:" + p + "\"]"});
-        }
-    }
-    // The other side of it (2026-11-03, docs/configuration.md 1c): a site with 0.0.0.0:P of its own
-    // (or the host's one IPv4 address) beside sites on [::]:P takes every IPv4 connection of the
-    // port, so it is the cause and is named.
+    // The addresses that cut others off, per port, with the sites on each. A specific one (the host's
+    // address, with SO_REUSEPORT) cuts off every site of the port without it, on [::] and on 0.0.0.0
+    // alike (the alpha.122 report: 0.0.0.0 added to a site cut off by 192.0.2.10 helped nothing, the
+    // kernel prefers the specific socket); 0.0.0.0, or any IPv4 listener without SO_REUSEPORT, cuts
+    // off the sites with no IPv4 address there. A site on the server's defaults is never the cause.
+    struct Splitter {
+        std::string listen, host_text;  // "192.0.2.10:443", "192.0.2.10"
+        bool specific = false;
+        std::vector<const SiteConfig*> sites;
+    };
+    std::map<std::string, std::vector<Splitter>> splitters;  // port -> the addresses on it that cut others off
     for (const auto& site : cfg.sites) {
         if (site.listen_default) continue;
         for (const auto& l : site_addresses(site)) {
             asio::ip::address a;
             std::string p;
             if (!endpoint_of(l, a, p) || !cuts_off(a)) continue;
-            const bool whole = a.to_v4().is_unspecified();
-            std::string victims;
-            std::size_t count = 0;
-            for (const auto& o : cfg.sites) {
-                if (&o == &site) continue;
-                bool on_v6 = false, on_v4 = false;
-                for (const auto& m : site_addresses(o)) {
-                    asio::ip::address b;
-                    std::string q;
-                    if (!endpoint_of(m, b, q) || q != p) continue;
-                    on_v6 = on_v6 || (b.is_v6() && b.to_v6().is_unspecified());
-                    on_v4 = on_v4 || b.is_v4();
-                }
-                if (on_v6 && !on_v4) {
-                    victims += (count++ ? ", " : "") + o.server_names.front();
-                }
+            auto& v = splitters[p];
+            auto it = std::find_if(v.begin(), v.end(), [&](const Splitter& s) { return s.host_text == a.to_string(); });
+            if (it == v.end()) {
+                v.push_back({l, a.to_string(), families_routed && !a.to_v4().is_unspecified(), {}});
+                it = v.end() - 1;
             }
-            // The server's own [::]:P, named in the main file, is open and cut off the same way, with or
-            // without a site on it yet.
-            const bool servers = (cfg.listen_tls_explicit && std::find(cfg.listen_tls.begin(), cfg.listen_tls.end(), "[::]:" + p) != cfg.listen_tls.end()) ||
-                                 (cfg.listen_plain_explicit && std::find(cfg.listen_plain.begin(), cfg.listen_plain.end(), "[::]:" + p) != cfg.listen_plain.end());
-            if (!count && !servers) continue;
-            const std::string& name = site.server_names.front();
-            out.push_back({"listen_family_split", "warning", name,
-                           name + " listens on " + l + " of its own, " +
-                               (whole             ? "which takes every IPv4 connection of port " + p
-                                : families_routed ? "the host's one IPv4 address apart from loopback, which takes every IPv4 connection of port " + p + " from outside"
-                                                  : "beside which [::]:" + p + " is opened IPv6-only (no SO_REUSEPORT)") +
-                               ": " +
-                               (count ? victims + " on [::]:" + p + (count == 1 ? " is" : " are")
-                                      : "the server's [::]:" + p + ", which every site without a listen of its own takes, is") +
-                               " reachable over IPv6 only. Give it the server's addresses (" + hand_back(site) + "), " +
-                               (whole ? "a specific address of this host, " : "") + "or keep a family out with an access rule",
-                           // The way, with the order: each site handed back answers IPv6 only until the last leaves the
-                           // IPv4 socket, which then closes (the alpha.120 report: the move of a host's sites is one loop).
-                           hand_back(site) + (site.managed ? " (MCP site_update with listen_tls: \"\" and listen_plain: \"\")" : "") + ". Hand back every site on " + l +
-                               " one after another, in one go: a site handed back answers over IPv6 only until the last leaves and that socket closes" +
-                               (families_routed ? ", when [::]:" + p + " takes IPv4 too" : "; without SO_REUSEPORT [::]:" + p + " then stays IPv6-only until a restart")});
+            if (std::find(it->sites.begin(), it->sites.end(), &site) == it->sites.end()) it->sites.push_back(&site);
         }
     }
+    // What a site has on a port: [::], 0.0.0.0, its IPv4 addresses.
+    struct OnPort {
+        bool any6 = false, any4 = false;
+        std::set<std::string> v4;
+    };
+    auto on_ports = [&](const SiteConfig& site) {
+        std::map<std::string, OnPort> m;
+        for (const auto& l : site_addresses(site)) {
+            asio::ip::address a;
+            std::string p;
+            if (!endpoint_of(l, a, p)) continue;
+            OnPort& o = m[p];
+            if (a.is_v6() && a.to_v6().is_unspecified()) o.any6 = true;
+            else if (a.is_v4()) {
+                o.v4.insert(a.to_string());
+                if (a.to_v4().is_unspecified()) o.any4 = true;
+            }
+        }
+        return m;
+    };
+    // Whether the splitter cuts a site off, by what the site has on the port: a specific address, every
+    // site answering outside at all ([::] or 0.0.0.0) without it; 0.0.0.0, the sites with no IPv4 there.
+    auto cut_by = [](const Splitter& s, const OnPort& o) {
+        if (s.specific) return (o.any6 || o.any4) && !o.v4.count(s.host_text);
+        return o.any6 && o.v4.empty();
+    };
+    auto on_text = [](const OnPort& o, const std::string& p) {
+        return std::string(o.any6 ? "[::]:" + p : "") + (o.any6 && o.any4 ? " and " : "") + (o.any4 ? "0.0.0.0:" + p : "");
+    };
+    // The sites cut off (listen_ipv6_only): one notice per site and port, naming the sites to hand back
+    // and the address that would share the socket. The fix is on the sites that cut it off: a managed
+    // site has one address of its own per kind, so "both" is a hand-written site's line (alpha.120 C).
+    for (const auto& site : cfg.sites) {
+        for (const auto& [p, o] : on_ports(site)) {
+            const auto found = splitters.find(p);
+            if (found == splitters.end()) continue;
+            std::vector<const SiteConfig*> causers;
+            std::string join;  // the address this site could add: the specific one, else 0.0.0.0
+            bool specific = false;
+            for (const Splitter& s : found->second) {
+                if (std::find(s.sites.begin(), s.sites.end(), &site) != s.sites.end() || !cut_by(s, o)) continue;
+                for (const SiteConfig* c : s.sites)
+                    if (std::find(causers.begin(), causers.end(), c) == causers.end()) causers.push_back(c);
+                if (s.specific && !specific) {
+                    join = s.listen;
+                    specific = true;
+                } else if (join.empty()) {
+                    join = "0.0.0.0:" + p;
+                }
+            }
+            if (causers.empty()) continue;
+            const std::string& name = site.server_names.front();
+            std::string others, commands;  // the sites to hand back, and the way for each
+            for (const SiteConfig* c : causers) {
+                others += (others.empty() ? "" : ", ") + c->server_names.front();
+                commands += std::string(commands.empty() ? "" : "; ") + hand_back(*c);
+            }
+            out.push_back({"listen_ipv6_only", "warning", name,
+                           name + " listens on " + on_text(o, p) + " and not on " + (specific ? join + ", the host's one IPv4 address apart from loopback" : "an IPv4 address with that port") +
+                               ", while other sites listen " + (specific ? "there" : "on IPv4 there") + " (" + others + "): " +
+                               (o.any6 ? "it is reachable over IPv6 only" : "from outside it is reachable on no address") + " (an IPv4 connection goes to the " +
+                               (specific ? "most specific" : "IPv4") + " listener); give those sites the server's addresses (1c), one after another, or add " + join +
+                               " to this site's listen to serve IPv4 clients too",
+                           "hand the sites on " + (specific ? join : "IPv4 there") + " back to the server's addresses, one after another, in one go: " + commands +
+                               " (MCP site_update with listen_tls: \"\" and listen_plain: \"\" for a managed site); a site handed back answers over IPv6 only until the last leaves" +
+                               (families_routed ? "" : "; without SO_REUSEPORT a restart follows") +
+                               ". A hand-written site meant for one address keeps its line, and the one cut off lists that address too: listen = [\"[::]:" + p + "\", \"" + join + "\"]"});
+        }
+    }
+    // The other side of it (2026-11-03, docs/configuration.md 1c): the site with the address of its own
+    // that cuts the others off is the cause and is named, with the way and the order (each site handed
+    // back answers IPv6 only until the last leaves the IPv4 socket, which then closes: one loop).
+    for (const auto& [p, list] : splitters)
+        for (const Splitter& s : list)
+            for (const SiteConfig* site : s.sites) {
+                std::string victims;
+                std::size_t count = 0;
+                bool all6 = true;
+                for (const auto& o : cfg.sites) {
+                    if (&o == site) continue;
+                    const auto ports = on_ports(o);
+                    const auto it = ports.find(p);
+                    if (it == ports.end() || !cut_by(s, it->second)) continue;
+                    victims += (count++ ? ", " : "") + o.server_names.front();
+                    all6 = all6 && it->second.any6;
+                }
+                // The server's own [::]:P, named in the main file, is open and cut off the same way, with or
+                // without a site on it yet.
+                const bool servers = (cfg.listen_tls_explicit && std::find(cfg.listen_tls.begin(), cfg.listen_tls.end(), "[::]:" + p) != cfg.listen_tls.end()) ||
+                                     (cfg.listen_plain_explicit && std::find(cfg.listen_plain.begin(), cfg.listen_plain.end(), "[::]:" + p) != cfg.listen_plain.end());
+                if (!count && !servers) continue;
+                const bool whole = s.host_text == "0.0.0.0";
+                const std::string& name = site->server_names.front();
+                out.push_back({"listen_family_split", "warning", name,
+                               name + " listens on " + s.listen + " of its own, " +
+                                   (whole        ? "which takes every IPv4 connection of port " + p
+                                    : s.specific ? "the host's one IPv4 address apart from loopback, which takes every IPv4 connection of port " + p + " from outside"
+                                                 : "beside which [::]:" + p + " is opened IPv6-only (no SO_REUSEPORT)") +
+                                   ": " +
+                                   (count ? victims + (count == 1 ? " is" : " are") + (all6 ? " reachable over IPv6 only" : " cut off from IPv4 clients")
+                                          : "the server's [::]:" + p + ", which every site without a listen of its own takes, is reachable over IPv6 only") +
+                                   ". Give it the server's addresses (" + hand_back(*site) + "), " + (whole ? "a specific address of this host, " : "") +
+                                   "or keep a family out with an access rule",
+                               hand_back(*site) + (site->managed ? " (MCP site_update with listen_tls: \"\" and listen_plain: \"\")" : "") + ". Hand back every site on " + s.listen +
+                                   " one after another, in one go: a site handed back answers over IPv6 only until the last leaves and that socket closes" +
+                                   (families_routed ? ", when [::]:" + p + " takes IPv4 too" : "; without SO_REUSEPORT [::]:" + p + " then stays IPv6-only until a restart")});
+            }
     if (!cfg.ipv6_note.empty()) out.push_back({"ipv6_unavailable", "info", "", cfg.ipv6_note});
     // What check_redirects noted (docs/redirects.md 8): chains, a soft 404, a rule answering before a
     // protection, a rule over certificate validation.

@@ -58,7 +58,6 @@ asked for without its slash is written the same way, the query kept and a day's 
 ```toml
 [[site]]
 server_name = ["example.com"]
-listen = ["0.0.0.0:443", "[::]:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
 ```
@@ -267,7 +266,6 @@ passes.
 [[site]]
 server_name = ["example.com", "www.example.com"]
 canonical = "example.com"
-listen = ["0.0.0.0:443", "[::]:443"]
 root = "/var/www/example.com/web"
 tls = "auto"                      # one certificate covering both names
 ```
@@ -730,7 +728,6 @@ instead of the redirect:
 ```toml
 [[site]]
 server_name = ["old-shop.com", "www.old-shop.com"]
-listen = ["0.0.0.0:443", "[::]:443"]
 tls = "auto"
 
 [[site.redirect]]

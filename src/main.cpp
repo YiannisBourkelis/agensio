@@ -1328,7 +1328,7 @@ int main(int argc, char** argv) {
             }
             if (mutation) {
                 method = "POST";
-                if (yes) body.set("confirm", true);
+                if (yes || body["dry_run"].boolean()) body.set("confirm", true);  // a dry run changes nothing: no --yes needed (the alpha.122 report)
             }
             // --prompt: the password is asked here and hashed here; only the hash goes to the server
             // (2026-10-09, design section 25), so no server, helper, log or agent ever holds it.

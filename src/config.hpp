@@ -844,8 +844,15 @@ Ipv6Facts ipv6_facts();
 struct HostAddresses {
     std::vector<std::string> ipv4;
 };
+// Linux: the interfaces that carry a default IPv4 route (/proc/net/route: destination 0, route up), so
+// a bridge, a tunnel or a container network (docker0's 172.17.0.1, up on most hosts) is not an address
+// outside visitors reach (the alpha.122 report: the check was silent on the VPS for it); empty when
+// there is none, and then every address counts.
+std::set<std::string> default_route_interfaces(std::istream& route);
 HostAddresses probe_host_addresses();
 void set_host_addresses(std::optional<HostAddresses> addresses);
+// The tests' override, else probed on every call (cheap, never on the request path): health, -t and
+// the dry run see an address added or removed since the start (the alpha.122 report).
 HostAddresses host_addresses();
 // The default addresses as this host can bind them: "[::]:P" alone, "0.0.0.0:P" without IPv6, both
 // without dual-stack sockets; `note` says which, "" when nothing changed.

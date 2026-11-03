@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.0-alpha.123 (unreleased)
+
+- **The one-address check reads the default route, and reads the host again each time** (the
+  alpha.122 report, problems A and B): a bridge or a container network (docker0's `172.17.0.1`, up on
+  every host with Docker) counted as a second address and silenced the warning on the VPS. Only the
+  addresses of the interfaces that carry the default IPv4 route count now (`/proc/net/route`; every
+  address where there is none), and the host is asked at each `-t`, health and dry run rather than
+  once at the start, so an address added or removed after the start is seen.
+- **The dry run of `site_update` gives a managed site its own command** (problem C): the site judged
+  in memory carried no file and no marker, so the warning read "remove the listen line of NAME in  and
+  reload".
+- **A site cut off by a specific address is told that address** (problem D): the advice and the fix
+  name the address to add (`listen = ["[::]:443", "203.0.113.5:443"]`), since `0.0.0.0:443` ranks
+  below the specific socket and changes nothing; and a site on `0.0.0.0:P` beside the host's one
+  address on P is counted as cut off too (from outside it answers on no address).
+- The three example sites of `docs/redirects.md` with `listen = ["0.0.0.0:443", "[::]:443"]` name no
+  address (problem E), and `agensio ctl ... --dry-run` needs no `--yes`, since it changes nothing.
+
 ## 0.1.0-alpha.122 (2026-11-03)
 
 - **A site on the host's one IPv4 address is named as cutting the others off** (the alpha.121 report,

@@ -271,7 +271,11 @@ the port, and the others are reachable over IPv6 only: `-t`, the dry run and hea
 (`listen_family_split` on the site that caused it, `listen_ipv6_only` on the ones it cut off). A
 site on the host's one IPv4 address apart from loopback does the same from outside, since there is
 no other address the others could answer on, and is warned about the same way (the alpha.121
-report); a loopback address, or one of several the host has, is not. To
+report); the addresses counted are those of the interfaces carrying the default route (a bridge or
+a container network such as docker0 does not count, the alpha.122 report), read afresh at each
+check, and a loopback address, or one of several the host has, is not warned about. A site cut off
+by a specific address is told to list that address (`listen = ["[::]:443", "203.0.113.5:443"]`),
+since `0.0.0.0:443` ranks below the specific socket and would change nothing. To
 keep one family out of a site, use an access rule (section 19), which answers 403 on purpose. An
 address below 1024 the server does not hold cannot be added by a site's `listen` once the server
 dropped root: `site_create` and `site_update` say so and give the way (the main file and a restart,
