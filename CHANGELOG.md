@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.123 (unreleased)
+## 0.1.0-alpha.123 (2026-11-03)
 
 - **The one-address check reads the default route, and reads the host again each time** (the
   alpha.122 report, problems A and B): a bridge or a container network (docker0's `172.17.0.1`, up on
