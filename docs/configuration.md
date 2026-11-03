@@ -203,10 +203,14 @@ two spellings and called a port the server held "not bound yet"). Next to a list
 nginx's `ipv6only=on`; a site for both lists both addresses (`listen = ["0.0.0.0:443",
 "[::]:443"]`), and `-t` and health warn about a site on `[::]:P` alone next to IPv4 sites
 there (`listen_ipv6_only`). With `SO_REUSEPORT` (Linux, `reuse_port = "auto"`) the kernel
-routes the families so; without it (macOS, `reuse_port = "off"`) the `[::]` socket is opened
-IPv6-only for it, and the two cannot be separated on a running socket: a reload cannot add
-`0.0.0.0:P` next to a `[::]:P` that was opened alone (refused, restart), and one that
-removes `0.0.0.0:P` leaves `[::]:P` IPv6-only until a restart (a warning in the error log).
+routes the families so, the `[::]` socket staying dual-stack: only `0.0.0.0:P` takes every IPv4
+connection, a listener on one IPv4 address (`127.0.0.1:P`) takes what is sent there and `[::]:P`
+keeps the rest (so health counts only `0.0.0.0:P` as cutting a site off), and a reload that removes
+the last `0.0.0.0:P` hands its IPv4 connections to `[::]:P` at once. Without it (macOS, `reuse_port =
+"off"`) the `[::]` socket is opened IPv6-only beside any IPv4 listener of its port, and the two
+cannot be separated on a running socket: a reload cannot add `0.0.0.0:P` next to a `[::]:P` that was
+opened alone (refused, restart), and one that removes `0.0.0.0:P` leaves `[::]:P` IPv6-only until a
+restart (a warning in the error log).
 
 **TLS** follows the same rule at the handshake: the certificate is the one of the site
 that lists the name the client sent (SNI), each site on a listener may have its own
@@ -252,11 +256,13 @@ says so: `-t`, the error log and health's `ipv6_unavailable`.
 The two keys are **restart-only** (section 12b): the addresses are bound at start, as root, before
 the privilege drop, so no reload ever has to bind a port below 1024, and a change of the host's
 addresses is one edit of the main file and one `systemctl restart agensio`, every site moving
-together. Written in the main file, the keys open the addresses at start whether or not a site
-uses them yet, so a site created later (`site_create`) attaches by a reload; left out, the built-in
-defaults apply to a site that names none and are opened when the first such site does. The
-package's main file names them. A reload that finds them changed keeps the running addresses and
-names the keys, as it does for every restart-only key.
+together. Each key written in the main file opens its addresses at start whether or not a site
+uses them yet, so a site created later (`site_create`) attaches by a reload; a key left out gives
+its built-in default to a site that names none, opened when the first such site does (until
+0.1.0-alpha.121 naming one key opened the other's default too: `[::]:443` on a host with
+`listen_plain` alone, which an unprivileged instance could not bind). The package's main file names
+both. A reload that finds them changed keeps the running addresses and names the keys, as it does
+for every restart-only key.
 
 A site's own `listen` replaces the server's whole, for a site that owns one address of a host with
 several (`listen = ["203.0.113.5:443"]`), a loopback-only one, or another port; it is not a way to
@@ -274,7 +280,14 @@ Managed sites (section 15) write no `listen` unless `listen_tls` or `listen_plai
 `site_create` or `site_update`; `agensio ctl site-update NAME --listen-default` (MCP `listen_tls:
 ""`, `listen_plain: ""`) hands a site with an address of its own back to the server's. Files written
 before alpha.120 carry `listen = ["0.0.0.0:443"]` and count as overrides until then, which is what
-the IPv6 recipe of the cookbook walks through (`docs/examples/basics.md`).
+the IPv6 recipe of the cookbook walks through (`docs/examples/basics.md`). The order matters: the
+main file's keys and the restart first (the server's `[::]` sockets open beside the sites' `0.0.0.0`
+ones, which keep every IPv4 connection of their port: visitors notice nothing), then `--listen-default`
+for every site in one go, since a site handed back answers over IPv6 only until the last leaves
+`0.0.0.0:P` and that socket closes, after which the server's `[::]:P` takes IPv4 too (with
+`SO_REUSEPORT`; without it a restart). In the other order the first move is refused
+(`listen_unbound`): the server's `[::]:443` is not open and a reload cannot bind it. The two findings
+carry this as their fix, with the sites to hand back by name.
 
 ## 2. Plain PHP: `app = "php"`
 
@@ -3232,7 +3245,9 @@ and `site-install`. Listing and reading are made at once, except a credential or
 for approval and is handed out once; every change waits for a person's approval with a code from
 their authenticator app (`docs/approvals.md`), and what waits shows the change itself: the diff
 against the file there, and what the site does with the path (served as a file of what type, or
-RUNS as a script). What a change replaces or removes goes into `<sites_root>/.history/<domain>/`
+RUNS as a script); a `dry_run` of a write or an edit answers the same, `diff` and `site_does`, never
+the texts whole (until 0.1.0-alpha.121 the file there and the new text, each whole: the alpha.120
+report). What a change replaces or removes goes into `<sites_root>/.history/<domain>/`
 (root's alone, never served): a replaced file by hard link, a deleted file or tree by rename, so
 nothing is copied whatever its size. `site-file-history NAME PATH` lists what is kept, and
 `site-file-restore NAME PATH VERSION` puts a version back (with `--overwrite` keeping what is there

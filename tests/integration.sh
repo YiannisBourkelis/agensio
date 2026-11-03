@@ -3315,6 +3315,16 @@ check "1c: a site's own 0.0.0.0:P beside the server's [::]:P is written with the
 check "1c: --listen-default hands the site back to the server's addresses: no listen line, no warning, served on the server's address" "yes none 200" \
   "$(! grep -q '^listen = ' bench/tmp/lsrv/sites.d/lsrv.test.toml && echo yes) $(curl -sS --unix-socket $LCS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(sorted({f["code"] for f in d["findings"] if f["code"].startswith("listen_")})) or "none")') $(code -H 'Host: lsrv.test' http://127.0.0.1:18102/)"
 kill $LSRVPID 2>/dev/null; wait $LSRVPID 2>/dev/null
+# Only listen_plain named (the alpha.120 report, problem B): the TLS default is a site's when one uses
+# it and is never opened at start on its own; before, [::]:443 was opened beside it and an unprivileged
+# start died binding it.
+rm -f bench/tmp/lsrv/control.sock
+printf '[server]\nworkers = 1\nlisten_plain = ["[::]:18104"]\n[log]\naccess = "%s/bench/tmp/lsrv/access.log"\nerror = "%s/bench/tmp/lsrv/error.log"\n[control]\nsocket = "%s/bench/tmp/lsrv/control.sock"\naudit = "%s/bench/tmp/lsrv/audit.log"\n[[site]]\nserver_name = ["lonely.test"]\nroot = "%s/bench/tmp/lsrv/www"\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" > bench/tmp/lsrv/plain.toml
+"$BIN" -c bench/tmp/lsrv/plain.toml > bench/tmp/lsrv/plain.out 2>&1 & LSRVPID=$!
+for _ in $(seq 1 50); do nc -z 127.0.0.1 18104 2>/dev/null && [ -S $LCS ] && break; sleep 0.1; done
+check "1c: with listen_plain alone named the server opens only it, no [::]:443 for a TLS default no site uses: one listener, the site answers, the start line says so" "[::]:18104 200 0" \
+  "$(curl -sS --unix-socket $LCS http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(x["address"] for x in d["listeners"]))' 2>/dev/null || echo "$(tail -1 bench/tmp/lsrv/plain.out)") $(code -H 'Host: lonely.test' http://127.0.0.1:18104/) $(grep -c ':443' bench/tmp/lsrv/plain.out)"
+kill $LSRVPID 2>/dev/null; wait $LSRVPID 2>/dev/null
 # The main server names no listen keys and no site is on the defaults, which are below 1024 and the
 # server runs unprivileged: a site without an address is refused up front with the way.
 "$BIN" ctl site-create --domain nokeys.test --app static --no-user --https none --root "$ROOT/bench/tmp/lsrv/www" --yes --reason 1c --socket bench/tmp/control.sock > bench/tmp/lsrv/nokeys.json 2>&1

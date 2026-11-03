@@ -64,6 +64,12 @@ approve > $T/approved
 check "approved with root's approver: written as t1 with the directory's pattern, served, the audit line naming the approver" "t1 640 yes yes" \
   "$(stat -c '%U %a' $A/index.html) $(curl -sS -H 'Host: a.test' http://127.0.0.1:18611/ | grep -q '<title>A</title>' && echo yes) $(grep -q 'sites/a.test/file (the home page): write .*index.html (sha256 ' $T/logs/audit.log && grep -q 'approved by suite' $T/logs/audit.log && echo yes)"
 
+# A dry run answers the change as the person will see it, the diff against the file there, and what the
+# site does with the path; never the texts whole (the alpha.120 report, problem D: a one-word edit's
+# answer carried the file twice), and queues nothing.
+ctl site-file-edit a.test index.html --old '<body>hello</body>' --new '<body>hi</body>' --dry-run --yes --reason "a word" > $T/out
+check "an edit's dry run: the diff (the line gone, the one in its place), the verdict, needs_approval, no whole texts, nothing queued, nothing written" "yes 200: yes no 0 hello" \
+  "$(j '"yes" if "-<body>hello</body>" in d["diff"] and "+<body>hi</body>" in d["diff"] else d') $(j 'd["site_does"][:4]') $(j '"yes" if d.get("needs_approval") else "no"') $(j '"yes" if "new_text" in d or "text" in d["current"] else "no"') $(curl -sS --unix-socket $CS http://control/v1/approvals | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["waiting"]))') $(grep -o 'hello\|hi' $A/index.html)"
 # A change to the page: the history keeps the one before, root's alone; the link keeps t1's ownership.
 printf '<html><head><title>A2</title></head>\n<body>hello</body></html>\n' > $T/page2.html
 ctl site-file-write a.test index.html $T/page2.html --overwrite --yes --reason "v2" > /dev/null; approve > /dev/null

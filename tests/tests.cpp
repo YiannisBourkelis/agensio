@@ -1410,7 +1410,7 @@ static void test_listen_defaults() {
     {
         Config c = load("d.toml", "[server]\nacme = { email = \"me@x.test\" }\n[[site]]\nserver_name = [\"p.test\"]\n" + root +
                                       "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n");
-        CHECK(c.listen_tls == L{"[::]:443"} && c.listen_plain == L{"[::]:80"} && !c.listen_explicit && c.ipv6_note.empty());
+        CHECK(c.listen_tls == L{"[::]:443"} && c.listen_plain == L{"[::]:80"} && !c.listen_tls_explicit && !c.listen_plain_explicit && c.ipv6_note.empty());
         CHECK(c.sites[0].listen == L{"[::]:80"} && c.sites[0].listen_default && c.sites[0].http_listen.empty());
         CHECK(c.sites[1].listen == L{"[::]:443"} && c.sites[1].listen_default && c.sites[1].http_listen == L{"[::]:80"} && c.sites[1].http_redirect && c.sites[1].https_port == 443);
         CHECK(codes_of(c).find("listen_") == std::string::npos && codes_of(c).find("ipv6_unavailable") == std::string::npos);
@@ -1421,9 +1421,19 @@ static void test_listen_defaults() {
         Config c = load("e.toml", "[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\", \"127.0.0.1:8081\"]\nacme = { email = \"me@x.test\" }\n"
                                       "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n"
                                       "[[site]]\nserver_name = [\"own.test\"]\nlisten = [\"0.0.0.0:8080\"]\n" + root);
-        CHECK(c.listen_explicit && c.sites[0].listen == L{"[::]:8443"} && c.sites[0].http_listen == (L{"[::]:8080", "127.0.0.1:8081"}) && c.sites[0].https_port == 8443);
+        CHECK(c.listen_tls_explicit && c.listen_plain_explicit && c.sites[0].listen == L{"[::]:8443"} && c.sites[0].http_listen == (L{"[::]:8080", "127.0.0.1:8081"}) && c.sites[0].https_port == 8443);
         CHECK(!c.sites[1].listen_default && c.sites[1].listen == L{"0.0.0.0:8080"});
         CHECK(codes_of(c).find("listen_family_split:own.test") != std::string::npos && codes_of(c).find("listen_ipv6_only:t.test") != std::string::npos);
+        // Each carries its fix (the alpha.120 report, problem C): the site to hand back, named on the one it
+        // cut off too, and the order (one after another, the moved ones IPv6-only until the last leaves).
+        for (const auto& n : access_notices(c)) {
+            if (n.code == "listen_family_split") CHECK(n.site == "own.test" && n.fix.find("site-update own.test --listen-default") != std::string::npos && n.fix.find("one after another") != std::string::npos);
+            if (n.code == "listen_ipv6_only") CHECK(n.site == "t.test" && n.fix.find("site-update own.test --listen-default") != std::string::npos && n.text.find("(own.test)") != std::string::npos);
+        }
+        // Only one key named (problem B): the other's default is a site's when one uses it, never opened at
+        // start (a host with listen_plain alone opened [::]:443 too, and failed to bind it unprivileged).
+        Config g = load("g.toml", "[server]\nlisten_plain = [\"[::]:8080\"]\n[[site]]\nserver_name = [\"p.test\"]\n" + root);
+        CHECK(g.listen_plain_explicit && !g.listen_tls_explicit && g.listen_tls == L{"[::]:443"} && g.sites[0].listen == L{"[::]:8080"} && g.sites[0].listen_default);
         // A reload keeps the running addresses, resolves the sites against them and names the keys changed on disk.
         Config fresh = load("f.toml", "[server]\nlisten_tls = [\"[::]:9443\"]\nlisten_plain = [\"[::]:8080\", \"127.0.0.1:8081\"]\nacme = { email = \"me@x.test\" }\n"
                                           "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n", &c);
@@ -12401,6 +12411,18 @@ static void test_access_rules() {
         for (const auto& x : access_notices(d))
             if (x.code == "listen_ipv6_only") sites.push_back(x.site + (x.severity == "warning" && x.text.find("reachable over IPv6 only") != std::string::npos ? "" : "?"));
         CHECK(sites == std::vector<std::string>{"v6.test"});
+        // A site on a specific IPv4 address of the port (loopback) takes only what is sent there: with
+        // SO_REUSEPORT the dual-stack [::]:P socket keeps every other IPv4 connection, so nothing is cut
+        // off (before, any IPv4 listener on the port made [::]:P "IPv6-only").
+        const Config e = load(site("loop.test", "\"127.0.0.1:18092\"") + site("rest.test", "\"[::]:18092\""));
+        std::string cut;
+        for (const auto& x : access_notices(e))
+            if (x.code == "listen_ipv6_only" || x.code == "listen_family_split") cut += x.code + ":" + x.site + " ";
+#ifdef __linux__
+        CHECK(cut.empty());
+#else
+        CHECK(cut == "listen_ipv6_only:rest.test ");
+#endif
     }
     // rules.restricted: normalised, its errors, rendered as [[site.access]].
     {

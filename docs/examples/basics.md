@@ -532,12 +532,13 @@ tls = "auto"
 ```
 
 ```sh
-# Files written before alpha.120 carry an address of their own; hand each back to the server's
-# (a reload each, nothing to bind):
+# The main file's keys first, and one restart (the server's [::] sockets open beside the sites'
+# 0.0.0.0 ones, which keep every IPv4 connection of their port: visitors notice nothing):
+agensio -t && systemctl restart agensio
+# Files written before alpha.120 carry an address of their own: hand each back, all in one go (a site
+# handed back answers over IPv6 only until the last leaves 0.0.0.0 and that socket closes):
 agensio ctl site-update example.com --listen-default --yes --reason "the server's addresses"
 agensio ctl site-update docs.example.com --listen-default --yes --reason "the server's addresses"
-# then the main file's keys, and one restart for the host:
-agensio -t && systemctl restart agensio
 ss -ltnp | grep agensio            # *:443 and *:80 held by agensio, no 0.0.0.0 socket left
 curl -4 -sS -o /dev/null -w '%{http_code} %{remote_ip}\n' https://example.com/
 curl -6 -sS -o /dev/null -w '%{http_code} %{remote_ip}\n' https://example.com/
@@ -547,11 +548,13 @@ agensio ctl health                 # no listen_ipv6_only, no listen_family_split
 
 **What it does.** The two keys are the addresses every site takes unless its file names its own
 (`[::]` is the built-in default too, so a new install needs none of this). They are restart-only:
-the server binds them at start, as root, before dropping privileges, which is why the move is one
-edit and one restart for the host rather than a reload per site, and why no site is ever left on
-IPv6 alone meanwhile (a site moved on its own would be, since the kernel hands every IPv4
-connection of a port to a `0.0.0.0` socket while one exists; `-t`, the dry run and health say
-`listen_family_split` on the site that keeps one). Where the host has no IPv6, or its IPv6
+the server binds them at start, as root, before dropping privileges, which is why they come first:
+a reload cannot bind the server's `[::]:443` once root is dropped, so in the other order the first
+`--listen-default` is refused (`listen_unbound`). The kernel hands every IPv4 connection of a port
+to a `0.0.0.0` socket while one exists, so a site handed back answers over IPv6 only until the last
+site leaves `0.0.0.0` and that socket closes; `-t`, the dry run and health say `listen_family_split`
+on each site that keeps one and `listen_ipv6_only` on each site cut off, the fix naming the sites
+to hand back: do them all in one go. Where the host has no IPv6, or its IPv6
 sockets take no IPv4 (`net.ipv6.bindv6only = 1`), the server binds `0.0.0.0` in place of, or
 beside, `[::]` and says so (`ipv6_unavailable`). The firewall limits the package renders cover
 IPv6 sources per /64, and the jails read IPv6 clients from the logs as they are.

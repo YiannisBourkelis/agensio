@@ -1373,8 +1373,8 @@ std::vector<std::string> restart_needed(const Config& fresh, const Config& runni
     kept(fresh.pid_file != running.pid_file, "pid_file");
     // The server's addresses (docs/configuration.md 1c): bound at start as root; the file's values are
     // listen_file_*, the running ones listen_* (load_config keeps them on a reload).
-    kept(fresh.listen_file_tls != running.listen_tls || fresh.listen_file_explicit != running.listen_explicit, "listen_tls");
-    kept(fresh.listen_file_plain != running.listen_plain || fresh.listen_file_explicit != running.listen_explicit, "listen_plain");
+    kept(fresh.listen_file_tls != running.listen_tls || fresh.listen_file_tls_explicit != running.listen_tls_explicit, "listen_tls");
+    kept(fresh.listen_file_plain != running.listen_plain || fresh.listen_file_plain_explicit != running.listen_plain_explicit, "listen_plain");
     kept(fresh.cache_max_file_size != running.cache_max_file_size, "cache.max_file_size");
     kept(fresh.cache_max_size != running.cache_max_size, "cache.max_size");
     kept(fresh.cache_evict_fraction != running.cache_evict_fraction, "cache.evict_fraction");
@@ -2349,7 +2349,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         else if (n.code == "php_keep_conn_ondemand") fix = "remove keep_conn from the site's php table (off by default with pm = \"ondemand\"), or set pm to \"dynamic\" or \"static\" to keep it";
         else if (n.code == "auth_users_mixed_methods") fix = "give every user of the file one method and cost: agensio passwd NAME writes yescrypt (a managed site's tools always do), then reload";
         else if (n.code == "mime_type_scriptable") fix = "root's main file: take the entry out of [mime_types], or keep it only when no site lets visitors upload a file of that ending; a site that needs it for its own files can rename them to an ending that has the type built in (docs/configuration.md 6c)";
-        add(n.severity == "warning" ? "warn" : "info", n.code, n.site, n.text, fix);
+        add(n.severity == "warning" ? "warn" : "info", n.code, n.site, n.text, n.fix.empty() ? fix : n.fix);  // the notice's own where it knows it (the listen ones)
     }
     for (auto& f : auth_findings(running, now)) out.push_back(std::move(f));
     for (const auto& o : running.orphan_additions) {

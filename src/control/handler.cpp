@@ -2242,20 +2242,7 @@ std::string ControlHandler::file_preview(const SiteConfig& site, const std::stri
         t += "what the site does with it: " + verdict(rel) + "\n";
         t += "as " + std::string(checked.get("as")) + ", mode " + std::string(checked.get("mode")) + (checked["secured"].boolean() ? " (a credential file)" : "") +
              ", " + std::to_string(static_cast<long>(checked["bytes"].num())) + " bytes, sha256 " + std::string(checked.get("sha256")) + "\n";
-        std::string after;
-        bool text = true;
-        if (op == "edit") {
-            after = std::string(checked.get("new_text"));
-        } else if (body["content"].is_string()) {
-            after = std::string(body["content"].str());
-        } else if (const auto b = files::base64_decode(body.get("content_base64"))) {
-            after = *b;
-            text = files::utf8_text(after);
-        }
-        if (!text) t += "binary content: " + std::to_string(after.size()) + " bytes\n";
-        else if (cur["exists"].boolean() && cur["text"].is_string()) t += control::unified_diff(cur["text"].str(), after, 0);
-        else if (cur["exists"].boolean()) t += "the file there is not shown (binary, or larger than " + std::to_string(files::kContentMax / 1024) + " KB); its new text:\n" + control::unified_diff("", after, 0);
-        else t += control::unified_diff("", after, 0);
+        t += std::string(checked.get("diff"));  // made by the dry run (the file callback): the diff, a binary note, or a new file's text
         if (cur["exists"].boolean()) t += "the file there now is kept in the history\n";
     } else if (op == "mkdir") {
         t += "create the directory " + abs + "\n";
@@ -2340,10 +2327,44 @@ void ControlHandler::site_files(Stream& s, std::string_view name, const json::Va
     }
     const bool change = op != "list" && op != "read" && op != "history";
     const bool dry_run = parsed.dry_run;
+    std::string new_content;  // a write's bytes, for the dry run's diff
+    bool new_is_text = true;
+    if (op == "write" && dry_run) {
+        if (args["content"].is_string()) new_content = std::string(args["content"].str());
+        else if (const auto b = files::base64_decode(args.get("content_base64"))) {
+            new_content = *b;
+            new_is_text = files::utf8_text(new_content);
+        }
+    }
     const std::vector<std::string> before = change && !dry_run ? validation_errors(*backend_) : std::vector<std::string>{};
     backend_->install_async(req, [this, &s, what = std::string(what), op, change, dry_run, before, rel = parsed.path, to = parsed.to, site_root,
-                                  domain = site->server_names.front(), done](json::Value r) {
+                                  domain = site->server_names.front(), done, new_content, new_is_text](json::Value r) {
         const bool ok = r["ok"].boolean();
+        // A dry run of a write or an edit answers the change as the person will see it, the diff against
+        // the file there (the approval's preview is made from it), never the texts whole: a one-word
+        // edit's answer carried the file twice (the alpha.120 report, problem D).
+        if (ok && dry_run && (op == "write" || op == "edit")) {
+            const json::Value& cur = r["current"];
+            const std::string after = op == "edit" ? std::string(r.get("new_text")) : new_content;
+            std::string diff;
+            if (!new_is_text) diff = "binary content: " + std::to_string(after.size()) + " bytes\n";
+            else if (cur["exists"].boolean() && cur["text"].is_string()) diff = control::unified_diff(cur["text"].str(), after, 0);
+            else if (cur["exists"].boolean()) diff = "the file there is not shown (binary, or larger than " + std::to_string(files::kContentMax / 1024) + " KB); its new text:\n" + control::unified_diff("", after, 0);
+            else diff = control::unified_diff("", after, 0);
+            json::Value slim = json::Value::object();
+            for (const auto& [k, v] : r.members()) {
+                if (k == "new_text") continue;
+                if (k != "current") {
+                    slim.set(k, v);
+                    continue;
+                }
+                json::Value c = json::Value::object();
+                for (const auto& [ck, cv] : v.members())
+                    if (ck != "text") c.set(ck, cv);
+                slim.set(k, std::move(c));
+            }
+            r = std::move(slim.set("diff", std::move(diff)));
+        }
         const SiteConfig* now_site = control::find_site(backend_->running(), domain);
         if (ok && now_site && (op == "write" || op == "edit" || op == "restore")) r.set("site_does", path_verdict(backend_->running(), *now_site, site_root, rel));
         if (ok && now_site && op == "move") r.set("site_does", path_verdict(backend_->running(), *now_site, site_root, to));

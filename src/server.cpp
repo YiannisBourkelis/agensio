@@ -584,10 +584,12 @@ void Server::build_listeners(Generation& gen) {
             l->site_names.push_back(site.server_names.front());
         }
     }
-    // The server's own addresses (docs/configuration.md 1c): named in the main file, they are open from
-    // the start whether or not a site uses them yet, so a site created later attaches by a reload and
-    // no reload binds a privileged port. Restart-only keys: the running values, which a reload keeps.
-    if (gen.cfg.listen_explicit) {
+    // The server's own addresses (docs/configuration.md 1c): each key named in the main file opens its
+    // addresses from the start whether or not a site uses them yet, so a site created later attaches by
+    // a reload and no reload binds a privileged port; the other key's defaults are opened when a site
+    // takes them (until 2026-11-03 one flag stood for both, and a host naming listen_plain alone opened
+    // [::]:443 too: the alpha.120 report). Restart-only keys: the running values, which a reload keeps.
+    {
         auto add = [&](const std::string& address, bool tls) {
             for (const auto& existing : listeners)
                 if (existing.address == address) return;
@@ -614,8 +616,10 @@ void Server::build_listeners(Generation& gen) {
             l.alpn = gen.cfg.alpn_wire;
 #endif
         };
-        for (const auto& a : gen.cfg.listen_tls) add(a, true);
-        for (const auto& a : gen.cfg.listen_plain) add(a, false);
+        if (gen.cfg.listen_tls_explicit)
+            for (const auto& a : gen.cfg.listen_tls) add(a, true);
+        if (gen.cfg.listen_plain_explicit)
+            for (const auto& a : gen.cfg.listen_plain) add(a, false);
     }
     for (auto& l : listeners) {  // [::] next to an IPv4 listener on its port (open_acceptor_socket)
         const asio::ip::address a = l.endpoint.address();

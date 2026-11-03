@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.0-alpha.121 (unreleased)
+
+- **Fix: `listen_plain` named alone no longer opens the TLS default too.** One flag stood for both
+  keys, so a main file with `listen_plain` and no `listen_tls` opened `[::]:443` at start, which an
+  unprivileged instance could not bind (`fatal: cannot bind [::]:443: Permission denied`) and a root
+  one held with no site on it (the alpha.120 report, problem B). Each key opens its own addresses at
+  start; the other's defaults are a site's when one uses them.
+- **The listen findings carry a fix** (`listen_family_split`, `listen_ipv6_only`; problem C): the
+  command for each site to hand back to the server's addresses, the sites named on the one cut off
+  too, and the order: all in one go, since a site handed back answers over IPv6 only until the last
+  leaves `0.0.0.0:P` and that socket closes, after which the server's `[::]:P` takes IPv4 too (with
+  SO_REUSEPORT; without it a restart). The upgrade note of alpha.120 had its two steps the wrong way
+  round, corrected below: the main file's keys and the restart come first, the moves after, or the
+  first move is refused (`listen_unbound`: the server's `[::]:443` is not open and a reload cannot
+  bind it). On Linux with SO_REUSEPORT a site on one IPv4 address of the port (`127.0.0.1:443`) no
+  longer counts as cutting `[::]:443` off: the dual-stack socket keeps every other IPv4 connection.
+- **The file tools' dry run answers the diff, never the texts whole** (problem D): `site_file_write`
+  and `site_file_edit` with `dry_run` answered the file there and the new text, each whole (a
+  one-word edit of a 7 KB page: 14 KB; up to 360 KB); now `diff`, the change as the person approving
+  it sees it (the approval's preview is made from the same text), beside `site_does`, `sha256` and
+  `mode`; `current` keeps `exists`, `bytes`, `sha256` and `mode`.
+
 ## 0.1.0-alpha.120 (2026-11-03)
 
 - **The server's addresses: `[server] listen_tls` and `listen_plain`, IPv6 and IPv4 by default.** A site
@@ -27,8 +49,14 @@
   `service_restart` operation removed: a restart is root's). `docs/configuration.md` 1c; the
   cookbook's IPv6 recipe.
   - Upgrading: files written before carry `listen = ["0.0.0.0:443"]` and keep working as their own
-    addresses; `site-update NAME --listen-default` per site, then `listen_tls = ["[::]:443"]` and
-    `listen_plain = ["[::]:80"]` under `[server]` and one restart move the host to both families.
+    addresses. To move the host to both families: `listen_tls = ["[::]:443"]` and `listen_plain =
+    ["[::]:80"]` under `[server]` and one restart first (the server's `[::]` sockets open beside the
+    sites' `0.0.0.0` ones, which keep every IPv4 connection: visitors notice nothing), then `site-update
+    NAME --listen-default` for every site in one go: a site handed back answers over IPv6 only until the
+    last leaves `0.0.0.0:P` and that socket closes, after which `[::]:P` takes IPv4 too (with
+    SO_REUSEPORT; without it a restart). In the other order the first move is refused
+    (`listen_unbound`), since a reload cannot bind the server's `[::]:443` once root is dropped (the
+    order was given the other way round here until alpha.121).
 
 - **Fix: an IPv6 listen address has one spelling, `[::]:443`.** The loader stored it without the
   brackets, so `server_status` listed `:::80`, a bind failure said `cannot bind :::443`, and

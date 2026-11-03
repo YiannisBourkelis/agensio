@@ -558,15 +558,17 @@ struct Config {
     // 1c): listen_tls for a site with tls (its plain redirect listeners are listen_plain), listen_plain
     // for one without. Restart-only, bound at start as root, so a reload never has to bind a privileged
     // port; on a reload the running values are kept and the file's are in listen_file_* for
-    // restart_needed. listen_explicit: the keys are in the main file, so the server opens the addresses
-    // at start whether or not a site uses them yet, and a site created later attaches by a reload.
+    // restart_needed. listen_tls_explicit / listen_plain_explicit: that key is in the main file, so the
+    // server opens its addresses at start whether or not a site uses them yet, and a site created later
+    // attaches by a reload; the other key's defaults are a site's when one uses them (one flag for both
+    // opened [::]:443 on a host naming listen_plain alone: the alpha.120 report).
     // Resolved against the host's IPv6 (ipv6_facts): without IPv6 "[::]" becomes "0.0.0.0", without
     // dual-stack sockets "0.0.0.0:P" is bound beside "[::]:P"; ipv6_note says so for -t and health.
     std::vector<std::string> listen_tls{"[::]:443"};
     std::vector<std::string> listen_plain{"[::]:80"};
-    bool listen_explicit = false;
+    bool listen_tls_explicit = false, listen_plain_explicit = false;
     std::vector<std::string> listen_file_tls, listen_file_plain;
-    bool listen_file_explicit = false;
+    bool listen_file_tls_explicit = false, listen_file_plain_explicit = false;
     std::string ipv6_note;
     std::string reuse_port = "auto";  // auto | on | off
     bool tcp_nodelay = true;
@@ -771,6 +773,7 @@ struct AccessNotice {
                            // redirect_under_protection, redirect_skips_validation, public_archive_refused
     std::string severity;  // "warning" or "info"
     std::string site, text;
+    std::string fix;       // for health, where the notice knows it (the listen notices name the sites to hand back); else health's own
 };
 std::vector<AccessNotice> access_notices(const Config& cfg);
 

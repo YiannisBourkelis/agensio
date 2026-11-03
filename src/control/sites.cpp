@@ -715,7 +715,9 @@ std::vector<AccessNotice> access_notices_for(const SiteSpec& spec, const Config&
     view.address_sets = cfg.address_sets;
     view.listen_tls = cfg.listen_tls;
     view.listen_plain = cfg.listen_plain;
-    view.listen_explicit = cfg.listen_explicit;
+    view.listen_tls_explicit = cfg.listen_tls_explicit;
+    view.listen_plain_explicit = cfg.listen_plain_explicit;
+    view.reuse_port = cfg.reuse_port;
     SiteConfig site;
     site.server_names = {spec.domain};
     site.listen = spec_listen(spec, cfg, site.http_listen, site.listen_default);
@@ -1753,9 +1755,10 @@ std::vector<Problem> preflight(const SiteSpec& spec, const Config& cfg, bool pri
         std::vector<std::string> addresses = spec_listen(spec, cfg, plain, by_default);
         addresses.insert(addresses.end(), plain.begin(), plain.end());
         for (const std::string& address : addresses) {
-            const bool servers = std::find(cfg.listen_tls.begin(), cfg.listen_tls.end(), address) != cfg.listen_tls.end() ||
-                                 std::find(cfg.listen_plain.begin(), cfg.listen_plain.end(), address) != cfg.listen_plain.end();
-            bool bound = servers && cfg.listen_explicit;
+            const bool in_tls = std::find(cfg.listen_tls.begin(), cfg.listen_tls.end(), address) != cfg.listen_tls.end();
+            const bool in_plain = std::find(cfg.listen_plain.begin(), cfg.listen_plain.end(), address) != cfg.listen_plain.end();
+            const bool servers = in_tls || in_plain;
+            bool bound = (in_tls && cfg.listen_tls_explicit) || (in_plain && cfg.listen_plain_explicit);  // that key named: open since the start
             for (const auto& s : cfg.sites)
                 for (const auto& l : site_addresses(s)) bound = bound || l == address;
             const std::size_t colon = address.rfind(':');
