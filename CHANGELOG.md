@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.120
+## 0.1.0-alpha.120 (2026-11-03)
 
 - **The server's addresses: `[server] listen_tls` and `listen_plain`, IPv6 and IPv4 by default.** A site
   that names no `listen` takes the server's addresses: `listen_tls` with `tls` (and `listen_plain`
