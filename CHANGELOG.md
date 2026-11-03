@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.121 (unreleased)
+## 0.1.0-alpha.121 (2026-11-03)
 
 - **Fix: `listen_plain` named alone no longer opens the TLS default too.** One flag stood for both
   keys, so a main file with `listen_plain` and no `listen_tls` opened `[::]:443` at start, which an
