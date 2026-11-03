@@ -197,6 +197,52 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-11-03, the release check of 0.1.0-alpha.120, before the tag. `scripts/fuzz-all.sh -t 300`,
+every target at once (twenty-two, one process each on 24 cores, five minutes): 519.7 M runs, no
+finding, no timeout. The fuzz build had stopped compiling with the access log's format step
+(2026-11-02: `fuzz_h2_conn` read the `json` field that `vhost_combined` replaced, so the script built
+nothing), fixed before this run. The sanitizer build (`build-asan`, GCC 14): unit, the integration
+suite (827 checks, the HTTP/3 attack suite with Retry auto and always among them; no sanitizer
+report in any of the 17,389 files the run wrote under bench/tmp), the Pebble suite (21): clean. The
+release build: unit, integration (827), reload (25), auth (49, `--network none`), pools (26), control
+(28), isolation (45), protection (33), the provisioning helper's (57) and Pebble (21) pass; the builds
+without OpenSSL and without libxcrypt link and pass their unit tests (the one without OpenSSL first
+failed to compile on the branch for the server's own TLS address without a site, which named the
+listener's TLS context: guarded before this run). The A/B against alpha.119, `bench/ab.sh
+v0.1.0-alpha.119 -P -A -2 -r 3`, ran twice (`ab-20261103-001708.md` beside VS Code's C++ indexer at a
+full core, re-indexing the A/B worktree, 0.922 to 1.079; `ab-20261103-004339.md` with the fuzz
+processes still winding down at load 12.9, 0.867 to 1.122), each with its first round polluted on a
+few rows; the quiet check of the plain 1 KB and the access rows at five rounds
+(`ab-20261103-005912.md`) is 0.980 to 1.015, the `baseline` row that both runs had put at 1.03 to
+1.06 at 1.008, and nothing of alpha.120 runs on a static request's path. The HTTP/3 rows
+(`ab-20261103-002954.md`, `-3 -r 3`): 0.964 to 1.055, the 1.055 the sixty-four-stream row with one
+round of three at 0.82 against 0.75 and 0.70.
+
+| target | runs | edges | result |
+|---|---|---|---|
+| fuzz_archive | 15.98 M | 645 | clean |
+| fuzz_auth_users | 17.66 M | 499 | clean |
+| fuzz_chunked | 121.34 M | 63 | clean |
+| fuzz_fcgi | 59.76 M | 96 | clean |
+| fuzz_fields | 4.43 M | 589 | clean |
+| fuzz_h2_conn | 0.69 M | 11926 | clean |
+| fuzz_hpack | 2.16 M | 529 | clean |
+| fuzz_hpack_roundtrip | 0.35 M | 466 | clean |
+| fuzz_http_head | 49.12 M | 152 | clean |
+| fuzz_json | 7.16 M | 551 | clean |
+| fuzz_log_line | 5.92 M | 770 | clean |
+| fuzz_parser | 35.81 M | 240 | clean |
+| fuzz_path | 7.69 M | 236 | clean |
+| fuzz_php_constraint | 12.25 M | 758 | clean |
+| fuzz_qpack | 7.14 M | 646 | clean |
+| fuzz_quic_conn | 0.45 M | 1556 | clean |
+| fuzz_quic_packet | 19.00 M | 217 | clean |
+| fuzz_redirect | 4.72 M | 1248 | clean |
+| fuzz_refuse | 3.17 M | 874 | clean |
+| fuzz_response_headers | 0.52 M | 3359 | clean |
+| fuzz_sql_scan | 2.88 M | 159 | clean |
+| fuzz_transport_params | 141.48 M | 211 | clean |
+
 2026-11-01, the release check of 0.1.0-alpha.118, before the tag. `scripts/fuzz-all.sh -t 300`,
 every target at once (twenty-two, one process each on 24 cores, five minutes): 526.6 M runs, no
 finding, no timeout. The fuzz build had stopped linking with response compression's step 2

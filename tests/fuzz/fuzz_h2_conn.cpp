@@ -173,7 +173,7 @@ Env& env() {
     e->worker = std::make_unique<Worker>(0);
     e->worker->gen = e->gen;
     if (!c.server_header.empty()) e->worker->state.server_line = "Server: " + c.server_header + "\r\n";
-    e->worker->state.logs.attach(&e->logs, c.log.json ? AccessLogFormat::json : AccessLogFormat::combined);
+    e->worker->state.logs.attach(&e->logs, c.log.format);
     g_env = e;
     std::atexit([] { std::filesystem::remove_all(g_env->dir); });
     return *e;

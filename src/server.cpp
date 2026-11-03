@@ -1545,21 +1545,23 @@ void Server::start_accept(std::size_t index) {
                     sock.close(ignored);
                 } else if (target.connections.load(std::memory_order_relaxed) >= max_connections_.load(std::memory_order_relaxed)) {
                     refuse_connection(sock, acc.peer, *l, target);  // the ceiling: the descriptor budget's guard (hardening item 5)
-                } else if (l->tls && !l->ssl) {
-                    // The server's own TLS address with no site on it yet (1c): no certificate to offer, so the
-                    // connection is closed before any handshake, counted with the handshakes refused for their name.
-                    asio::error_code ignored;
-                    sock.close(ignored);
-                    target.tls_refused.fetch_add(1, std::memory_order_relaxed);
-                    std::lock_guard<std::mutex> lock(target.refusal_mutex);
-                    target.tls_refusals.note(acc.peer.address(), l->address, std::chrono::steady_clock::now());
                 } else if (l->tls) {
 #ifdef AGENSIO_HAS_TLS
-                    auto c = std::make_shared<Http1Connection<TlsStream>>(TlsStream(std::move(sock), *l->ssl), target,
-                                                                     std::move(gen), l, cfg_, dispatcher_);
-                    c->set_peer_endpoint(acc.peer);  // read before the next accept writes it again
-                    if (&target == acc.owner) c->start();
-                    else asio::post(target.ctx, [c] { c->start(); });
+                    if (!l->ssl) {
+                        // The server's own TLS address with no site on it yet (1c): no certificate to offer, so the
+                        // connection is closed before any handshake, counted with the handshakes refused for their name.
+                        asio::error_code ignored;
+                        sock.close(ignored);
+                        target.tls_refused.fetch_add(1, std::memory_order_relaxed);
+                        std::lock_guard<std::mutex> lock(target.refusal_mutex);
+                        target.tls_refusals.note(acc.peer.address(), l->address, std::chrono::steady_clock::now());
+                    } else {
+                        auto c = std::make_shared<Http1Connection<TlsStream>>(TlsStream(std::move(sock), *l->ssl), target,
+                                                                         std::move(gen), l, cfg_, dispatcher_);
+                        c->set_peer_endpoint(acc.peer);  // read before the next accept writes it again
+                        if (&target == acc.owner) c->start();
+                        else asio::post(target.ctx, [c] { c->start(); });
+                    }
 #endif
                 } else {
                     auto c = std::make_shared<Http1Connection<asio::ip::tcp::socket>>(std::move(sock), target,
