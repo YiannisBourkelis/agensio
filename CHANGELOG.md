@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.122
+## 0.1.0-alpha.122 (2026-11-03)
 
 - **A site on the host's one IPv4 address is named as cutting the others off** (the alpha.121 report,
   problem A). With SO_REUSEPORT the kernel hands a specific socket every connection sent to it, so a
