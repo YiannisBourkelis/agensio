@@ -26,4 +26,4 @@ jobs:
         run: build/agensio_tests
       - name: integration (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y curl netcat-openbsd && tests/integration.sh build/agensio
+        run: sudo apt-get install -y curl netcat-openbsd brotli zstd php8.3-fpm && tests/integration.sh build/agensio

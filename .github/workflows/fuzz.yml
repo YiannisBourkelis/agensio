@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libasio-dev libssl-dev zlib1g-dev libzstd-dev libbrotli-dev pkg-config curl netcat-openbsd
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libasio-dev libssl-dev zlib1g-dev libzstd-dev libbrotli-dev pkg-config curl netcat-openbsd brotli zstd php8.3-fpm
       - name: build with ASan and UBSan
         run: cmake -S . -B build-san -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DAGENSIO_SANITIZE=address,undefined && cmake --build build-san
       - name: unit tests

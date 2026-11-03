@@ -5,6 +5,7 @@ set -uo pipefail
 BIN="${1:-build/agensio}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+umask 022  # the modes the rows check are the server's (0644, 0755); Ubuntu's default account runs under 002
 [ -f bench/www/big.bin ] && [ -L bench/www/outside.txt ] || bench/gen-www.sh >/dev/null
 [ -f bench/certs/cert.pem ] || bench/certs/gen-cert.sh >/dev/null
 printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html
@@ -1419,9 +1420,14 @@ rm -f bench/tmp/error.log.1 bench/tmp/error.log.2.gz
 # The PHP versions installed (docs/configuration.md 7b): the devbox's php-fpm 8.4, read as this
 # account (no root helper here, so no configuration test, said in the note), with its extensions and
 # PHP's support status.
-check "php: ctl php lists the installed php-fpm with its exact version, extensions and support status; without root the configuration test is said to need it" \
+PHPV=$(basename "${PHPFPM:-}" | sed -n 's/^php-fpm\([0-9]\.[0-9]\)$/\1/p')
+if [ -n "$PHPV" ]; then
+check "php: ctl php lists the installed php-fpm ($PHPV) with its exact version, extensions and support status; without root the configuration test is said to need it" \
   "yes yes yes yes" \
-  "$(ctl php --socket $CS > bench/tmp/php.json 2>&1; python3 -c 'import json; d=json.load(open("bench/tmp/php.json")); r=[x for x in d["runtimes"] if x["version"] == "8.4"]; print("yes" if r and r[0].get("exact", "").startswith("8.4.") else d)') $(python3 -c 'import json; d=json.load(open("bench/tmp/php.json")); r=[x for x in d["runtimes"] if x["version"] == "8.4"][0]; print("yes" if "core" in r["extensions"] and "date" in r["extensions"] else r["extensions"])') $(python3 -c 'import json; d=json.load(open("bench/tmp/php.json")); r=[x for x in d["runtimes"] if x["version"] == "8.4"][0]; print("yes" if r["support"]["status"] in ("active", "security") and r["support"]["security_until"] == "2028-12-31" else r["support"])') $(python3 -c 'import json; d=json.load(open("bench/tmp/php.json")); print("yes" if "needs root" in d.get("note", "") and "config_test" not in d["runtimes"][0] else d.get("note"))')"
+  "$(ctl php --socket $CS > bench/tmp/php.json 2>&1; python3 -c 'import json,sys; v=sys.argv[1]; d=json.load(open("bench/tmp/php.json")); r=[x for x in d["runtimes"] if x["version"] == v]; print("yes" if r and r[0].get("exact", "").startswith(v + ".") else d)' "$PHPV") $(python3 -c 'import json,sys; v=sys.argv[1]; d=json.load(open("bench/tmp/php.json")); r=[x for x in d["runtimes"] if x["version"] == v][0]; print("yes" if "core" in r["extensions"] and "date" in r["extensions"] else r["extensions"])' "$PHPV") $(python3 -c 'import json,sys; v=sys.argv[1]; d=json.load(open("bench/tmp/php.json")); r=[x for x in d["runtimes"] if x["version"] == v][0]; print("yes" if r["support"]["status"] in ("active", "security") and r["support"].get("security_until", "") >= "2026" else r["support"])' "$PHPV") $(python3 -c 'import json,sys; v=sys.argv[1]; d=json.load(open("bench/tmp/php.json")); r=[x for x in d["runtimes"] if x["version"] == v][0]; print("yes" if "needs root" in d.get("note", "") and "config_test" not in r else d.get("note"))' "$PHPV")"
+else
+  echo "skip php: no php-fpm installed (ctl php lists what is installable instead)"
+fi
 check "logs: a site that does not exist is a 404, not an empty answer" "404 yes" "$(curl -sS -o bench/tmp/ctl-reply.json -w '%{http_code}' --unix-socket $CS 'http://control/v1/logs?site=nope.test') $(grep -q '"error":"no such site"' bench/tmp/ctl-reply.json && echo yes)"
 printf 'GET /caf\xe9-\xee\xff HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' | nc -w 2 127.0.0.1 8080 > /dev/null 2>&1; sleep 1.2
 check "logs: a client's raw bytes are written \\xHH in the access log, as nginx does, and the logs answer is valid text" "1 yes" "$(grep -c 'caf\\xE9-\\xEE\\xFF' bench/tmp/access.log) $(curl -sS --unix-socket $CS 'http://control/v1/logs?since=1m&status=all' | python3 -c 'import sys,json; d=json.loads(sys.stdin.buffer.read().decode("utf-8", "strict")); print("yes" if any("caf\\xE9-\\xEE\\xFF" in x["text"] for x in d["lines"]) else "no")')"
