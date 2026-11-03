@@ -35,8 +35,10 @@ agent host  --stdin/stdout-->  agensio mcp  --unix socket-->  agensio (control A
   `reason` that the server writes to its audit log with the caller's uid.
 - `site_create` and `site_update` report every prerequisite at once, each with a code and
   its command, so one round of root work suffices; `dry_run: true` runs the same checks and
-  shows the file that would be written without writing it. A privileged port the dropped
-  server cannot bind by a reload comes back as `needs_restart` with the restart command.
+  shows the file that would be written without writing it. A site on an address below 1024 the
+  server does not hold (its own, or the server's defaults not named in the main file yet) is
+  refused as `listen_unbound` with the way: the main file's `listen_tls` and `listen_plain` and a
+  restart, or a port above 1023 (`docs/configuration.md` 1c).
 - Every value that could end up in a root command (`user`, `group`, `root`, certificate
   paths) is validated first: account names must match `^[a-z_][a-z0-9_-]{0,31}$` and may
   not be a system account or a word for "none"; paths must be absolute and free of shell

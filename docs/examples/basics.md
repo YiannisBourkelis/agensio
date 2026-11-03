@@ -442,6 +442,8 @@ any other name, or for the bare IP address, gets.
 include = ["sites.d/*.toml"]
 
 [server]
+listen_tls = ["[::]:443"]      # the addresses every site takes unless its file names its own (1c)
+listen_plain = ["[::]:80"]     # IPv4 and IPv6 on one socket each; a site without tls, and the redirect port
 acme = { email = "admin@example.com" }
 ```
 
@@ -449,8 +451,7 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]       # and 0.0.0.0:80, redirecting to HTTPS (http, left out)
-root = "/var/www/example.com/web"
+root = "/var/www/example.com/web"   # no listen: the server's [::]:443, and [::]:80 redirecting to HTTPS
 tls = "auto"
 ```
 
@@ -458,7 +459,6 @@ tls = "auto"
 # /etc/agensio/sites.d/docs.example.com.toml
 [[site]]
 server_name = ["docs.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/docs.example.com/web"
 tls = "auto"                   # a certificate of its own, chosen by the name the client asks for
 ```
@@ -467,7 +467,7 @@ tls = "auto"                   # a certificate of its own, chosen by the name th
 # /etc/agensio/sites.d/default.toml: replaces the package's catch-all
 [[site]]
 server_name = ["*"]            # every Host no other site on this address lists, and requests by IP address
-listen = ["0.0.0.0:80"]
+listen = ["[::]:80"]           # its own: the plain port alone, no certificate to offer by address
 
 [[site.redirect]]
 from = "/"
@@ -506,6 +506,67 @@ a hand-written file: no field of `site-create` sets a redirect target.
 **MCP:** `server_status` names each listener's catch-all site; `sites_list` marks it.
 
 **Reference:** [Which site answers a request](../configuration.md#1b-which-site-answers-a-request).
+
+## IPv6 for every site: the host's addresses
+
+**When:** the host has an IPv6 address and every site should answer on both families; or the
+sites were created before 0.1.0-alpha.120, when each managed file was written with its own
+`listen = ["0.0.0.0:443"]`, and should follow the server from now on.
+
+```toml
+# /etc/agensio/agensio.toml: the main file, root's (once per host)
+include = ["sites.d/*.toml"]
+
+[server]
+listen_tls = ["[::]:443"]      # one dual-stack socket per port: IPv4 and IPv6 clients alike
+listen_plain = ["[::]:80"]     # restart-only: bound at start as root, so no reload ever binds a privileged port
+acme = { email = "admin@example.com" }
+```
+
+```toml
+# /etc/agensio/sites.d/example.com.toml: a site on the server's addresses names none
+[[site]]
+server_name = ["example.com", "www.example.com"]
+root = "/var/www/example.com/web"
+tls = "auto"
+```
+
+```sh
+# Files written before alpha.120 carry an address of their own; hand each back to the server's
+# (a reload each, nothing to bind):
+agensio ctl site-update example.com --listen-default --yes --reason "the server's addresses"
+agensio ctl site-update docs.example.com --listen-default --yes --reason "the server's addresses"
+# then the main file's keys, and one restart for the host:
+agensio -t && systemctl restart agensio
+ss -ltnp | grep agensio            # *:443 and *:80 held by agensio, no 0.0.0.0 socket left
+curl -4 -sS -o /dev/null -w '%{http_code} %{remote_ip}\n' https://example.com/
+curl -6 -sS -o /dev/null -w '%{http_code} %{remote_ip}\n' https://example.com/
+agensio ctl status                 # listeners [::]:443 and [::]:80, every site on them
+agensio ctl health                 # no listen_ipv6_only, no listen_family_split
+```
+
+**What it does.** The two keys are the addresses every site takes unless its file names its own
+(`[::]` is the built-in default too, so a new install needs none of this). They are restart-only:
+the server binds them at start, as root, before dropping privileges, which is why the move is one
+edit and one restart for the host rather than a reload per site, and why no site is ever left on
+IPv6 alone meanwhile (a site moved on its own would be, since the kernel hands every IPv4
+connection of a port to a `0.0.0.0` socket while one exists; `-t`, the dry run and health say
+`listen_family_split` on the site that keeps one). Where the host has no IPv6, or its IPv6
+sockets take no IPv4 (`net.ipv6.bindv6only = 1`), the server binds `0.0.0.0` in place of, or
+beside, `[::]` and says so (`ipv6_unavailable`). The firewall limits the package renders cover
+IPv6 sources per /64, and the jails read IPv6 clients from the logs as they are.
+
+**On a managed site.** `site_create` and `site_update` write no `listen` unless given
+`listen_tls` or `listen_plain`; `--listen-default` (MCP: `listen_tls: ""`, `listen_plain: ""`)
+hands a site with its own back. A site's own address is for one address of a host with several,
+a loopback-only or another port, never a family: an address below 1024 the server does not hold
+is refused with the way, since once the server dropped root only a restart can bind it.
+
+**MCP:** `site_update` with `listen_tls: ""` and `listen_plain: ""`; `server_status` lists the
+listeners; `health_check` for `listen_family_split`, `listen_ipv6_only` and `ipv6_unavailable`.
+
+**Reference:** [The server's addresses and a site's own](../configuration.md#1c-the-servers-addresses-and-a-sites-own),
+[Reload without restart](../configuration.md#12b-reload-without-restart).
 
 ## A mistake in one site's file
 

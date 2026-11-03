@@ -276,7 +276,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   (`served_type`, `StaticHandler::type_of`), so a hit pays nothing; `path_check` names the layer.
 - **Config**: TOML (vendored toml++). `[server]`, `[cache]`, `[[site]]` with `server_name`,
   `listen` (stored in one spelling, `normalise_listen`: the IP as the stack prints it, an IPv6 host
-  in brackets, `[::]:443`; every reader goes through `split_listen`, 2026-11-03), `root`, `index`, `try_files`, `tls`, `default`, and `[[site.location]]` blocks
+  in brackets, `[::]:443`; every reader goes through `split_listen`, 2026-11-03; a site without one
+  takes `[server] listen_tls` / `listen_plain`, `[::]` by default, resolved against `ipv6_facts` at
+  load, restart-only and bound at start as root so no reload binds a privileged port; named in the
+  main file they are opened at start without a site, `build_listeners`, a TLS one without a
+  certificate closing connections; `SiteConfig::listen_default`, `listen_family_split`, the dry
+  run's `listen_unbound`; `docs/configuration.md` 1c), `root`, `index`, `try_files`, `tls`, `default`, and `[[site.location]]` blocks
   (`path`, `match = "prefix" | "exact"`, per-location `root` or `alias`/`index`/`try_files`/
   `hidden_files`/`symlinks`/`handler`); `include = ["sites.d/*.toml"]` for
   panel-generated per-site files. Loading never creates sockets; `Server` is built from the

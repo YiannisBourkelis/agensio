@@ -170,7 +170,17 @@ section of `docs/configuration.md` that explains the key.
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
 | `server_name` | list of host names | ["*"] | The names this site answers; "*" makes it the listener's catch-all. A name no site lists answers 421. | reload | site-create (domain, aliases) | 1b |
-| `listen` | list of host:port | (required) | The addresses this site listens on; one site per name per address. | reload (a new privileged port needs a restart) | site-create (listen_plain, listen_tls) | 1 |
+| `listen` | list of host:port | the server's listen_tls (a site with tls) or listen_plain | The addresses this site listens on when it has its own, replacing the server's whole (a specific address of a host with several, a loopback-only or odd-port site); one site per name per address. A site on 0.0.0.0:P beside sites on the server's [::]:P takes every IPv4 connection of the port (listen_family_split). An address below 1024 the server does not hold cannot be added by a reload once it dropped root: put it in [server] listen_tls or listen_plain and restart. | reload | site-create (listen_plain, listen_tls; omitted: the server's) | 1c |
+## `[server]`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `listen_tls` | list of host:port | ["[::]:443"] (0.0.0.0 without IPv6) | The addresses a site with tls listens on when its file names no listen; its plain redirect listeners are listen_plain. Bound at start as root, before the privilege drop, so no reload has to bind a privileged port; the key in the file opens the addresses at start whether or not a site uses them yet, so a site created later attaches by a reload. [::] takes both families where the host allows it (health ipv6_unavailable says when it falls back to 0.0.0.0). | restart | file | 1c |
+| `listen_plain` | list of host:port | ["[::]:80"] (0.0.0.0 without IPv6) | The addresses a site without tls listens on when its file names no listen, and the plain redirect addresses of a site with tls on the server's listen_tls. Bound at start as root like listen_tls. | restart | file | 1c |
+## `[[site]]`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
 | `root` | path | (required unless app = proxy) | The document root, or for a preset the project directory (Laravel's public/, Drupal's web/ are served; for app = rails the application's directory, where site tasks run and nothing is served). | reload | site-create (root) | 1 |
 | `app` | enum: static \| php \| laravel \| drupal \| wordpress \| grav \| proxy \| rails \| redmine \| django \| wagtail \| node | static | The preset: routing, which .php runs, what is refused; presets_list explains each. | reload | site-create (app) | 2 |
 | `entry` | string | (none; the unit needs it) | app = node: the file node runs, relative to the project directory (server/server.js); .js, .mjs or .cjs, a plain path. The rendered unit starts it; site_install's facts guess it from package.json. | reload | site-create (entry) | 4f |

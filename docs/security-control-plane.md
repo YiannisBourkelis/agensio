@@ -109,7 +109,7 @@ changes the trust model, so here is exactly what it is:
   (nothing removed, then each written pool's socket awaited, at most 30 s, and a version's files
   put back when one does not come up) or `start` (`full` plus the wait, asked once at a start
   before the listeners accept); see row 45),
-  `service_restart` (once a minute at most), `task_run` (F13: a site's name, a task's name
+  `task_run` (F13: a site's name, a task's name
   and short string parameters, nothing else; the helper loads the configuration from disk,
   finds the site, its app, directory and user, takes the command from the task table, the
   interpreter from `[control] runtimes` and the bounds from `task_limits` of that same
@@ -164,7 +164,8 @@ changes the trust model, so here is exactly what it is:
 
 What a fully compromised server process gains: it can create `nologin` system accounts
 without a home, lay out directories under `sites_root` for such accounts, regenerate pool
-files the hosting rules accept, restart the service (rate-limited), have an archive
+files the hosting rules accept (the rate-limited restart of the service went with the site_create
+path that used it, 2026-11-03: a restart is root's), have an archive
 of its choosing unpacked, as a site account, into an empty directory that account owns
 under `sites_root` (regular files and directories only, no symlinks, no set-uid, no
 program run), have one of a site's files copied to another path of the same site as

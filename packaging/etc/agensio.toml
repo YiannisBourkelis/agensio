@@ -5,6 +5,8 @@ include = ["sites.d/*.toml"]
 
 [server]
 user = "agensio"                   # started as root: bind, open the logs, then become this user
+listen_tls = ["[::]:443"]          # the addresses every site takes unless its file names its own: IPv4 and IPv6 on one
+listen_plain = ["[::]:80"]         # socket each; opened at start, so a site created later attaches by a reload (1c)
 # acme = { email = "admin@example.com" }   # uncomment for tls = "auto" (Let's Encrypt)
 
 [log]

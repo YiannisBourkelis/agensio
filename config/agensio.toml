@@ -6,6 +6,8 @@
 include = ["sites.d/*.toml"]
 
 [server]
+listen_tls = ["[::]:443"]    # every site with tls, unless its file names its own listen; [::] takes IPv4 and IPv6
+listen_plain = ["[::]:80"]   # every site without tls, and the redirect port beside listen_tls (docs/configuration.md 1c)
 workers = 0              # 0 = one worker per hardware thread
 idle_timeout = 15        # seconds a keep-alive connection may stay idle
 max_requests_per_connection = 1000  # then the server closes the connection (0 = unlimited)

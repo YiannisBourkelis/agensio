@@ -181,6 +181,16 @@ write_config "$T/v2"
 "$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.3
 check "back on v2" "version two" "$(curl -sS $B/)"
 
+# The server's addresses are restart-only (docs/configuration.md 1c): a reload that finds listen_plain
+# in the file keeps the running addresses, names the keys, and binds nothing.
+mark=$(wc -l < "$T/logs/error.log")
+SERVER_EXTRA='listen_plain = ["127.0.0.1:18097"]' write_config "$T/v2"
+"$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.3
+check "1c: listen_plain added to the main file is a restart-only change: the reload names the keys and opens nothing" "1 closed version two" \
+  "$(logged_since "$mark" 'reload: listen_tls, listen_plain changed on disk and take effect at a restart') $(nc -z 127.0.0.1 18097 2>/dev/null && echo open || echo closed) $(curl -sS $B/)"
+write_config "$T/v2"
+"$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.3
+
 # The connection limits apply on reload (audit 2026-10-07, item 2.7): a connection
 # opened after a reload that lowers idle_timeout from the boot value (15 s) to 2 s is
 # closed about 2 s after its response, over HTTP/1 and over HTTP/2. Before the fix both

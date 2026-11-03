@@ -1373,9 +1373,116 @@ static void test_listen_canonical() {
     spec.listen_plain = "[::0]:80";
     CHECK(codes(spec).find("needs_restart") == std::string::npos);  // another spelling of the same address
     spec.listen_plain = "[::]:81";
-    CHECK(codes(spec).find("needs_restart") != std::string::npos);
+    CHECK(codes(spec).find("listen_unbound") != std::string::npos);
     spec.listen_plain = "0.0.0.0:18091";
     CHECK(codes(spec).find("needs_restart") == std::string::npos);
+    fs::remove_all(dir);
+}
+
+// The server's addresses (docs/configuration.md 1c, 2026-11-03): a site without listen takes [server]
+// listen_tls / listen_plain, resolved against the host's IPv6; a site's own replaces them whole; the
+// keys are restart-only; the family split and the dry run's refusal with the way are named.
+static void test_listen_defaults() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-ldef-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    const std::string root = "root = \"" + (dir / "www").string() + "\"\n";
+    auto load = [&](const char* name, const std::string& text, const Config* running = nullptr) {
+        std::ofstream(dir / name) << text;
+        return load_config(dir / name, running);
+    };
+    auto refused = [&](const std::string& text, const char* what) {
+        try {
+            (void)load("r.toml", text);
+        } catch (const std::exception& e) {
+            return std::string(e.what()).find(what) != std::string::npos;
+        }
+        return false;
+    };
+    auto codes_of = [](const Config& c) {
+        std::string out;
+        for (const auto& n : access_notices(c)) out += n.code + ":" + n.site + " ";
+        return out;
+    };
+    using L = std::vector<std::string>;
+    set_ipv6_facts(Ipv6Facts{true, true});
+    // Built-in defaults: a plain site on [::]:80; a TLS site on [::]:443 with [::]:80 redirecting to it.
+    {
+        Config c = load("d.toml", "[server]\nacme = { email = \"me@x.test\" }\n[[site]]\nserver_name = [\"p.test\"]\n" + root +
+                                      "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n");
+        CHECK(c.listen_tls == L{"[::]:443"} && c.listen_plain == L{"[::]:80"} && !c.listen_explicit && c.ipv6_note.empty());
+        CHECK(c.sites[0].listen == L{"[::]:80"} && c.sites[0].listen_default && c.sites[0].http_listen.empty());
+        CHECK(c.sites[1].listen == L{"[::]:443"} && c.sites[1].listen_default && c.sites[1].http_listen == L{"[::]:80"} && c.sites[1].http_redirect && c.sites[1].https_port == 443);
+        CHECK(codes_of(c).find("listen_") == std::string::npos && codes_of(c).find("ipv6_unavailable") == std::string::npos);
+    }
+    // The keys: explicit, on other ports, the redirect names the TLS one; a site's own replaces them whole,
+    // and its 0.0.0.0:P beside the server's [::]:P is named on it, the site cut off on the other one.
+    {
+        Config c = load("e.toml", "[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\", \"127.0.0.1:8081\"]\nacme = { email = \"me@x.test\" }\n"
+                                      "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n"
+                                      "[[site]]\nserver_name = [\"own.test\"]\nlisten = [\"0.0.0.0:8080\"]\n" + root);
+        CHECK(c.listen_explicit && c.sites[0].listen == L{"[::]:8443"} && c.sites[0].http_listen == (L{"[::]:8080", "127.0.0.1:8081"}) && c.sites[0].https_port == 8443);
+        CHECK(!c.sites[1].listen_default && c.sites[1].listen == L{"0.0.0.0:8080"});
+        CHECK(codes_of(c).find("listen_family_split:own.test") != std::string::npos && codes_of(c).find("listen_ipv6_only:t.test") != std::string::npos);
+        // A reload keeps the running addresses, resolves the sites against them and names the keys changed on disk.
+        Config fresh = load("f.toml", "[server]\nlisten_tls = [\"[::]:9443\"]\nlisten_plain = [\"[::]:8080\", \"127.0.0.1:8081\"]\nacme = { email = \"me@x.test\" }\n"
+                                          "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n", &c);
+        CHECK(fresh.listen_tls == c.listen_tls && fresh.listen_file_tls == L{"[::]:9443"} && fresh.sites[0].listen == L{"[::]:8443"});
+        const auto keys = control::restart_needed(fresh, c);
+        CHECK(std::find(keys.begin(), keys.end(), "listen_tls") != keys.end() && std::find(keys.begin(), keys.end(), "listen_plain") == keys.end());
+        Config same = load("f2.toml", "[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\", \"127.0.0.1:8081\"]\nacme = { email = \"me@x.test\" }\n"
+                                         "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n", &c);
+        CHECK(control::restart_needed(same, c).empty());
+        CHECK(refused("[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8443\"]\n[[site]]\nserver_name = [\"a.test\"]\n" + root, "an address is TLS or plain"));
+        CHECK(refused("[server]\nlisten_plain = []\n[[site]]\nserver_name = [\"a.test\"]\n" + root, "must name at least one address"));
+    }
+    // The host's IPv6: none at all, or sockets that take no IPv4.
+    {
+        set_ipv6_facts(Ipv6Facts{false, false});
+        Config c = load("n.toml", "[[site]]\nserver_name = [\"p.test\"]\n" + root);
+        CHECK(c.listen_plain == L{"0.0.0.0:80"} && c.listen_tls == L{"0.0.0.0:443"} && !c.ipv6_note.empty() && c.sites[0].listen == L{"0.0.0.0:80"});
+        CHECK(codes_of(c).find("ipv6_unavailable") != std::string::npos);
+        set_ipv6_facts(Ipv6Facts{true, false});
+        Config d = load("n.toml", "[[site]]\nserver_name = [\"p.test\"]\n" + root);
+        CHECK(d.listen_plain == (L{"[::]:80", "0.0.0.0:80"}) && d.sites[0].listen == d.listen_plain && d.ipv6_note.find("bindv6only") != std::string::npos);
+        set_ipv6_facts(Ipv6Facts{true, true});
+    }
+    // Managed sites: no listen line unless given, "" is the server's again; the dry run refuses a port below
+    // 1024 the server does not hold with the way, and warns of a family split before the file is written.
+    {
+        control::SiteSpec spec;
+        spec.domain = "m.test";
+        spec.https = "none";
+        spec.app = "static";
+        spec.root = (dir / "www").string();
+        CHECK(control::render_site(spec, "x").find("listen = ") == std::string::npos && control::render_site(spec, "x").find("the server's addresses") != std::string::npos);
+        CHECK(spec.to_json()["listen_plain"].is_null() && spec.to_json()["listen_tls"].is_null());
+        spec.listen_plain = "[::]:8080";
+        CHECK(control::render_site(spec, "x").find("listen = [\"[::]:8080\"]") != std::string::npos && spec.to_json().get("listen_plain") == "[::]:8080");
+        control::SiteSpec back;
+        CHECK(control::SiteSpec::from_json(json::Value::object().set("domain", "m.test").set("listen_plain", ""), back) && back.listen_plain.empty());
+        auto codes = [&](const control::SiteSpec& sp, const Config& cf) {
+            std::string out;
+            for (const auto& p : control::preflight(sp, cf, false)) out += p.code + (p.blocks ? "!" : "") + " ";
+            return out;
+        };
+        Config c = load("g.toml", "[[site]]\nserver_name = [\"p.test\"]\nlisten = [\"127.0.0.1:18090\"]\n" + root);  // no keys, nothing on the defaults
+        spec.listen_plain.clear();
+        CHECK(codes(spec, c).find("listen_unbound!") != std::string::npos);  // the server's [::]:80 is not open: the main file and a restart
+        spec.listen_plain = "0.0.0.0:81";
+        CHECK(codes(spec, c).find("listen_unbound!") != std::string::npos);  // its own, below 1024, not held
+        spec.listen_plain = "0.0.0.0:8081";
+        CHECK(codes(spec, c).find("listen_unbound") == std::string::npos);  // a reload binds it
+        Config e = load("h.toml", "[server]\nlisten_plain = [\"[::]:80\"]\n[[site]]\nserver_name = [\"p.test\"]\nlisten = [\"127.0.0.1:18090\"]\n" + root);
+        spec.listen_plain.clear();
+        CHECK(codes(spec, e).find("listen_unbound") == std::string::npos);  // named in the file: open at start
+        Config f = load("i.toml", "[server]\nlisten_plain = [\"[::]:8080\"]\n[[site]]\nserver_name = [\"p.test\"]\n" + root);
+        spec.listen_plain = "0.0.0.0:8080";
+        std::string warn;
+        for (const auto& n : control::access_notices_for(spec, f)) warn += n.code + ":" + n.site + " ";
+        CHECK(warn.find("listen_family_split:m.test") != std::string::npos);
+    }
+    set_ipv6_facts(std::nullopt);
     fs::remove_all(dir);
 }
 
@@ -4918,6 +5025,8 @@ static void test_control_commands() {
             {"cache.max_open_files", [](Config& c) { c.cache_max_open_files += 1; }},
             {"cache.precompressed", [](Config& c) { c.cache_precompressed = !c.cache_precompressed; }},
             {"control.provision", [](Config& c) { c.control.provision = !c.control.provision; }},
+            {"listen_tls", [](Config& c) { c.listen_file_tls = {"[::]:9443"}; }},     // the file's values (1c); the running ones are kept
+            {"listen_plain", [](Config& c) { c.listen_file_plain = {"[::]:9080"}; }},
         };
         for (const auto& [key, change] : restart_only) {
             Config one = cfg;
@@ -5178,7 +5287,8 @@ static void test_control_sites() {
     CHECK(text.starts_with(kManagedMarker));
     CHECK(text.find("redirect = ") == std::string::npos && text.find("\nhttp =") == std::string::npos);  // one block, port 80 beside 443 by default
     CHECK(text.find("[[site]]") == text.rfind("[[site]]") && text.find("\"0.0.0.0:80\"]") == std::string::npos);
-    CHECK(text.find("listen = [\"0.0.0.0:443\"]\nroot = ") != std::string::npos && text.find("app = \"laravel\"") != std::string::npos);
+    CHECK(text.find("listen = ") == std::string::npos && text.find("# listens on the server's addresses") != std::string::npos &&  // the server's, 1c
+          text.find("app = \"laravel\"") != std::string::npos);
     {   // another plain address is named, serving plain HTTP is http = "serve", which hsts refuses
         SiteSpec other = spec;
         other.listen_plain = "127.0.0.1:8452";
@@ -5478,7 +5588,8 @@ static void test_control_sites() {
         ok.php_socket = "127.0.0.1:9000";
         CHECK(write_site_file(site_file(cfg, "shop.test"), render_site(ok, "x"), err));
         const Config loaded = load_config(dir / "agensio.toml");
-        CHECK(loaded.sites.size() == 1 && loaded.sites[0].http_redirect && loaded.sites[0].http_listen == std::vector<std::string>({"0.0.0.0:80"}) && loaded.sites[0].tls &&
+        CHECK(loaded.sites.size() == 1 && loaded.sites[0].http_redirect && loaded.sites[0].listen_default && loaded.sites[0].listen == loaded.listen_tls &&
+              loaded.sites[0].http_listen == loaded.listen_plain && loaded.sites[0].tls &&  // the server's addresses (1c)
               loaded.sites[0].tls->automatic && loaded.sites[0].app == "laravel");  // one block for both schemes (alpha.76)
         // Per-site settings (F10): the allowlist, the ceilings, the refusals, the rendering.
         {
@@ -5561,16 +5672,18 @@ static void test_control_sites() {
         missing.root = (dir / "missing").string();
         const auto pre = prerequisites(missing, loaded);
         CHECK(pre.size() == 2 && pre[0].starts_with("useradd --system --no-create-home --home-dir /var/lib/agensio/no-such-user-zz") && pre[1].starts_with("mkdir -p"));
-        // Every problem in one answer, with a code each; a privileged port on a dropped server is
-        // a non-blocking "needs_restart", and not a problem at all while the server is still root.
+        // Every problem in one answer, with a code each; a site's own privileged port the dropped server
+        // does not hold blocks with the way (listen_unbound, 1c: the main file and a restart, or a port above
+        // 1023), and is not a problem at all while the server is still root.
         missing.listen_tls = "0.0.0.0:444";  // privileged and not bound by `loaded`, which holds :443 and, its http, :80
         const auto problems = preflight(missing, loaded, false);
-        CHECK(problems.size() == 3 && problems[0].code == "missing_account" && problems[1].code == "root_missing" && problems[2].code == "needs_restart");
-        CHECK(problems.size() == 3 && problems[0].blocks && problems[1].blocks && !problems[2].blocks && problems[2].run_as_root == "systemctl restart agensio");
+        CHECK(problems.size() == 3 && problems[0].code == "missing_account" && problems[1].code == "root_missing" && problems[2].code == "listen_unbound");
+        CHECK(problems.size() == 3 && problems[0].blocks && problems[1].blocks && problems[2].blocks && problems[2].run_as_root.find("systemctl restart agensio") != std::string::npos &&
+              problems[2].run_as_root.find("add 0.0.0.0:444 to listen_tls or listen_plain") != std::string::npos);
         CHECK(problems.size() == 3 && problems[2].detail.find("0.0.0.0:444") != std::string::npos && preflight(missing, loaded, true).size() == 2);
-        // Each fixable problem carries the helper request that resolves it; a certificate has none.
+        // Each fixable problem carries the helper request that resolves it; a certificate and a listener have none.
         CHECK(problems.size() == 3 && problems[0].fix.get("op") == "account_add" && problems[0].fix.get("name") == "no-such-user-zz");
-        CHECK(problems.size() == 3 && problems[1].fix.get("op") == "site_layout" && problems[1].fix.get("owner") == "no-such-user-zz" && problems[2].fix.get("op") == "service_restart");
+        CHECK(problems.size() == 3 && problems[1].fix.get("op") == "site_layout" && problems[1].fix.get("owner") == "no-such-user-zz" && problems[2].fix.is_null());
         SiteSpec manual = ok;
         manual.https = "manual";
         manual.cert = "/etc/ssl/none.pem";
@@ -5588,7 +5701,8 @@ static void test_control_sites() {
         CHECK(!v(R"({"op":"site_layout","dir":"/srv/sites/../etc","owner":"shop"})").empty() && !v(R"({"op":"site_layout","dir":"/srv/sites/x","owner":"a;b"})").empty());
         CHECK(v(R"({"op":"log_own","file":"/var/log/agensio/sites/a.test.log","group":"shop"})").empty());
         CHECK(!v(R"({"op":"log_own","file":"/etc/shadow","group":"shop"})").empty() && !v(R"({"op":"log_own","file":"/var/log/agensio/x.txt","group":"shop"})").empty());
-        CHECK(v(R"({"op":"pools_apply"})").empty() && v(R"({"op":"service_restart"})").empty() && !v(R"({"op":"shell","cmd":"id"})").empty());
+        // service_restart is gone (2026-11-03, docs/configuration.md 1c): a restart is root's, so the helper refuses it as unknown.
+        CHECK(v(R"({"op":"pools_apply"})").empty() && !v(R"({"op":"service_restart"})").empty() && !v(R"({"op":"shell","cmd":"id"})").empty());
         // A site's environment: a host name and, for a write, a change the rules accept.
         CHECK(v(R"({"op":"env_read","site":"a.test"})").empty() && v(R"({"op":"env_write","site":"a.test","generate":["SECRET_KEY_BASE"]})").empty() &&
               v(R"({"op":"env_check"})").empty() && v(R"({"op":"env_read","site":"a.test","reveal":["A_1"]})").empty() &&
@@ -13875,6 +13989,7 @@ int main() {
     test_cache();
     test_cache_carry();
     test_listen_canonical();
+    test_listen_defaults();
     test_hpack_encoder();
     test_compression_config();
     test_site_protocols();

@@ -315,6 +315,7 @@ struct SiteConfig {
     std::string group;  // default: the user's primary group
     PhpPool pool;
     std::vector<std::string> listen;        // "host:port" strings, normalised
+    bool listen_default = false;            // listen came from [server] listen_tls / listen_plain (docs/configuration.md 1c)
     // The protocols of this site's listeners: [server] protocols unless the site says
     // otherwise (a TLS port that must stay HTTP/1.1 next to one that offers h2). Sites on
     // one address must agree. Resolved at load into the flags the listener takes.
@@ -553,6 +554,20 @@ struct Config {
     std::size_t max_header_size = 16 * 1024;
     std::size_t max_body_size = 1024 * 1024;  // request bodies above this get 413 (nginx client_max_body_size)
     std::uint32_t body_timeout_s = 60;        // between two reads of a request body (nginx client_body_timeout)
+    // The addresses every site takes unless its file names its own (2026-11-03, docs/configuration.md
+    // 1c): listen_tls for a site with tls (its plain redirect listeners are listen_plain), listen_plain
+    // for one without. Restart-only, bound at start as root, so a reload never has to bind a privileged
+    // port; on a reload the running values are kept and the file's are in listen_file_* for
+    // restart_needed. listen_explicit: the keys are in the main file, so the server opens the addresses
+    // at start whether or not a site uses them yet, and a site created later attaches by a reload.
+    // Resolved against the host's IPv6 (ipv6_facts): without IPv6 "[::]" becomes "0.0.0.0", without
+    // dual-stack sockets "0.0.0.0:P" is bound beside "[::]:P"; ipv6_note says so for -t and health.
+    std::vector<std::string> listen_tls{"[::]:443"};
+    std::vector<std::string> listen_plain{"[::]:80"};
+    bool listen_explicit = false;
+    std::vector<std::string> listen_file_tls, listen_file_plain;
+    bool listen_file_explicit = false;
+    std::string ipv6_note;
     std::string reuse_port = "auto";  // auto | on | off
     bool tcp_nodelay = true;
     bool sendfile = true;  // zero-copy streaming of uncached files on plain sockets
@@ -803,6 +818,19 @@ inline bool split_listen(std::string_view listen, std::string& host, std::string
 // A listen address as the loader stores it: "host:port", an IPv6 host in brackets ("[::]:443");
 // a bare port means 0.0.0.0. Throws (fail) on a bad port.
 std::string normalise_listen(const std::string& in);
+// What the host's IPv6 allows the [::] defaults (docs/configuration.md 1c): an AF_INET6 socket at
+// all, and dual-stack sockets (Linux: net.ipv6.bindv6only = 0). Probed once per process; the unit
+// tests set it.
+struct Ipv6Facts {
+    bool available = true;
+    bool dual_stack = true;
+};
+Ipv6Facts probe_ipv6();
+void set_ipv6_facts(std::optional<Ipv6Facts> facts);
+Ipv6Facts ipv6_facts();
+// The default addresses as this host can bind them: "[::]:P" alone, "0.0.0.0:P" without IPv6, both
+// without dual-stack sockets; `note` says which, "" when nothing changed.
+std::vector<std::string> resolve_default_listen(const std::vector<std::string>& given, const Ipv6Facts& facts, std::string& note);
 // Every address a site listens on: its own, then a TLS site's plain ones (http_listen).
 inline std::vector<std::string> site_addresses(const SiteConfig& s) {
     std::vector<std::string> out = s.listen;

@@ -128,7 +128,7 @@ The matching site file, `/etc/agensio/sites.d/example.com.toml`:
 ```toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]            # port 80 beside it redirects to HTTPS
+# no listen: the server's addresses, [::]:443 and port 80 beside it redirecting to HTTPS (configuration.md 1c)
 root = "/var/www/example.com/web"
 user = "web35"
 group = "client8"

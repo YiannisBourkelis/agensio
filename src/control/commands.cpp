@@ -478,7 +478,7 @@ json::Value tls_json(const SiteConfig& s, std::time_t now, const TlsFacts* tls) 
 
 json::Value site_summary(const SiteConfig& s, std::time_t now, const TlsFacts* tls = nullptr) {
     json::Value v = json::Value::object();
-    v.set("server_name", strings(s.server_names)).set("listen", strings(s.listen));
+    v.set("server_name", strings(s.server_names)).set("listen", strings(s.listen)).set("listen_default", s.listen_default);  // the server's addresses (1c)
     v.set("root", s.root).set("app", s.app).set("user", s.user).set("group", s.group);
     // The project directory when the served root is a directory of it (a preset's public/ or web/,
     // served_dir): site_install fills it, PHP's open_basedir starts there.
@@ -1371,6 +1371,10 @@ std::vector<std::string> restart_needed(const Config& fresh, const Config& runni
     kept(fresh.sendfile_max_chunk != running.sendfile_max_chunk, "sendfile_max_chunk");
     kept(fresh.tcp_nodelay != running.tcp_nodelay, "tcp_nodelay");
     kept(fresh.pid_file != running.pid_file, "pid_file");
+    // The server's addresses (docs/configuration.md 1c): bound at start as root; the file's values are
+    // listen_file_*, the running ones listen_* (load_config keeps them on a reload).
+    kept(fresh.listen_file_tls != running.listen_tls || fresh.listen_file_explicit != running.listen_explicit, "listen_tls");
+    kept(fresh.listen_file_plain != running.listen_plain || fresh.listen_file_explicit != running.listen_explicit, "listen_plain");
     kept(fresh.cache_max_file_size != running.cache_max_file_size, "cache.max_file_size");
     kept(fresh.cache_max_size != running.cache_max_size, "cache.max_size");
     kept(fresh.cache_evict_fraction != running.cache_evict_fraction, "cache.evict_fraction");

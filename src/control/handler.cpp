@@ -1607,11 +1607,8 @@ bool ControlHandler::site_create(Stream& s, const json::Value& body, std::string
     }
     // Every problem at once, so the caller fixes all of them and retries once.
     const auto problems = control::preflight(spec, cfg, backend_->privileged());
-    bool blocking = false, restart = false;
-    for (const auto& p : problems) {
-        blocking = blocking || p.blocks;
-        restart = restart || p.code == "needs_restart";
-    }
+    bool blocking = false;
+    for (const auto& p : problems) blocking = blocking || p.blocks;
     const bool dry_run = body["dry_run"].boolean();
     const auto file = control::site_file(cfg, spec.domain);
     const std::string rendered = control::render_site(spec, now_stamp());
@@ -1681,31 +1678,6 @@ bool ControlHandler::site_create(Stream& s, const json::Value& body, std::string
     if (!control::write_site_file(file, rendered, error)) {
         audit_peer(s, what, error);
         reply(s, 500, json::Value::object().set("error", error));
-        return false;
-    }
-    if (restart) {
-        // The file must still be a valid configuration; the listener is bound at the restart.
-        json::Value check = backend_->validate();
-        for (const auto& h : check["held_back"].items())  // the other sites load; this one would not
-            if (std::filesystem::path(h["file"].str()).lexically_normal() == file.lexically_normal())
-                check.set("ok", false).set("errors", json::Value::array().push(h["error"].str()));
-        if (!check["ok"].boolean()) {
-            std::error_code ec;
-            std::filesystem::remove(file, ec);
-            audit_peer(s, what, "refused: " + check["errors"].dump());
-            std::string detail;  // one text, as every other refusal's (the alpha.66 report)
-            for (const auto& e : check["errors"].items()) detail += (detail.empty() ? "" : "; ") + std::string(e.str());
-            reply(s, 409, json::Value::object().set("error", "the new site did not validate; file removed").set("detail", detail));
-            return false;
-        }
-        audit_peer(s, what, "created " + file.string() + " (restart needed for a privileged port)");
-        const bool helper = backend_->provision_available();
-        if (helper) backend_->restart_later();
-        reply(s, 202, json::Value::object().set("ok", true).set("file", file.string()).set("needs_restart", true).set("waiting", !helper)
-                          .set("restarting", helper).set("problems", problems_json(remaining)).set("run_as_root", helper ? json::Value::array() : commands_of(remaining, false))
-                          .set("hint", helper ? "the site file is written and valid; the service restarts in a moment and serves it"
-                                              : "the site file is written and valid; it is served once the service restarts")
-                          .set("done", done).set("spec", spec.to_json()).set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", warnings));
         return false;
     }
     // The reload with the PHP pools around it (docs/design-php-versions.md 6.1): the new site's pool is up

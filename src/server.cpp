@@ -584,6 +584,39 @@ void Server::build_listeners(Generation& gen) {
             l->site_names.push_back(site.server_names.front());
         }
     }
+    // The server's own addresses (docs/configuration.md 1c): named in the main file, they are open from
+    // the start whether or not a site uses them yet, so a site created later attaches by a reload and
+    // no reload binds a privileged port. Restart-only keys: the running values, which a reload keeps.
+    if (gen.cfg.listen_explicit) {
+        auto add = [&](const std::string& address, bool tls) {
+            for (const auto& existing : listeners)
+                if (existing.address == address) return;
+#ifndef AGENSIO_HAS_TLS
+            if (tls) throw std::runtime_error("server.listen_tls " + address + " requires TLS but agensio was built without OpenSSL");
+#endif
+            listeners.emplace_back();
+            Listener& l = listeners.back();
+            l.address = address;
+            l.endpoint = parse_endpoint(address);
+            l.address_text = l.endpoint.address().to_string();
+            l.port = l.endpoint.port();
+            l.tls = tls;
+            l.h2 = gen.cfg.h2;
+            l.h2c = gen.cfg.h2c;
+            l.h3 = gen.cfg.h3 && tls;
+            l.access_sink = gen.cfg.log.access_sink;
+            l.hq = gen.cfg.hq_interop && tls;
+            if (l.h3 && gen.cfg.http3.alt_svc) {
+                l.alt_svc = "h3=\":" + std::to_string(l.port) + "\"; ma=86400";
+                l.alt_svc_line = "alt-svc: " + l.alt_svc + "\r\n";
+            }
+#ifdef AGENSIO_HAS_TLS
+            l.alpn = gen.cfg.alpn_wire;
+#endif
+        };
+        for (const auto& a : gen.cfg.listen_tls) add(a, true);
+        for (const auto& a : gen.cfg.listen_plain) add(a, false);
+    }
     for (auto& l : listeners) {  // [::] next to an IPv4 listener on its port (open_acceptor_socket)
         const asio::ip::address a = l.endpoint.address();
         if (!a.is_v6() || !a.to_v6().is_unspecified()) continue;
@@ -1512,6 +1545,14 @@ void Server::start_accept(std::size_t index) {
                     sock.close(ignored);
                 } else if (target.connections.load(std::memory_order_relaxed) >= max_connections_.load(std::memory_order_relaxed)) {
                     refuse_connection(sock, acc.peer, *l, target);  // the ceiling: the descriptor budget's guard (hardening item 5)
+                } else if (l->tls && !l->ssl) {
+                    // The server's own TLS address with no site on it yet (1c): no certificate to offer, so the
+                    // connection is closed before any handshake, counted with the handshakes refused for their name.
+                    asio::error_code ignored;
+                    sock.close(ignored);
+                    target.tls_refused.fetch_add(1, std::memory_order_relaxed);
+                    std::lock_guard<std::mutex> lock(target.refusal_mutex);
+                    target.tls_refusals.note(acc.peer.address(), l->address, std::chrono::steady_clock::now());
                 } else if (l->tls) {
 #ifdef AGENSIO_HAS_TLS
                     auto c = std::make_shared<Http1Connection<TlsStream>>(TlsStream(std::move(sock), *l->ssl), target,
@@ -2022,16 +2063,6 @@ int Server::env_file_state(std::string_view site, std::vector<std::string>& expo
     for (const auto& p : r["present"].items())
         if (p.str() == site) return 1;
     return 0;
-}
-
-void Server::restart_later() {
-    restart_timer_ = std::make_unique<asio::steady_timer>(workers_[0]->ctx);
-    restart_timer_->expires_after(std::chrono::milliseconds(800));  // the reply is on the wire by then
-    restart_timer_->async_wait([this](const asio::error_code& ec) {
-        if (ec) return;
-        const json::Value r = provisioner_.request(json::Value::object().set("op", "service_restart"));
-        if (!r["ok"].boolean()) error_log_.error("restart through the helper failed: " + std::string(r.get("error")));
-    });
 }
 
 void Server::stop() {

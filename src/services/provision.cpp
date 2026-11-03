@@ -263,7 +263,7 @@ std::string validate(const json::Value& req, const Config& cfg) {
         if (code.size() != 6 || code.find_first_not_of("0123456789") != std::string::npos) return "approval_check: code is six digits";
         return "";
     }
-    if (op == "service_restart" || op == "ping" || op == "env_check" || op == "app_check" || op == "trash_list" ||
+    if (op == "ping" || op == "env_check" || op == "app_check" || op == "trash_list" ||
         op == "trash_expire" || op == "host_protection" || op == "php_runtimes" || op == "approvers_list")
         return "";
     return "unknown operation '" + op + "'";
@@ -1941,7 +1941,6 @@ void helper_loop(int fd, const Config& cfg) {
     uid_t server_uid = 0;
     if (!cfg.user.empty())
         if (const struct passwd* pw = ::getpwnam(cfg.user.c_str())) server_uid = pw->pw_uid;
-    auto last_restart = std::chrono::steady_clock::time_point{};
     // Approval codes are checked here, against root's files, with the wrong codes counted in this
     // process, which the server cannot reset (docs/design-site-operations.md 27.5).
     approvers::Checker approval_checker;
@@ -2081,21 +2080,6 @@ void helper_loop(int fd, const Config& cfg) {
                         reply = appenv::inspect(appenv::dir_of(cfg.config_path), 0, sites);
                     } catch (const std::exception& e) {
                         reply.set("ok", false).set("error", e.what());
-                    }
-                } else if (op == "service_restart") {
-                    const auto now = std::chrono::steady_clock::now();
-                    if (now - last_restart < std::chrono::seconds(60)) {
-                        reply.set("ok", false).set("error", "a restart was requested less than a minute ago");
-                    } else if (const char* systemctl = find_binary({"/usr/bin/systemctl", "/bin/systemctl"})) {
-                        last_restart = now;
-                        reply.set("ok", true).set("output", "restart requested");
-                        const std::string text = reply.dump() + "\n";
-                        (void)!::write(fd, text.data(), text.size());
-                        std::string o;
-                        run(systemctl, {"restart", "agensio"}, o);  // the helper dies with the service
-                        continue;
-                    } else {
-                        reply.set("ok", false).set("error", "systemctl not available: restart the service by hand");
                     }
                 }
             }

@@ -2,6 +2,34 @@
 
 ## 0.1.0-alpha.120
 
+- **The server's addresses: `[server] listen_tls` and `listen_plain`, IPv6 and IPv4 by default.** A site
+  that names no `listen` takes the server's addresses: `listen_tls` with `tls` (and `listen_plain`
+  for its redirect port), `listen_plain` without. The built-in default is `[::]:443` and `[::]:80`,
+  one dual-stack socket per port that serves both families, so a new install serves IPv6 without
+  anyone deciding it; where the host has no IPv6, or its IPv6 sockets take no IPv4
+  (`bindv6only`), the server binds `0.0.0.0` instead or beside and says so (`ipv6_unavailable`).
+  The two keys are restart-only, bound at start as root before the privilege drop, so no reload
+  ever has to bind a port below 1024: moving a host to IPv6 is one edit of the main file and one
+  restart, every site together. Named in the main file, as the package's file does, the addresses
+  are open from the start whether a site uses them yet or not, so a site created later attaches by
+  a reload. Managed sites write no `listen` unless `listen_tls` or `listen_plain` was given;
+  `agensio ctl site-update NAME --listen-default` (MCP `listen_tls: ""`, `listen_plain: ""`) hands
+  a site with its own address back. A site's own `listen` replaces the server's whole and is for a
+  specific address of a host with several, a loopback-only or odd-port site, not for choosing a
+  family: `0.0.0.0:P` beside the server's `[::]:P` takes every IPv4 connection of the port, which
+  `-t`, the dry run and health now name on the site that caused it (`listen_family_split`), beside
+  `listen_ipv6_only` on the ones cut off. `site_create` and `site_update` no longer promise a restart
+  for a privileged port the reload cannot bind (the test VPS's IPv6 report, item 1: the file was
+  put back and the twelve sites stayed on IPv4): a site's own address below 1024 the server does
+  not hold, or the server's defaults not open yet, is refused up front with the way (`listen_unbound`
+  with the main file's two lines and the restart, or a port above 1023); the server's own restart
+  through the root helper, which that path alone used, is gone with it (the helper's
+  `service_restart` operation removed: a restart is root's). `docs/configuration.md` 1c; the
+  cookbook's IPv6 recipe.
+  - Upgrading: files written before carry `listen = ["0.0.0.0:443"]` and keep working as their own
+    addresses; `site-update NAME --listen-default` per site, then `listen_tls = ["[::]:443"]` and
+    `listen_plain = ["[::]:80"]` under `[server]` and one restart move the host to both families.
+
 - **Fix: an IPv6 listen address has one spelling, `[::]:443`.** The loader stored it without the
   brackets, so `server_status` listed `:::80`, a bind failure said `cannot bind :::443`, and
   `site_create`'s dry run compared the caller's `[::]:80` with the stored `:::80` and called a port the

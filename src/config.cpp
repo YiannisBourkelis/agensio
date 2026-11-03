@@ -41,6 +41,9 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#ifndef _WIN32
+#include <sys/socket.h>
+#endif
 #endif
 
 namespace agensio {
@@ -209,6 +212,61 @@ std::string normalise_listen(const std::string& in) {
     if (!ec) host = a.to_string();
     if (host.find(':') != std::string::npos) host = "[" + host + "]";
     return host + ":" + std::to_string(p);
+}
+
+Ipv6Facts probe_ipv6() {
+    Ipv6Facts f;
+#ifndef _WIN32
+    const int s = ::socket(AF_INET6, SOCK_STREAM, 0);
+    if (s < 0) {
+        f.available = false;
+        f.dual_stack = false;
+        return f;
+    }
+    ::close(s);
+#ifdef __linux__
+    if (std::ifstream in("/proc/sys/net/ipv6/bindv6only"); in) {
+        int v = 0;
+        in >> v;
+        f.dual_stack = v == 0;
+    }
+#endif
+#endif
+    return f;
+}
+
+namespace {
+std::optional<Ipv6Facts> g_ipv6_facts;  // the tests' override
+}
+
+void set_ipv6_facts(std::optional<Ipv6Facts> facts) { g_ipv6_facts = facts; }
+
+Ipv6Facts ipv6_facts() {
+    if (g_ipv6_facts) return *g_ipv6_facts;
+    static const Ipv6Facts probed = probe_ipv6();
+    return probed;
+}
+
+std::vector<std::string> resolve_default_listen(const std::vector<std::string>& given, const Ipv6Facts& facts, std::string& note) {
+    std::vector<std::string> out;
+    for (const auto& l : given) {
+        std::string host, port;
+        if (!split_listen(l, host, port) || host != "::") {
+            out.push_back(l);
+            continue;
+        }
+        if (!facts.available) {
+            out.push_back("0.0.0.0:" + port);
+            note = "IPv6 is not available on this host (no AF_INET6 socket): the server's default listeners are IPv4 only, 0.0.0.0 in place of [::]";
+        } else if (!facts.dual_stack) {
+            out.push_back(l);
+            out.push_back("0.0.0.0:" + port);
+            note = "this host's IPv6 sockets take no IPv4 connections (net.ipv6.bindv6only = 1): the server's default listeners are [::] and 0.0.0.0 on each port";
+        } else {
+            out.push_back(l);
+        }
+    }
+    return out;
 }
 
 namespace {
@@ -2231,7 +2289,7 @@ void check_redirects(SiteConfig& site, const std::string& where) {
 // http (docs/redirects.md 2, alpha.76): what a request over plain HTTP gets, after tls and hsts. A
 // TLS site on port 443 listens on port 80 at the same addresses by default; elsewhere it has no plain
 // listener until `http = { listen = [...] }` names one, and its redirect keeps the TLS port.
-void parse_http(const toml::table& t, SiteConfig& site, const std::string& where) {
+void parse_http(const toml::table& t, SiteConfig& site, const std::string& where, const Config& cfg) {
     const bool tls = site.tls.has_value();
     std::string mode;  // "" for a TLS site that did not say: redirect where it listens on 443, else off
     std::vector<std::string> listen;
@@ -2263,8 +2321,12 @@ void parse_http(const toml::table& t, SiteConfig& site, const std::string& where
         site.http = SiteConfig::Http::off;
     } else {
         if (!listen_given) {
-            for (const auto& l : site.listen)
-                if (l.ends_with(":443")) listen.push_back(l.substr(0, l.size() - 3) + "80");
+            if (site.listen_default) {
+                listen = cfg.listen_plain;  // the server's plain addresses beside its TLS ones (1c)
+            } else {
+                for (const auto& l : site.listen)
+                    if (l.ends_with(":443")) listen.push_back(l.substr(0, l.size() - 3) + "80");
+            }
             if (listen.empty() && !mode.empty())
                 fail(where + ".http = \"" + mode + "\" on a site that listens on no port 443: name the plain addresses, http = { listen = [\"0.0.0.0:8080\"]" +
                      (mode == "serve" ? ", mode = \"serve\"" : "") + " }");
@@ -2276,8 +2338,9 @@ void parse_http(const toml::table& t, SiteConfig& site, const std::string& where
             for (const auto& l : listen)
                 if (std::find(site.listen.begin(), site.listen.end(), l) != site.listen.end())
                     fail(where + ".http.listen: " + display_listen(l) + " is one of the site's TLS addresses; plain HTTP needs an address of its own");
-            // The port the redirect names: 443 for the port 80 derived from it, else the first TLS address's.
-            if (listen_given) {
+            // The port the redirect names: 443 for the port 80 derived from it, else the first TLS address's
+            // (the server's listen_tls may be on another port).
+            if (listen_given || site.listen_default) {
                 const std::string& first = site.listen.front();
                 site.https_port = static_cast<std::uint16_t>(std::stoi(first.substr(first.rfind(':') + 1)));
             }
@@ -2543,7 +2606,6 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
 
     for (auto& l : string_list(t["listen"], (where + ".listen").c_str()))
         site.listen.push_back(normalise_listen(l));
-    if (site.listen.empty()) fail(where + ": 'listen' is required");
 
     site.app = to_lower(t["app"].value_or(std::string()));
     if (!site.app.empty() && site.app != "static" && !proxy_app(site.app) && !php_preset(site.app))
@@ -2736,7 +2798,12 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (site.hsts == SiteConfig::Hsts::application && site.app == "static")
         fail(where + ".hsts = \"application\" leaves HSTS to the site's application, and an app = \"static\" site has no application: nothing would send "
                      "it; hsts = \"none\" is the decided no here, or a lifetime (hsts = \"1y\")");
-    parse_http(t, site, where);
+    // No listen of its own: the server's addresses (1c), the TLS ones for a site with tls.
+    if (site.listen.empty()) {
+        site.listen = site.tls ? cfg.listen_tls : cfg.listen_plain;
+        site.listen_default = true;
+    }
+    parse_http(t, site, where, cfg);
     // canonical (docs/redirects.md 3): one of the site's own exact names; it never points elsewhere.
     if (auto c = t["canonical"].value<std::string>()) {
         const std::string name = to_lower(*c);
@@ -3185,7 +3252,13 @@ void explain_config(const Config& cfg, std::ostream& out) {
         if (!site.app.empty()) out << "  # app = \"" << site.app << "\"";
         out << "\n";
         print_list(out, "server_name", site.server_names);
-        print_list(out, "listen", site.listen);
+        if (site.listen_default) {
+            out << "listen = [";
+            for (std::size_t i = 0; i < site.listen.size(); ++i) out << (i ? ", " : "") << '"' << site.listen[i] << '"';
+            out << "]   # the server's " << (site.tls ? "listen_tls" : "listen_plain") << ", the site names none\n";
+        } else {
+            print_list(out, "listen", site.listen);
+        }
         out << "root = \"" << site.root << "\"\n";
         print_list(out, "index", site.index);
         print_try_files(out, site.try_files);
@@ -3647,9 +3720,48 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
             out.push_back({"listen_ipv6_only", "warning", name,
                            name + " listens on [::]:" + p + " and on no IPv4 address with that port, while other sites listen on IPv4 there: "
                                   "it is reachable over IPv6 only (an IPv4 connection goes to the IPv4 listener); add 0.0.0.0:" + p +
-                                  " to its listen to serve IPv4 clients too"});
+                                  " to its listen to serve IPv4 clients too, or give the sites on 0.0.0.0:" + p + " the server's addresses (1c)"});
         }
     }
+    // The other side of it (2026-11-03, docs/configuration.md 1c): a site with 0.0.0.0:P of its own
+    // beside sites on [::]:P takes every IPv4 connection of the port, so it is the cause and is named.
+    for (const auto& site : cfg.sites) {
+        if (site.listen_default) continue;
+        for (const auto& l : site_addresses(site)) {
+            asio::ip::address a;
+            std::string p;
+            if (!endpoint_of(l, a, p) || !a.is_v4() || !a.to_v4().is_unspecified()) continue;
+            std::string victims;
+            std::size_t count = 0;
+            for (const auto& o : cfg.sites) {
+                if (&o == &site) continue;
+                bool on_v6 = false, on_v4 = false;
+                for (const auto& m : site_addresses(o)) {
+                    asio::ip::address b;
+                    std::string q;
+                    if (!endpoint_of(m, b, q) || q != p) continue;
+                    on_v6 = on_v6 || (b.is_v6() && b.to_v6().is_unspecified());
+                    on_v4 = on_v4 || b.is_v4();
+                }
+                if (on_v6 && !on_v4) {
+                    victims += (count++ ? ", " : "") + o.server_names.front();
+                }
+            }
+            // The server's own [::]:P, named in the main file, is open and cut off the same way, with or
+            // without a site on it yet.
+            const bool servers = cfg.listen_explicit && (std::find(cfg.listen_tls.begin(), cfg.listen_tls.end(), "[::]:" + p) != cfg.listen_tls.end() ||
+                                                         std::find(cfg.listen_plain.begin(), cfg.listen_plain.end(), "[::]:" + p) != cfg.listen_plain.end());
+            if (!count && !servers) continue;
+            const std::string& name = site.server_names.front();
+            out.push_back({"listen_family_split", "warning", name,
+                           name + " listens on 0.0.0.0:" + p + " of its own, which takes every IPv4 connection of port " + p + ": " +
+                               (count ? victims + " on [::]:" + p + (count == 1 ? " is" : " are")
+                                      : "the server's [::]:" + p + ", which every site without a listen of its own takes, is") +
+                               " reachable over IPv6 only. Give it the server's addresses (remove its listen; agensio ctl site-update " + name +
+                               " --listen-default), a specific address of this host, or keep a family out with an access rule"});
+        }
+    }
+    if (!cfg.ipv6_note.empty()) out.push_back({"ipv6_unavailable", "info", "", cfg.ipv6_note});
     // What check_redirects noted (docs/redirects.md 8): chains, a soft 404, a rule answering before a
     // protection, a rule over certificate validation.
     for (const auto& site : cfg.sites)
@@ -4411,6 +4523,38 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
     if (server.as_table() && server.as_table()->contains("protocols"))
         cfg.protocols = string_list(server["protocols"], "server.protocols");
     resolve_protocols(cfg.protocols, cfg.h2, cfg.h2c, cfg.h3, cfg.hq_interop, cfg.alpn_wire, "server.protocols");
+    // The addresses every site takes unless its file names its own (docs/configuration.md 1c):
+    // restart-only, bound at start as root; the keys in the file open them at start whether or not a
+    // site uses them yet. On a reload the running values stand and the file's go to listen_file_* for
+    // restart_needed; a site file is resolved against what is bound.
+    for (const char* key : {"listen_tls", "listen_plain"}) {
+        if (!server.as_table() || !server.as_table()->contains(key)) continue;
+        const std::string what = std::string("server.") + key;
+        std::vector<std::string> list;
+        for (const auto& l : string_list(server[key], what.c_str())) list.push_back(normalise_listen(l));
+        if (list.empty()) fail(what + " must name at least one address: " + key + " = [\"[::]:" + (std::string(key) == "listen_tls" ? "443" : "80") + "\"]");
+        (std::string(key) == "listen_tls" ? cfg.listen_tls : cfg.listen_plain) = list;
+        cfg.listen_explicit = true;
+    }
+    for (const auto& t : cfg.listen_tls)
+        for (const auto& p : cfg.listen_plain)
+            if (t == p) fail("server.listen_tls and server.listen_plain both name " + t + ": an address is TLS or plain, not both");
+    {
+        std::string note;
+        const Ipv6Facts facts = ipv6_facts();
+        cfg.listen_tls = resolve_default_listen(cfg.listen_tls, facts, note);
+        cfg.listen_plain = resolve_default_listen(cfg.listen_plain, facts, note);
+        cfg.ipv6_note = note;
+    }
+    cfg.listen_file_tls = cfg.listen_tls;
+    cfg.listen_file_plain = cfg.listen_plain;
+    cfg.listen_file_explicit = cfg.listen_explicit;
+    if (running) {
+        cfg.listen_tls = running->listen_tls;
+        cfg.listen_plain = running->listen_plain;
+        cfg.listen_explicit = running->listen_explicit;
+        cfg.ipv6_note = running->ipv6_note;
+    }
     if (auto h = server["http2"].as_table()) {
         for (const auto& [k, v] : *h)
             if (k != "max_concurrent_streams") fail("server.http2: unknown key \"" + std::string(k.str()) + "\"");

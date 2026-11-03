@@ -36,11 +36,11 @@ recipes that the test suite loads with `agensio -t`.
 ```toml
 [[site]]
 server_name = ["www.example.com", "example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/example"
 ```
 
-Defaults you get without writing them: `index = ["index.html"]`, dotfiles and
+Defaults you get without writing them: the server's addresses (`[::]:80` for a site without
+`tls`, IPv4 and IPv6 alike, section 1c; a `listen` of the site's own replaces them), `index = ["index.html"]`, dotfiles and
 dot-directories hidden (404) except `/.well-known/` at the root (RFC 8615: `security.txt`, app
 links, a webroot ACME client's challenge; a dot segment below it stays hidden; before
 0.1.0-alpha.70 it needed a location with `hidden_files = true`), symlinks followed, files up to 4 MB cached in memory and
@@ -232,6 +232,49 @@ a Host (HTTP/1.0) claims no name and reaches the catch-all as before.
 
 `agensio ctl status` names each listener's catch-all or `null`; `sites` marks catch-all
 sites; `site-create` warns when it adds the first site to a listener without one.
+
+## 1c. The server's addresses and a site's own
+
+```toml
+[server]
+listen_tls = ["[::]:443"]      # the default: every site with tls, both IP families on one socket
+listen_plain = ["[::]:80"]     # the default: every site without tls, and the redirect port beside listen_tls
+```
+
+A site that names no `listen` takes the server's addresses: `listen_tls` with `tls`, and then
+`listen_plain` for the plain port that redirects to it (section 14), or `listen_plain` without
+`tls`. The built-in default is `[::]`, one dual-stack socket per port that takes IPv4 and IPv6
+clients alike (an IPv4 client is logged as its IPv4 address), so a new install serves both families
+without anyone deciding it. Where the host cannot (no IPv6 at all, or `net.ipv6.bindv6only = 1`,
+which keeps IPv4 off an IPv6 socket) the server binds `0.0.0.0` instead of, or beside, `[::]`, and
+says so: `-t`, the error log and health's `ipv6_unavailable`.
+
+The two keys are **restart-only** (section 12b): the addresses are bound at start, as root, before
+the privilege drop, so no reload ever has to bind a port below 1024, and a change of the host's
+addresses is one edit of the main file and one `systemctl restart agensio`, every site moving
+together. Written in the main file, the keys open the addresses at start whether or not a site
+uses them yet, so a site created later (`site_create`) attaches by a reload; left out, the built-in
+defaults apply to a site that names none and are opened when the first such site does. The
+package's main file names them. A reload that finds them changed keeps the running addresses and
+names the keys, as it does for every restart-only key.
+
+A site's own `listen` replaces the server's whole, for a site that owns one address of a host with
+several (`listen = ["203.0.113.5:443"]`), a loopback-only one, or another port; it is not a way to
+choose a family. The kernel hands a connection to the most specific socket before a byte is read,
+so a site on `0.0.0.0:443` beside sites on the server's `[::]:443` takes every IPv4 connection of
+the port, and the others are reachable over IPv6 only: `-t`, the dry run and health warn
+(`listen_family_split` on the site that caused it, `listen_ipv6_only` on the ones it cut off). To
+keep one family out of a site, use an access rule (section 19), which answers 403 on purpose. An
+address below 1024 the server does not hold cannot be added by a site's `listen` once the server
+dropped root: `site_create` and `site_update` say so and give the way (the main file and a restart,
+or a port above 1023); before 0.1.0-alpha.120 the dry run promised a restart the reload could not
+keep (the test VPS's IPv6 report).
+
+Managed sites (section 15) write no `listen` unless `listen_tls` or `listen_plain` was given to
+`site_create` or `site_update`; `agensio ctl site-update NAME --listen-default` (MCP `listen_tls:
+""`, `listen_plain: ""`) hands a site with an address of its own back to the server's. Files written
+before alpha.120 carry `listen = ["0.0.0.0:443"]` and count as overrides until then, which is what
+the IPv6 recipe of the cookbook walks through (`docs/examples/basics.md`).
 
 ## 2. Plain PHP: `app = "php"`
 
@@ -2023,7 +2066,8 @@ Nothing is interrupted:
 
 Under a 64-connection load the switch itself costs nothing measurable and no request
 fails (`tests/reload.sh`). Restart-only settings (the `applies` column of `docs/keys.md`):
-`workers`, `reuse_port`, `user`, `group`, `pid_file`, `sendfile`, `sendfile_max_chunk`,
+`workers`, `reuse_port`, `user`, `group`, `pid_file`, `listen_tls`, `listen_plain` (the server's
+addresses, bound at start as root, section 1c), `sendfile`, `sendfile_max_chunk`,
 `tcp_nodelay`, the whole `[cache]` table, and `[control]` `socket` and `provision`. A reload that finds
 one of them changed keeps the running value and names each in the error log (`reload:
 cache.precompressed, tcp_nodelay changed on disk and take effect at a restart`), and
@@ -2887,7 +2931,7 @@ with `--out FILE`, never with `>` (section 18).
 | `reload` | operator | the same as `agensio reload`: validate the file on disk, bind, switch; 409 with the reason when refused, nothing changed then |
 | `logs-reopen` | operator | reopen every log file (what `SIGUSR1` does) |
 | `site-create` | admin | writes `sites.d/<domain>.toml`, validates, reloads. Fields: `domain`, `aliases`, `https` (`auto`, `none`, or `{cert, key}`), `redirect_http` (default true: plain HTTP redirects; false is `http = "serve"`, refused with `hsts`), `hsts`, `canonical` (the domain or an alias the other names redirect to; `""` clears it), `redirects` (path redirects, section 14b: a list of `{from, to, status, match, remainder, query, cache}`, sent whole), `user` (an account name; `no_user: true` or JSON `null` for none; the words null, none, nil and system accounts are refused, never turned into commands), `group`, `app`, `root`, `upstream`, `project` (app = django or wagtail: the project's Python package), `php_socket`, `php_children`, `php_version`, `listen_plain`, `listen_tls`, `rules` (an application's own server guidelines as bounded rules, below). Until `https`, `root` (or `upstream`), `app`, `user` and, for a Django site, `project` are decided it answers 422 with the open questions and a suggestion each (a user name from the domain, the app the files under root suggest); when the account or the root directory does not exist it answers 409 with the commands to run as root and waits for the same command again. A new site is HTTPS-only, one block for both schemes: its plain port redirects (the site's `http`). |
-| `site-create` answers | | 422 with `needs` while decisions are open; 409 `prerequisites missing` with `problems` (every one at once, each with a `code`, a `detail` and its `run_as_root` command: `missing_account`, `missing_group`, `root_missing`, `root_unreadable`, `certificate_missing`) plus the flat `run_as_root` list; 202 `needs_restart` when the site adds a privileged port the dropped server cannot bind by a reload (the file is written and valid, `systemctl restart agensio` serves it); 201 with `next_steps` (separate commands: `agensio pools`, then the php-fpm reload) and `warnings`. `dry_run: true` runs every check and returns the file that would be written without writing or reloading |
+| `site-create` answers | | 422 with `needs` while decisions are open; 409 `prerequisites missing` with `problems` (every one at once, each with a `code`, a `detail` and its `run_as_root` command: `missing_account`, `missing_group`, `root_missing`, `root_unreadable`, `certificate_missing`) plus the flat `run_as_root` list; 409 `listen_unbound` when the site would take an address below 1024 the server does not hold (the main file's `listen_tls` and `listen_plain` with a restart, or a port above 1023, under `run_as_root`; before 0.1.0-alpha.120 a 202 promised a restart the reload could not keep); 201 with `next_steps` (separate commands: `agensio pools`, then the php-fpm reload) and `warnings`. `dry_run: true` runs every check and returns the file that would be written without writing or reloading |
 | `site-update NAME` | admin | the same fields on a site `site-create` wrote (the file carries its spec on its first line); a hand-written file is refused with 409, edit it yourself. It writes the file in this version's form whatever fields it is given, none included, also when the file was set aside (a form an earlier version wrote that this one refuses); a hand-written file set aside is refused with 409, naming the file and the loader's error. `settings = {key: value}` (CLI `--set KEY=VALUE`, repeatable) sets the per-site limits: `max_body_size` (any site), and for a PHP site with its own user (a generated pool) `memory_limit`, `max_execution_time`, `max_input_time`, `children`, `pm`, `max_requests`. Each value is checked against `[control] site_limits` and refused above it naming the key, the value and the ceiling; a key outside that list (`extra`, `open_basedir`, any ini name) is refused as unknown, whatever it is. The answer's `done` lists what was written and reloaded: the site file and agensio, and the php-fpm pool and php-fpm when a pool key changed (a php-fpm reload briefly affects every PHP site unless `process_control_timeout` is set) |
 | `site-disable NAME`, `site-enable NAME` | admin | renames the file to `.disabled` and back, reloads |
 | `site-delete NAME [--files]` | admin | removes the file (a `.bak` stays) and sets the site's root additions file aside the same way (`<domain>.root.toml.bak`, still root's; `root_additions_set_aside` in the answer), reloads; never touches the root or the account. With `--files` (`files: true`) everything of the site goes into root's trash first (below): its directory, the account's state directory (or the site's virtualenv when another site shares the account), its access log with its rotations, its environment file, and the site file's text into the entry's manifest; refused while the site's service runs (with the `systemctl` lines for root) or when the directory is not below `sites_root`; a reload that fails afterwards puts everything back. The account is kept |

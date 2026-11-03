@@ -355,7 +355,6 @@ private:
     const Config& running() override { return gen_->cfg; }
     bool provision_available() override { return provisioner_.available(); }
     json::Value provision(const json::Value& req) override { return provisioner_.request(req); }
-    void restart_later() override;
     void install_async(const json::Value& req, std::function<void(json::Value)> done) override;
     void task_async(const json::Value& req, std::function<void(json::Value)> done) override;
     void env_async(const json::Value& req, std::function<void(json::Value)> done) override;
@@ -399,7 +398,6 @@ private:
     // destroyed after its context's timer service reads freed memory (2026-10-09, the sanitizer
     // build at every exit with the helper running, which arms the trash timer; 2026-10-14, the
     // certificate watch's, declared above until then, at every exit of a server with TLS).
-    std::unique_ptr<asio::steady_timer> restart_timer_;
     std::unique_ptr<asio::steady_timer> trash_timer_;       // hourly: expired trash entries removed through the helper
     std::unique_ptr<asio::steady_timer> cert_watch_timer_;  // hourly: certificate files changed on disk (step T3)
     // [[site.auth]]'s verification pool. Declared after workers_, so it is destroyed first: its

@@ -92,8 +92,10 @@ struct SiteSpec {
     // (0.1.0-alpha.100, docs/configuration.md 6c): judged by load_mime_types, at most 64.
     MimeTypes mime_types;
     std::string access_log;  // a site with a user gets its own (rule: nothing shared between users)
-    std::string listen_plain = "0.0.0.0:80";
-    std::string listen_tls = "0.0.0.0:443";
+    // The site's own addresses, "" for the server's ([server] listen_plain / listen_tls, docs/configuration.md
+    // 1c; the default since 2026-11-03, before it "0.0.0.0:80" and "0.0.0.0:443" written into every file).
+    std::string listen_plain;
+    std::string listen_tls;
 
     json::Value to_json() const;
     static bool from_json(const json::Value& v, SiteSpec& out);

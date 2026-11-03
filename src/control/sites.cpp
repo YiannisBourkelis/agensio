@@ -101,7 +101,8 @@ json::Value SiteSpec::to_json() const {
     if (!public_archives.empty()) v.set("public_archives", strings(public_archives));
     if (!mime_types.empty()) v.set("mime_types", mime_types_json(mime_types));
     if (!access_log.empty()) v.set("access_log", access_log);
-    v.set("listen_plain", listen_plain).set("listen_tls", listen_tls);
+    if (!listen_plain.empty()) v.set("listen_plain", listen_plain);
+    if (!listen_tls.empty()) v.set("listen_tls", listen_tls);
     return v;
 }
 
@@ -673,16 +674,62 @@ std::vector<RuleLocation> rule_locations(const SiteSpec& spec) {
     return out;
 }
 
+// "a\", \"b": the inside of a TOML list in a one-line hint.
+static std::string join_list(const std::vector<std::string>& v) {
+    std::string out;
+    for (std::size_t i = 0; i < v.size(); ++i) out += (i ? "\", \"" : "") + v[i];
+    return out;
+}
+
+// The addresses the site would listen on (docs/configuration.md 1c): its own where given, in the
+// stored spelling, else the server's; a TLS site's plain ones likewise. `given` says whether any is
+// the site's own.
+std::vector<std::string> spec_listen(const SiteSpec& spec, const Config& cfg, std::vector<std::string>& plain, bool& by_default) {
+    auto canonical = [](const std::string& a) {
+        try {
+            return normalise_listen(a);
+        } catch (const std::exception&) {
+            return a;  // the loader refuses it with its own words
+        }
+    };
+    const bool tls = spec.https != "none";
+    by_default = (tls ? spec.listen_tls : spec.listen_plain).empty();
+    std::vector<std::string> own;
+    if (tls) {
+        own = spec.listen_tls.empty() ? cfg.listen_tls : std::vector<std::string>{canonical(spec.listen_tls)};
+        if (!spec.listen_plain.empty()) plain = {canonical(spec.listen_plain)};
+        else if (spec.listen_tls.empty()) plain = cfg.listen_plain;
+        else
+            for (const auto& l : own)
+                if (l.ends_with(":443")) plain.push_back(l.substr(0, l.size() - 3) + "80");  // what the loader derives
+    } else {
+        own = spec.listen_plain.empty() ? cfg.listen_plain : std::vector<std::string>{canonical(spec.listen_plain)};
+    }
+    return own;
+}
+
 std::vector<AccessNotice> access_notices_for(const SiteSpec& spec, const Config& cfg) {
     const json::Value admin = admin_rules(spec);
-    if (!spec.rules.is_object() || (spec.rules["restricted"].items().empty() && admin.items().empty())) return {};
     Config view;  // the running sets and proxies, and this site as the request would write it
     view.trusted_proxies = cfg.trusted_proxies;
     view.address_sets = cfg.address_sets;
+    view.listen_tls = cfg.listen_tls;
+    view.listen_plain = cfg.listen_plain;
+    view.listen_explicit = cfg.listen_explicit;
     SiteConfig site;
     site.server_names = {spec.domain};
-    site.listen.push_back(spec.https == "none" ? spec.listen_plain : spec.listen_tls);
-    if (spec.https != "none") site.http_listen.push_back(spec.listen_plain);
+    site.listen = spec_listen(spec, cfg, site.http_listen, site.listen_default);
+    // The other sites' addresses, so a listen of this site's own beside theirs is judged (1c:
+    // listen_family_split, listen_ipv6_only); their names and listeners only.
+    for (const SiteConfig& o : cfg.sites) {
+        if (std::find(o.server_names.begin(), o.server_names.end(), spec.domain) != o.server_names.end()) continue;  // the site itself, being updated
+        SiteConfig c;
+        c.server_names = o.server_names;
+        c.listen = o.listen;
+        c.http_listen = o.http_listen;
+        c.listen_default = o.listen_default;
+        view.sites.push_back(std::move(c));
+    }
     json::Value all = json::Value::array();
     for (const auto& r : spec.rules["restricted"].items()) all.push(r);
     for (const auto& r : admin.items()) all.push(r);
@@ -698,7 +745,10 @@ std::vector<AccessNotice> access_notices_for(const SiteSpec& spec, const Config&
         site.access.push_back(std::move(rule));
     }
     view.sites.push_back(std::move(site));
-    return access_notices(view);
+    std::vector<AccessNotice> out;
+    for (auto& n : access_notices(view))
+        if (n.site == spec.domain) out.push_back(std::move(n));  // this site's; the copies carry nothing else to say
+    return out;
 }
 
 const std::vector<std::string_view>& site_request_fields() {
@@ -1462,13 +1512,18 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
     };
     // One block for both schemes (docs/redirects.md 2, alpha.76): an HTTPS site answers its plain
     // port by its http key, which is left out for the port 80 beside 443 that redirects.
-    out += "\n[[site]]\nserver_name = " + toml_list(names) + "\nlisten = " + toml_list({tls ? spec.listen_tls : spec.listen_plain}) + "\n";
+    out += "\n[[site]]\nserver_name = " + toml_list(names) + "\n";
+    if (const std::string& own = tls ? spec.listen_tls : spec.listen_plain; !own.empty()) out += "listen = " + toml_list({own}) + "\n";
+    else out += "# listens on the server's addresses ([server] listen_tls / listen_plain, docs/configuration.md 1c)\n";
     if (!spec.canonical.empty()) out += "canonical = " + toml_string(spec.canonical) + "   # the other names redirect here (docs/redirects.md 3)\n";
     site_body(out);
     if (tls) {
         if (spec.https == "auto") out += "tls = \"auto\"\n";
         else out += "tls = { cert = " + toml_string(spec.cert) + ", key = " + toml_string(spec.key) + " }\n";
-        const bool beside_443 = spec.listen_tls.ends_with(":443") && spec.listen_plain == spec.listen_tls.substr(0, spec.listen_tls.size() - 3) + "80";
+        // The plain port: the server's listen_plain, or port 80 beside a TLS address of the site's own on
+        // 443, is what the loader gives without a line; any other plain address of the site's own is named.
+        const bool beside_443 = spec.listen_plain.empty() ||
+                                (spec.listen_tls.ends_with(":443") && spec.listen_plain == spec.listen_tls.substr(0, spec.listen_tls.size() - 3) + "80");
         if (!beside_443)
             out += "http = { listen = " + toml_list({spec.listen_plain}) + (spec.redirect_http ? "" : ", mode = \"serve\"") + " }\n";
         else if (!spec.redirect_http)
@@ -1686,28 +1741,41 @@ std::vector<Problem> preflight(const SiteSpec& spec, const Config& cfg, bool pri
         if (!fs::is_regular_file(spec.key, ec))
             out.push_back({"certificate_missing", "no private key at " + spec.key, "# put the private key at " + spec.key + " (mode 0600)", true, json::Value()});
     }
-    // A listener the running server does not hold yet: a reload binds it, unless the port is
-    // privileged and the server has already dropped root. Then the file is written and the
-    // site is served after a restart; saying so here saves the caller a failed reload that
-    // looks like a permission problem.
+    // The listeners (docs/configuration.md 1c). A reload binds an address the server does not hold
+    // yet, unless it is below 1024 and the server has dropped root: then nothing but a restart can,
+    // and the change is blocked with the way, rather than promised a restart the reload cannot keep
+    // (the alpha.119 IPv6 report). The server's own addresses are open when the main file names them
+    // (bound at start) or a site uses them already; an address of the site's own needs the main
+    // file, or a port above 1023.
     if (!privileged) {
-        for (const std::string& given : {spec.listen_plain, spec.listen_tls}) {
-            if (given == spec.listen_tls && spec.https == "none") continue;  // the plain port is always used (http)
-            std::string address;  // the stored spelling, so "[::]:80" written either way is the "[::]:80" the server holds
-            try {
-                address = normalise_listen(given);
-            } catch (const std::exception&) {
-                address = given;  // the loader refuses it with its own words
-            }
-            bool bound = false;
+        std::vector<std::string> plain;
+        bool by_default = false;
+        std::vector<std::string> addresses = spec_listen(spec, cfg, plain, by_default);
+        addresses.insert(addresses.end(), plain.begin(), plain.end());
+        for (const std::string& address : addresses) {
+            const bool servers = std::find(cfg.listen_tls.begin(), cfg.listen_tls.end(), address) != cfg.listen_tls.end() ||
+                                 std::find(cfg.listen_plain.begin(), cfg.listen_plain.end(), address) != cfg.listen_plain.end();
+            bool bound = servers && cfg.listen_explicit;
             for (const auto& s : cfg.sites)
                 for (const auto& l : site_addresses(s)) bound = bound || l == address;
             const std::size_t colon = address.rfind(':');
             const int port = colon == std::string::npos ? 0 : std::atoi(address.c_str() + colon + 1);
-            if (!bound && port > 0 && port < 1024)
-                out.push_back({"needs_restart", "listener " + address + " is not bound yet and the server no longer runs as root, so this "
-                                                "port cannot be added by a reload; the site file is written and the site is served after a restart",
-                               "systemctl restart agensio", false, json::Value::object().set("op", "service_restart")});
+            if (bound || port <= 0 || port >= 1024) continue;
+            if (servers)
+                out.push_back({"listen_unbound",
+                               "the server's address " + address + " is not open yet (no site uses it and the main file does not name it), and a reload "
+                                   "cannot bind a port below 1024 once the server dropped root: name the server's addresses in the main file and restart, "
+                                   "then create the site",
+                               "# in /etc/agensio/agensio.toml under [server]: listen_tls = [\"" + join_list(cfg.listen_tls) + "\"] and listen_plain = [\"" +
+                                   join_list(cfg.listen_plain) + "\"], then: systemctl restart agensio",
+                               true, json::Value()});
+            else
+                out.push_back({"listen_unbound",
+                               "the site's own address " + address + " is a port below 1024 the server does not hold, and a reload cannot bind one "
+                                   "once the server dropped root: put the address in the main file's [server] listen_tls or listen_plain and restart, then "
+                                   "create the site on the server's addresses (omit listen_tls and listen_plain), or use a port above 1023",
+                               "# in /etc/agensio/agensio.toml under [server]: add " + address + " to listen_tls or listen_plain, then: systemctl restart agensio", true,
+                               json::Value()});
         }
     }
     return out;

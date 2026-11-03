@@ -92,7 +92,6 @@ struct ControlBackend {
     // [control] provision = true. `provision` sends one request and returns its reply.
     virtual bool provision_available() = 0;
     virtual json::Value provision(const json::Value& req) = 0;
-    virtual void restart_later() = 0;  // after the current reply went out
     // site-install and site-copy (F9): run off the worker (a download can take minutes) and
     // call `done` on worker 0 with the result. Through the helper as the site's account
     // when there is one, else on a thread of this process as its own account. `req.op`
