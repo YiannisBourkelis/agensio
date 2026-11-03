@@ -1348,6 +1348,18 @@ static void test_listen_canonical() {
     CHECK(normalise_listen("[::]:443") == "[::]:443" && normalise_listen("0.0.0.0:80") == "0.0.0.0:80" &&
           normalise_listen("[::1]:8080") == "[::1]:8080" && normalise_listen("::1:8080") == "[::1]:8080" && normalise_listen("8080") == "0.0.0.0:8080" &&
           normalise_listen("127.0.0.1:80") == "127.0.0.1:80" && normalise_listen("[2001:db8::1]:443") == "[2001:db8::1]:443");
+    // A host that is no IP address is refused at load (the alpha.123 report: -t said OK to
+    // "nonsense:80" and to a list written as one value, which the start then refused, so a unit's
+    // ExecStartPre=agensio -t passed a file the restart could not serve).
+    auto refused_listen = [](const char* a) {
+        try {
+            (void)normalise_listen(a);
+        } catch (const std::exception& e) {
+            return std::string(e.what()).find("IP address") != std::string::npos;
+        }
+        return false;
+    };
+    CHECK(refused_listen("nonsense:80") && refused_listen("example.com:443") && refused_listen("[::]:8443,192.0.2.10:8443") && refused_listen("localhost:8080"));
     CHECK(loopback_listen("[::1]:8080") && !loopback_listen("[::]:80") && !loopback_listen("[2001:db8::1]:80") && loopback_listen("::1:80"));
     CHECK(display_listen("[::1]:18080") == "[::1]:18080" && display_listen("::1:18080") == "[::1]:18080");
     namespace fs = std::filesystem;
@@ -1477,6 +1489,73 @@ static void test_listen_defaults() {
                                         "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n"
                                         "[[site]]\nserver_name = [\"own.test\"]\nlisten = [\"192.0.2.10:8080\"]\n" + root);
         CHECK(codes_of(two).find("listen_") == std::string::npos);
+        // The advice can be followed (the alpha.123 report, problem C). With a managed site cut off, no site
+        // is told to list the address (a managed site takes one address per kind), and a hand-written site
+        // that joined it is told why the hand-back is the way, never to list it; with only hand-written
+        // sites cut off, the joined one is told who still lacks the address.
+        set_host_addresses(HostAddresses{{"192.0.2.10"}, true});
+        std::ofstream(dir / "sites.d" / "m.test.toml") << "# agensio:managed {}\n[[site]]\nserver_name = [\"m.test\"]\n" + root;
+        const std::string head = "include = [\"sites.d/*.toml\"]\n[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\"]\n"
+                                 "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"192.0.2.10:8080\"]\n" + root +
+                                 "[[site]]\nserver_name = [\"c.test\"]\nlisten = [\"[::]:8080\", \"192.0.2.10:8080\"]\n" + root;
+        Config mixed = load("x.toml", head);
+        std::string joined_text, joined_fix, managed_text, managed_fix;
+        for (const auto& n : access_notices(mixed)) {
+            if (n.code == "listen_family_split" && n.site == "c.test") joined_text = n.text, joined_fix = n.fix;
+            if (n.code == "listen_ipv6_only" && n.site == "m.test") managed_text = n.text, managed_fix = n.fix;
+        }
+        CHECK(joined_text.find("c.test lists 192.0.2.10:8080 beside [::]:8080, sharing the socket of a.test: m.test is reachable over IPv6 only") == 0 &&
+              joined_text.find("m.test is a managed site") != std::string::npos && joined_fix.find("Hand back every site on 192.0.2.10:8080") == 0 &&
+              joined_fix.find("list it too") == std::string::npos);
+        CHECK(managed_text.find("the one IPv4 address of the interface with the default route") != std::string::npos && managed_text.find("or add") == std::string::npos &&
+              managed_text.find("cannot be finished") == std::string::npos && managed_fix.find("lists that address too") == std::string::npos &&
+              managed_fix.find("remove the listen line of a.test") != std::string::npos && managed_fix.find("remove the listen line of c.test") != std::string::npos);
+        fs::remove(dir / "sites.d" / "m.test.toml");
+        Config hand = load("x.toml", head + "[[site]]\nserver_name = [\"d.test\"]\n" + root + "[[site]]\nserver_name = [\"e.test\"]\n" + root);
+        std::string hand_joined, hand_d;
+        for (const auto& n : access_notices(hand)) {
+            if (n.code == "listen_family_split" && n.site == "c.test") hand_joined = n.fix;
+            if (n.code == "listen_ipv6_only" && n.site == "d.test") hand_d = n.text + " | " + n.fix;
+        }
+        CHECK(hand_joined.find("the sites still without 192.0.2.10:8080 list it too: d.test, e.test, each listen = [\"[::]:8080\", \"192.0.2.10:8080\"]") == 0);
+        CHECK(hand_d.find("or add 192.0.2.10:8080 to this site's listen to serve IPv4 clients too (as every other site cut off there must: e.test)") != std::string::npos &&
+              hand_d.find("Or every site cut off there lists that address too, which shares its socket: d.test, e.test, each") != std::string::npos);
+        set_host_addresses(std::nullopt);
+        // No site cut off, the server's [::]:P open: said as what a site added later would meet (the small item).
+        Config later = load("y.toml", "[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\"]\n"
+                                          "[[site]]\nserver_name = [\"both.test\"]\nlisten = [\"[::]:8080\", \"0.0.0.0:8080\"]\n" + root);
+        for (const auto& n : access_notices(later))
+            if (n.code == "listen_family_split") CHECK(n.text.find("no site is cut off now, but the server's [::]:8080, which a site without a listen of its own takes, would answer such a site over IPv6 only") != std::string::npos);
+        // The IPv6 side (the alpha.123 report, problem A): a site on the host's one global IPv6 address
+        // takes every outside IPv6 connection of its port, and the sites on the server's [::]:P answer
+        // over IPv4 only; named on both sides, the advice naming the address. Silent for one of several, and
+        // for loopback.
+        set_host_addresses(HostAddresses{{}, false, {"2001:db8::10"}, true});
+        const std::string v6head = "[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\"]\n[[site]]\nserver_name = [\"t.test\"]\n" + root;
+        Config six = load("z.toml", v6head + "[[site]]\nserver_name = [\"own6.test\"]\nlisten = [\"[2001:db8::10]:8080\"]\n" + root);
+        CHECK(codes_of(six).find("listen_family_split:own6.test") != std::string::npos && codes_of(six).find("listen_ipv4_only:t.test") != std::string::npos &&
+              codes_of(six).find("listen_ipv6_only") == std::string::npos);
+        for (const auto& n : access_notices(six)) {
+            if (n.code == "listen_family_split")
+                CHECK(n.text.find("own6.test listens on [2001:db8::10]:8080 of its own, the one global IPv6 address of the interface with the default route, which takes every IPv6 connection of port 8080 from outside: t.test is reachable over IPv4 only") == 0 &&
+                      n.fix.find("remove the listen line of own6.test in ") == 0);
+            if (n.code == "listen_ipv4_only")
+                CHECK(n.text.find("t.test listens on [::]:8080 and not on [2001:db8::10]:8080") == 0 && n.text.find("it is reachable over IPv4 only") != std::string::npos &&
+                      n.text.find("or add [2001:db8::10]:8080 to this site's listen to serve IPv6 clients too") != std::string::npos &&
+                      n.fix.find("each listen = [\"[::]:8080\", \"[2001:db8::10]:8080\"]") != std::string::npos);
+        }
+        set_host_addresses(HostAddresses{{}, false, {"2001:db8::10", "2001:db8::11"}, true});
+        CHECK(codes_of(load("z.toml", v6head + "[[site]]\nserver_name = [\"own6.test\"]\nlisten = [\"[2001:db8::10]:8080\"]\n" + root)).find("listen_") == std::string::npos);
+        set_host_addresses(HostAddresses{{}, false, {"2001:db8::10"}, true});
+        CHECK(codes_of(load("z.toml", v6head + "[[site]]\nserver_name = [\"own6.test\"]\nlisten = [\"[::1]:8080\"]\n" + root)).find("listen_") == std::string::npos);
+        // Cut off on both families: said as reachable on no address from outside.
+        set_host_addresses(HostAddresses{{"192.0.2.10"}, true, {"2001:db8::10"}, true});
+        Config both_ways = load("z.toml", v6head + "[[site]]\nserver_name = [\"own6.test\"]\nlisten = [\"[2001:db8::10]:8080\"]\n" + root +
+                                              "[[site]]\nserver_name = [\"own4.test\"]\nlisten = [\"192.0.2.10:8080\"]\n" + root);
+        std::size_t nowhere = 0;
+        for (const auto& n : access_notices(both_ways))
+            if ((n.code == "listen_ipv4_only" || n.code == "listen_ipv6_only") && n.site == "t.test" && n.text.find("from outside it is reachable on no address") != std::string::npos) ++nowhere;
+        CHECK(nowhere == 2);
         set_host_addresses(std::nullopt);
 #endif
         // Only one key named (problem B): the other's default is a site's when one uses it, never opened at
@@ -1559,6 +1638,13 @@ static void test_listen_defaults() {
         std::istringstream none("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
                                 "d0\t0002C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n");
         CHECK(default_route_interfaces(none).empty());
+        // IPv6 (/proc/net/ipv6_route): the default route learnt from router advertisements on ens3 counts;
+        // the kernel's unreachable default on lo (RTF_REJECT, not up) and a /64 route do not.
+        std::istringstream route6("00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000400 00000001 00000000 00450003     ens3\n"
+                                  "2a034000005600b90000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000001     ens3\n"
+                                  "fd00cafecafe00000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000003 00000000 00000001 docker0\n"
+                                  "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 ffffffff 00000001 00000000 00200200       lo\n");
+        CHECK(default_route6_interfaces(route6) == std::set<std::string>{"ens3"});
     }
     set_ipv6_facts(std::nullopt);
     fs::remove_all(dir);
@@ -5207,6 +5293,26 @@ static void test_control_sites() {
     CHECK(needs[0].field == "https" && needs[1].field == "root" && needs[2].field == "app" && needs[3].field == "user" && needs[3].suggestion == "shop");
     CHECK(json::parse(R"({"https":"auto"})", body, err) && (apply_request(body, cfg, spec, err), err.find("acme") != std::string::npos));
     err.clear();
+    // listen_tls / listen_plain: one address, host:port with an IP host, refused before anything else
+    // sees it (the alpha.123 report: a dry run said ok to "nonsense", and listen_unbound's run_as_root put
+    // a list written as one value into the main file's line); "" is the server's, a good one is stored as
+    // the loader spells it.
+    for (const char* bad : {R"({"listen_tls":"nonsense"})", R"({"listen_tls":"[::]:8443,192.0.2.10:8443"})", R"({"listen_plain":"example.com:80"})", R"({"listen_plain":"0.0.0.0:99999"})"}) {
+        SiteSpec s2;
+        s2.domain = "shop.test";
+        std::string e2;
+        CHECK(json::parse(bad, body, e2));
+        (void)apply_request(body, cfg, s2, e2);
+        CHECK(e2.find("one address, host:port") != std::string::npos);
+    }
+    {
+        SiteSpec s2;
+        s2.domain = "shop.test";
+        std::string e2;
+        CHECK(json::parse(R"({"listen_tls":"[::0]:8443","listen_plain":""})", body, e2));
+        (void)apply_request(body, cfg, s2, e2);
+        CHECK(e2.empty() && s2.listen_tls == "[::]:8443" && s2.listen_plain.empty());
+    }
     cfg.acme.enabled = true;
     CHECK(json::parse(R"({"https":"auto","root":")" + (dir / "www").string() + R"(","user":null})", body, err));
     needs = apply_request(body, cfg, spec, err);

@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.1.0-alpha.124 (unreleased)
+
+- **Fix: a listen address must be an IP address, refused at load and in the request.** The loader
+  kept a host name as written (`listen = ["nonsense:80"]`, or a list written as one value,
+  `"[::]:443,203.0.113.5:443"`), so `-t` said OK to a file the start then refused when it bound, and
+  a unit's `ExecStartPre=agensio -t` would pass it to a restart that could not serve (the alpha.123
+  report, problem B). `site_create` and `site_update` refused it only at the reload, after the dry run
+  had said ok, and `listen_unbound`'s line for root wrote the garbled value
+  (`[[::]:443,203.0.113.5]:443`) into the main file's key. Now the loader refuses a host that is not
+  an IP address with the form, and the request refuses `listen_tls` or `listen_plain` that is not one
+  address before any check or line sees it.
+- **Fix: the advice for a site cut off by an address can be followed** (problem C). The fix offered
+  to "list that address too" to every site cut off, a managed one included, which takes one address of
+  its own per kind and cannot; and a hand-written site that followed it was then told, as one of the
+  address's holders, to remove its line. The second way is offered only where every site cut off is
+  hand-written, named with them all; a managed site cut off is given the hand-back alone; a site that
+  lists the address beside `[::]:P` is told who still lacks it, or, with a managed site among them,
+  why the hand-back of every holder is the way.
+- **The one-address check has an IPv6 side** (problem A). A site on the host's one global IPv6
+  address takes every outside IPv6 connection of its port, as the IPv4 case does, so the sites on the
+  server's `[::]:P` answer over IPv4 only, and nothing said so. `-t`, the dry run and health now warn:
+  `listen_family_split` on the site naming the address, and the new `listen_ipv4_only` on the sites cut
+  off, with the same two ways out. The addresses counted are the global ones (not loopback, link-local
+  or unique-local `fc00::/7`) of the interfaces with the default IPv6 route (`/proc/net/ipv6_route`;
+  every interface where there is none); one of several stays silent. With SO_REUSEPORT only, as for
+  IPv4's specific address: without it the start cannot bind `[::]:P` beside it on Linux. A managed
+  site keeps one address of its own per kind (`listen_tls`, `listen_plain`): the hand-back covers the
+  case, so no list is offered.
+- The wording: the address is "the one IPv4 address of the interface with the default route" where
+  the host has one, and the server's `[::]:P` with no site cut off is "what a site added later on the
+  server's addresses would meet", not a site reachable over IPv6 only.
+
 ## 0.1.0-alpha.123 (2026-11-03)
 
 - **The one-address check reads the default route, and reads the host again each time** (the

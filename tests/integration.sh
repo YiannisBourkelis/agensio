@@ -3314,6 +3314,9 @@ check "1c: a site's own 0.0.0.0:P beside the server's [::]:P is written with the
 "$BIN" ctl site-update lsrv.test --listen-default --yes --reason 1c --socket $LCS > bench/tmp/lsrv/back.json 2>&1
 check "1c: --listen-default hands the site back to the server's addresses: no listen line, no warning, served on the server's address" "yes none 200" \
   "$(! grep -q '^listen = ' bench/tmp/lsrv/sites.d/lsrv.test.toml && echo yes) $(curl -sS --unix-socket $LCS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(sorted({f["code"] for f in d["findings"] if f["code"].startswith("listen_")})) or "none")') $(code -H 'Host: lsrv.test' http://127.0.0.1:18102/)"
+"$BIN" ctl site-update lsrv.test --listen-plain '[::]:18102,192.0.2.10:18102' --dry-run --socket $LCS > bench/tmp/lsrv/garbled.json 2>&1
+check "ctl: a listen address that is not one IP host:port is refused by the dry run as by the real call, with the form, nothing written (the alpha.123 report)" "1 yes yes" \
+  "$(echo $?) $(grep -q 'one address, host:port with an IP host' bench/tmp/lsrv/garbled.json && echo yes) $(! grep -q '^listen = ' bench/tmp/lsrv/sites.d/lsrv.test.toml && echo yes)"
 "$BIN" ctl site-update lsrv.test --listen-plain 0.0.0.0:18102 --dry-run --socket $LCS > bench/tmp/lsrv/dry.json 2>&1
 check "ctl: a dry run needs no --yes, it changes nothing (the alpha.122 report): the answer says dry_run, carries the split warning, the file is untouched" "0 True yes yes" \
   "$(echo $?) $(python3 -c 'import json; d=json.load(open("bench/tmp/lsrv/dry.json")); print(d.get("dry_run"))' 2>/dev/null) $(grep -q 'takes every IPv4 connection' bench/tmp/lsrv/dry.json && echo yes) $(! grep -q '^listen = ' bench/tmp/lsrv/sites.d/lsrv.test.toml && echo yes)"

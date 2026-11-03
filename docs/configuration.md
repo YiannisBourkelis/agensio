@@ -273,9 +273,19 @@ site on the host's one IPv4 address apart from loopback does the same from outsi
 no other address the others could answer on, and is warned about the same way (the alpha.121
 report); the addresses counted are those of the interfaces carrying the default route (a bridge or
 a container network such as docker0 does not count, the alpha.122 report), read afresh at each
-check, and a loopback address, or one of several the host has, is not warned about. A site cut off
-by a specific address is told to list that address (`listen = ["[::]:443", "203.0.113.5:443"]`),
-since `0.0.0.0:443` ranks below the specific socket and would change nothing. To
+check, and a loopback address, or one of several the host has, is not warned about. The same holds
+for IPv6 (the alpha.123 report): a site on the host's one global IPv6 address (not link-local, not
+unique-local `fc00::/7`, of the interfaces with the default IPv6 route) takes every outside IPv6
+connection of its port, and the sites on `[::]:P` answer over IPv4 only (`listen_ipv4_only` on them,
+`listen_family_split` on the cause). Two ways end a
+split by a specific address: every site on it hands back, or every site cut off lists it too
+(`listen = ["[::]:443", "203.0.113.5:443"]`, sharing its socket; `0.0.0.0:443` ranks below the
+specific socket and would change nothing). The second is offered only while every site cut off is
+hand-written: a managed site takes one address of its own per kind and cannot list both, so with one
+among them the hand-back is the way, and a site that already lists the address is told so rather
+than told to remove its line (the alpha.123 report). A listen address is an IP address, one per
+entry: a host name, or a list written as one value, is refused at load and by `site_create` and
+`site_update` (before 0.1.0-alpha.124 `-t` passed it and the start refused it). To
 keep one family out of a site, use an access rule (section 19), which answers 403 on purpose. An
 address below 1024 the server does not hold cannot be added by a site's `listen` once the server
 dropped root: `site_create` and `site_update` say so and give the way (the main file and a restart,

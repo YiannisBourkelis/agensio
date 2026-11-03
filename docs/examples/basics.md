@@ -535,7 +535,7 @@ ss -ltnp | grep agensio            # *:443 and *:80 held by agensio, no 0.0.0.0 
 curl -4 -sS -o /dev/null -w '%{http_code} %{remote_ip}\n' https://example.com/
 curl -6 -sS -o /dev/null -w '%{http_code} %{remote_ip}\n' https://example.com/
 agensio ctl status                 # listeners [::]:443 and [::]:80, every site on them
-agensio ctl health                 # no listen_ipv6_only, no listen_family_split
+agensio ctl health                 # no listen_ipv6_only, listen_ipv4_only or listen_family_split
 ```
 
 **What it does.** The two keys are the addresses every site takes unless its file names its own
@@ -558,7 +558,7 @@ a loopback-only or another port, never a family: an address below 1024 the serve
 is refused with the way, since once the server dropped root only a restart can bind it.
 
 **MCP:** `site_update` with `listen_tls: ""` and `listen_plain: ""`; `server_status` lists the
-listeners; `health_check` for `listen_family_split`, `listen_ipv6_only` and `ipv6_unavailable`.
+listeners; `health_check` for `listen_family_split`, `listen_ipv6_only`, `listen_ipv4_only` and `ipv6_unavailable`.
 
 **Reference:** [The server's addresses and a site's own](../configuration.md#1c-the-servers-addresses-and-a-sites-own),
 [Reload without restart](../configuration.md#12b-reload-without-restart).

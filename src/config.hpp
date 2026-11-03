@@ -775,7 +775,7 @@ std::string site_trusted_entry(const std::string& text, const Config& cfg, std::
 struct AccessNotice {
     std::string code;      // access_allows_proxy, access_loopback, access_ipv4_only, access_single_ipv6, access_site_restricted,
                            // exact_rule_proxied_script, auth_plain_http, auth_users_mixed_methods, php_keep_conn_ondemand,
-                           // php_keep_conn_exceeds_children, listen_ipv6_only, redirect_chain, redirect_soft_404,
+                           // php_keep_conn_exceeds_children, listen_ipv6_only, listen_ipv4_only, listen_family_split, redirect_chain, redirect_soft_404,
                            // redirect_under_protection, redirect_skips_validation, public_archive_refused
     std::string severity;  // "warning" or "info"
     std::string site, text;
@@ -843,12 +843,20 @@ Ipv6Facts ipv6_facts();
 // does (the alpha.121 report). Probed once per process; the unit tests set it.
 struct HostAddresses {
     std::vector<std::string> ipv4;
+    bool routed = false;  // filtered to the default route's interfaces (else every address counted)
+    // The global IPv6 addresses (not loopback, link-local, unique-local or mapped), of the interfaces
+    // with a default IPv6 route where there is one (the alpha.123 report: the check had no IPv6 side).
+    std::vector<std::string> ipv6;
+    bool routed6 = false;
 };
 // Linux: the interfaces that carry a default IPv4 route (/proc/net/route: destination 0, route up), so
 // a bridge, a tunnel or a container network (docker0's 172.17.0.1, up on most hosts) is not an address
 // outside visitors reach (the alpha.122 report: the check was silent on the VPS for it); empty when
 // there is none, and then every address counts.
 std::set<std::string> default_route_interfaces(std::istream& route);
+// The same for IPv6 (/proc/net/ipv6_route: destination ::/0, route up, not a reject route; the kernel
+// keeps an unreachable default on lo).
+std::set<std::string> default_route6_interfaces(std::istream& route);
 HostAddresses probe_host_addresses();
 void set_host_addresses(std::optional<HostAddresses> addresses);
 // The tests' override, else probed on every call (cheap, never on the request path): health, -t and

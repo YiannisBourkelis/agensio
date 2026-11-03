@@ -1239,8 +1239,23 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         }
     }
     if (has_key(body, "access_log")) spec.access_log = body.get("access_log");
-    if (has_key(body, "listen_plain")) spec.listen_plain = body.get("listen_plain");
-    if (has_key(body, "listen_tls")) spec.listen_tls = body.get("listen_tls");
+    // One address each, as the loader stores it, checked here so a dry run says what the real call
+    // would and nothing that did not parse reaches a warning or listen_unbound's run_as_root (the
+    // alpha.123 report: "nonsense" passed the dry run, and "[::]:443,203.0.113.5:443" was written into
+    // the main file's line as "[[::]:443,203.0.113.5]:443"). "" is the server's addresses.
+    for (const char* key : {"listen_plain", "listen_tls"}) {
+        if (!has_key(body, key)) continue;
+        std::string value(body.get(key));
+        if (!value.empty()) {
+            try {
+                value = normalise_listen(value);
+            } catch (const std::exception& e) {
+                error = std::string(key) + ": one address, host:port with an IP host (0.0.0.0:80, [::]:443, 203.0.113.5:443), or \"\" for the server's addresses; " + e.what();
+                return needs;
+            }
+        }
+        (std::string_view(key) == "listen_tls" ? spec.listen_tls : spec.listen_plain) = value;
+    }
     // "user": absent = undecided; JSON null or "" = deliberately none; `no_user: true` says
     // the same in a way every client can send. Both given and disagreeing: refused.
     bool user_given = false;
