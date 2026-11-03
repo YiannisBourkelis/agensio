@@ -186,8 +186,8 @@ check "back on v2" "version two" "$(curl -sS $B/)"
 mark=$(wc -l < "$T/logs/error.log")
 SERVER_EXTRA='listen_plain = ["127.0.0.1:18097"]' write_config "$T/v2"
 "$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.3
-check "1c: listen_plain added to the main file is a restart-only change: the reload names the keys and opens nothing" "1 closed version two" \
-  "$(logged_since "$mark" 'reload: listen_tls, listen_plain changed on disk and take effect at a restart') $(nc -z 127.0.0.1 18097 2>/dev/null && echo open || echo closed) $(curl -sS $B/)"
+check "1c: listen_plain added to the main file is a restart-only change: the reload names that key alone (not listen_tls: a flag per key since alpha.121) and opens nothing" "1 closed version two" \
+  "$(logged_since "$mark" 'reload: listen_plain changed on disk and take effect at a restart') $(nc -z 127.0.0.1 18097 2>/dev/null && echo open || echo closed) $(curl -sS $B/)"
 write_config "$T/v2"
 "$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.3
 
