@@ -197,6 +197,21 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-11-03, the release check of 0.1.0-alpha.121 (dce3ad8f, the alpha.120 report's fixes: a flag
+per listen key, the listen findings' fix, the file tools' dry run), the suites before the tag and the
+sanitizer, fuzz and A/B items after it, so that none shared the cores with the release build. The
+release build: unit, integration (828), the file tools' (14, as root), reload (29: one row had to
+follow the per-key flag, it expected both keys named on a reload that added `listen_plain`), isolation
+(45), auth (49, `--network none`), control (28), pools (26), the provisioning helper's (57) and
+Pebble (21) pass; the builds without OpenSSL and without libxcrypt link and pass their unit tests.
+The sanitizer build (`build-asan`, GCC 14): unit and the integration suite (828) clean, no sanitizer
+report in what the run wrote. `scripts/fuzz-all.sh -t 60`, every target at once (twenty-two, one
+minute each): 120.8 M runs, no finding. The A/B against alpha.120, `bench/ab.sh v0.1.0-alpha.120 -r
+3` in the devbox (`ab-20261103-141516.md`): 0.950 to 1.018, the static rows within the noise band,
+as expected of a change with no request-path code (the 0.950 is the plain 10 MB stream's round-to-
+round spread). The first A/B attempt ran on the host, where port 8080 is a production container's,
+and stopped before measuring.
+
 2026-11-03, the release check of 0.1.0-alpha.120, before the tag. `scripts/fuzz-all.sh -t 300`,
 every target at once (twenty-two, one process each on 24 cores, five minutes): 519.7 M runs, no
 finding, no timeout. The fuzz build had stopped compiling with the access log's format step
