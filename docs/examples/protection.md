@@ -26,7 +26,6 @@ office = ["203.0.113.0/24", "2001:db8:5::/64"]   # one edit here reaches every s
 # /etc/agensio/sites.d/shop.example.com.toml
 [[site]]
 server_name = ["shop.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/shop.example.com/web"
 app = "wordpress"
 user = "shop"
@@ -87,7 +86,6 @@ office = ["203.0.113.0/24", "2001:db8:5::/64"]
 # /etc/agensio/sites.d/blog.example.com.toml
 [[site]]
 server_name = ["blog.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/blog.example.com/web"
 app = "wordpress"
 user = "blog"
@@ -156,7 +154,6 @@ office = ["203.0.113.0/24", "2001:db8:5::/64"]
 # /etc/agensio/sites.d/shop.example.com.toml
 [[site]]
 server_name = ["shop.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/shop.example.com/web"
 app = "wordpress"
 user = "shop"
@@ -216,7 +213,6 @@ office = ["203.0.113.0/24", "2001:db8:5::/64"]
 # /etc/agensio/sites.d/staging.example.com.toml
 [[site]]
 server_name = ["staging.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/staging.example.com/web"
 app = "wordpress"
 user = "staging"
@@ -308,7 +304,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/grafana.example.com.toml
 [[site]]
 server_name = ["grafana.example.com"]
-listen = ["0.0.0.0:443"]
 app = "proxy"
 upstream = "http://127.0.0.1:3000"
 tls = "auto"
@@ -350,7 +345,6 @@ official server configuration lists them.
 # /etc/agensio/sites.d/tasks.example.com.toml
 [[site]]
 server_name = ["tasks.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/tasks.example.com/web"
 app = "php"
 user = "tasks"
@@ -413,7 +407,7 @@ office = ["203.0.113.0/24"]
 # /etc/agensio/sites.d/shop.example.com.toml
 [[site]]
 server_name = ["shop.example.com"]
-listen = ["0.0.0.0:80"]                  # the load balancer ends TLS and forwards plain HTTP
+# no tls: the load balancer ends TLS and forwards plain HTTP to the server's listen_plain (port 80)
 root = "/var/www/shop.example.com/web"
 app = "wordpress"
 user = "shop"
@@ -464,7 +458,7 @@ cdn_b = ["198.51.100.0/24"]
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com"]
-listen = ["0.0.0.0:80"]              # CDN A ends TLS and forwards plain HTTP
+# no tls: CDN A ends TLS and forwards plain HTTP to the server's listen_plain (port 80)
 root = "/var/www/example.com/web"
 trusted_proxies = ["@cdn_a"]         # only CDN A speaks for this site
 ```
@@ -473,7 +467,6 @@ trusted_proxies = ["@cdn_a"]         # only CDN A speaks for this site
 # /etc/agensio/sites.d/example2.com.toml
 [[site]]
 server_name = ["example2.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/example2.com/web"
 trusted_proxies = ["@cdn_b"]         # only CDN B
 ```
@@ -517,7 +510,6 @@ banning.
 # /etc/agensio/sites.d/tasks.example.com.toml
 [[site]]
 server_name = ["tasks.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/tasks.example.com/web"
 app = "php"
 user = "tasks"

@@ -25,7 +25,6 @@ http2 = { max_concurrent_streams = 128 }   # the default: requests one client ma
 # /etc/agensio/sites.d/www.example.com.toml
 [[site]]
 server_name = ["www.example.com", "example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/www.example.com/web"
 tls = { cert = "/etc/ssl/www.example.com/fullchain.pem", key = "/etc/ssl/www.example.com/privkey.pem" }
 ```
@@ -76,7 +75,6 @@ level = "info"              # a line for every GOAWAY and RST_STREAM the server 
 # /etc/agensio/sites.d/www.example.com.toml
 [[site]]
 server_name = ["www.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/www.example.com/web"
 tls = { cert = "/etc/ssl/www.example.com/fullchain.pem", key = "/etc/ssl/www.example.com/privkey.pem" }
 ```
@@ -158,7 +156,6 @@ http3 = { retry = "auto", alt_svc = true }   # the defaults; retry = "always" un
 # /etc/agensio/sites.d/www.example.com.toml
 [[site]]
 server_name = ["www.example.com", "example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/www.example.com/web"
 tls = { cert = "/etc/ssl/www.example.com/fullchain.pem", key = "/etc/ssl/www.example.com/privkey.pem" }
 ```
@@ -271,7 +268,6 @@ max_requests_per_connection = 1000   # the default: then Connection: close (HTTP
 # /etc/agensio/sites.d/www.example.com.toml
 [[site]]
 server_name = ["www.example.com", "example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/www.example.com/web"
 app = "wordpress"
 user = "www"
@@ -341,7 +337,6 @@ body_timeout = 60           # the default: longest wait between two reads of a b
 # /etc/agensio/sites.d/media.example.com.toml
 [[site]]
 server_name = ["media.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/media.example.com/web"
 app = "wordpress"
 user = "media"
@@ -409,7 +404,6 @@ revalidate_interval = 1    # the default: a cached file is checked against the d
 # /etc/agensio/sites.d/files.example.com.toml
 [[site]]
 server_name = ["files.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/files.example.com/web"
 tls = { cert = "/etc/ssl/files.example.com/fullchain.pem", key = "/etc/ssl/files.example.com/privkey.pem" }
 ```

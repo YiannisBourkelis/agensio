@@ -43,6 +43,12 @@
 #include <unistd.h>
 #ifndef _WIN32
 #include <sys/socket.h>
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#endif
 #endif
 #endif
 
@@ -240,6 +246,37 @@ std::optional<Ipv6Facts> g_ipv6_facts;  // the tests' override
 }
 
 void set_ipv6_facts(std::optional<Ipv6Facts> facts) { g_ipv6_facts = facts; }
+
+HostAddresses probe_host_addresses() {
+    HostAddresses h;
+#ifndef _WIN32
+    ifaddrs* list = nullptr;
+    if (::getifaddrs(&list) != 0) return h;
+    for (const ifaddrs* i = list; i; i = i->ifa_next) {
+        if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !(i->ifa_flags & IFF_UP)) continue;
+        sockaddr_in sin{};  // copied, not cast: the entry is a sockaddr of the family checked above
+        std::memcpy(&sin, i->ifa_addr, sizeof sin);
+        const asio::ip::address_v4 a(ntohl(sin.sin_addr.s_addr));
+        if (a.is_loopback() || a.is_unspecified()) continue;
+        const std::string text = a.to_string();
+        if (std::find(h.ipv4.begin(), h.ipv4.end(), text) == h.ipv4.end()) h.ipv4.push_back(text);
+    }
+    ::freeifaddrs(list);
+#endif
+    return h;
+}
+
+namespace {
+std::optional<HostAddresses> g_host_addresses;  // the tests' override
+}
+
+void set_host_addresses(std::optional<HostAddresses> addresses) { g_host_addresses = std::move(addresses); }
+
+HostAddresses host_addresses() {
+    if (g_host_addresses) return *g_host_addresses;
+    static const HostAddresses probed = probe_host_addresses();
+    return probed;
+}
 
 Ipv6Facts ipv6_facts() {
     if (g_ipv6_facts) return *g_ipv6_facts;
@@ -2944,6 +2981,7 @@ void parse_sites_from(const toml::table& tbl, const fs::path& base_dir, Config& 
             for (std::size_t i = first; i < cfg.sites.size(); ++i) {
                 cfg.sites[i].source = source;
                 cfg.sites[i].source_digest = d == cfg.file_digests.end() ? 0 : d->second;
+                cfg.sites[i].managed = cfg.managed_files.count(source) > 0;
             }
         }
     } stamp{cfg, first, source};
@@ -3707,21 +3745,40 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
     // takes what no more specific socket does, so only 0.0.0.0:P takes every IPv4 connection (a site on
     // 127.0.0.1:P takes loopback alone); without it [::]:P is opened IPv6-only beside any IPv4 listener.
     const bool families_routed = kernel_routes_families(cfg);
+    const HostAddresses host = host_addresses();
+    // An IPv4 address of a site's own that cuts the [::]:P sites off IPv4: 0.0.0.0 always; with
+    // SO_REUSEPORT also the host's one IPv4 address apart from loopback, since the kernel hands the
+    // specific socket every connection sent to it and from outside there is nowhere else (the
+    // alpha.121 report: a site on the VPS's only public address cut the others off and nothing said
+    // so), a loopback or one of several addresses never; without SO_REUSEPORT any IPv4 listener,
+    // since [::] is opened IPv6-only beside it.
+    auto cuts_off = [&](const asio::ip::address& a) {
+        if (!a.is_v4()) return false;
+        if (a.to_v4().is_unspecified() || !families_routed) return true;
+        if (a.is_loopback()) return false;
+        return host.ipv4.size() == 1 && host.ipv4.front() == a.to_string();
+    };
     auto endpoint_of = [](const std::string& listen, asio::ip::address& addr, std::string& port) {  // stored "[::]:443"
-        std::string host;
-        if (!split_listen(listen, host, port)) return false;
+        std::string host_text;
+        if (!split_listen(listen, host_text, port)) return false;
         asio::error_code ec;
-        addr = asio::ip::make_address(host, ec);
+        addr = asio::ip::make_address(host_text, ec);
         return !ec;
     };
-    std::map<std::string, std::vector<std::string>> ipv4_ports;  // port -> the sites listening there on an IPv4 address that cuts [::] off
+    // The way back for one site: the managed command as it runs, or the hand-written file's line (the
+    // alpha.121 report: the fix gave the command without --yes, and sent a main-file site to sites.d).
+    auto hand_back = [](const SiteConfig& s) {
+        return s.managed ? "agensio ctl site-update " + s.server_names.front() + " --listen-default --yes --reason \"the server's addresses\""
+                         : "remove the listen line of " + s.server_names.front() + " in " + s.source + " and reload";
+    };
+    std::map<std::string, std::vector<const SiteConfig*>> ipv4_ports;  // port -> the sites whose own IPv4 address there cuts [::] off
     for (const auto& site : cfg.sites)
         for (const auto& l : site_addresses(site)) {
             asio::ip::address a;
             std::string p;
-            if (!endpoint_of(l, a, p) || !a.is_v4() || (families_routed && !a.to_v4().is_unspecified())) continue;
-            auto& names = ipv4_ports[p];
-            if (std::find(names.begin(), names.end(), site.server_names.front()) == names.end()) names.push_back(site.server_names.front());
+            if (!endpoint_of(l, a, p) || !cuts_off(a)) continue;
+            auto& sites = ipv4_ports[p];
+            if (std::find(sites.begin(), sites.end(), &site) == sites.end()) sites.push_back(&site);
         }
     for (const auto& site : cfg.sites) {
         std::set<std::string> own_ipv4;
@@ -3736,10 +3793,10 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
             std::string p;
             if (!endpoint_of(l, a, p) || !a.is_v6() || !a.to_v6().is_unspecified() || !ipv4_ports.count(p) || own_ipv4.count(p)) continue;
             const std::string& name = site.server_names.front();
-            std::string others, commands;  // the sites to hand back, and the command for each
-            for (const auto& o : ipv4_ports[p]) {
-                others += (others.empty() ? "" : ", ") + o;
-                commands += std::string(commands.empty() ? "" : "; ") + "agensio ctl site-update " + o + " --listen-default";
+            std::string others, commands;  // the sites to hand back, and the way for each
+            for (const SiteConfig* o : ipv4_ports[p]) {
+                others += (others.empty() ? "" : ", ") + o->server_names.front();
+                commands += std::string(commands.empty() ? "" : "; ") + hand_back(*o);
             }
             out.push_back({"listen_ipv6_only", "warning", name,
                            name + " listens on [::]:" + p + " and on no IPv4 address with that port, while other sites listen on IPv4 there (" + others +
@@ -3748,18 +3805,20 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                            // The fix is on the sites that cut it off: a managed site has one address of its own per kind, so
                            // "both families" is a hand-written site's line (the alpha.120 report, problem C).
                            "hand the sites on IPv4 there back to the server's addresses, one after another, in one go: " + commands +
-                               " (MCP site_update with listen_tls: \"\" and listen_plain: \"\"; a hand-written site: its listen line removed); a site handed back answers over IPv6 only until the last leaves" +
+                               " (MCP site_update with listen_tls: \"\" and listen_plain: \"\" for a managed site); a site handed back answers over IPv6 only until the last leaves" +
                                (families_routed ? "" : "; without SO_REUSEPORT a restart follows") + ". A hand-written site meant for one family keeps its line, and the one cut off lists both: listen = [\"[::]:" + p + "\", \"0.0.0.0:" + p + "\"]"});
         }
     }
     // The other side of it (2026-11-03, docs/configuration.md 1c): a site with 0.0.0.0:P of its own
-    // beside sites on [::]:P takes every IPv4 connection of the port, so it is the cause and is named.
+    // (or the host's one IPv4 address) beside sites on [::]:P takes every IPv4 connection of the
+    // port, so it is the cause and is named.
     for (const auto& site : cfg.sites) {
         if (site.listen_default) continue;
         for (const auto& l : site_addresses(site)) {
             asio::ip::address a;
             std::string p;
-            if (!endpoint_of(l, a, p) || !a.is_v4() || !a.to_v4().is_unspecified()) continue;
+            if (!endpoint_of(l, a, p) || !cuts_off(a)) continue;
+            const bool whole = a.to_v4().is_unspecified();
             std::string victims;
             std::size_t count = 0;
             for (const auto& o : cfg.sites) {
@@ -3783,15 +3842,19 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
             if (!count && !servers) continue;
             const std::string& name = site.server_names.front();
             out.push_back({"listen_family_split", "warning", name,
-                           name + " listens on 0.0.0.0:" + p + " of its own, which takes every IPv4 connection of port " + p + ": " +
+                           name + " listens on " + l + " of its own, " +
+                               (whole             ? "which takes every IPv4 connection of port " + p
+                                : families_routed ? "the host's one IPv4 address apart from loopback, which takes every IPv4 connection of port " + p + " from outside"
+                                                  : "beside which [::]:" + p + " is opened IPv6-only (no SO_REUSEPORT)") +
+                               ": " +
                                (count ? victims + " on [::]:" + p + (count == 1 ? " is" : " are")
                                       : "the server's [::]:" + p + ", which every site without a listen of its own takes, is") +
-                               " reachable over IPv6 only. Give it the server's addresses (remove its listen; agensio ctl site-update " + name +
-                               " --listen-default), a specific address of this host, or keep a family out with an access rule",
+                               " reachable over IPv6 only. Give it the server's addresses (" + hand_back(site) + "), " +
+                               (whole ? "a specific address of this host, " : "") + "or keep a family out with an access rule",
                            // The way, with the order: each site handed back answers IPv6 only until the last leaves the
                            // IPv4 socket, which then closes (the alpha.120 report: the move of a host's sites is one loop).
-                           "agensio ctl site-update " + name + " --listen-default (MCP site_update with listen_tls: \"\" and listen_plain: \"\"); a hand-written site: its listen line removed, then reload. "
-                               "Hand back every site on 0.0.0.0:" + p + " one after another, in one go: a site handed back answers over IPv6 only until the last leaves and that socket closes" +
+                           hand_back(site) + (site.managed ? " (MCP site_update with listen_tls: \"\" and listen_plain: \"\")" : "") + ". Hand back every site on " + l +
+                               " one after another, in one go: a site handed back answers over IPv6 only until the last leaves and that socket closes" +
                                (families_routed ? ", when [::]:" + p + " takes IPv4 too" : "; without SO_REUSEPORT [::]:" + p + " then stays IPv6-only until a restart")});
         }
     }
@@ -4739,6 +4802,7 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
                 std::ifstream in(file, std::ios::binary);
                 text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
                 cfg.file_digests[file.string()] = file_digest(text);
+                if (text.starts_with("# agensio:managed ")) cfg.managed_files.insert(file.string());  // sites.cpp kManagedMarker
             }
             toml::table sub;
             try {

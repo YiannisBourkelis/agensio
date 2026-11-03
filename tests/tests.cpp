@@ -1426,10 +1426,47 @@ static void test_listen_defaults() {
         CHECK(codes_of(c).find("listen_family_split:own.test") != std::string::npos && codes_of(c).find("listen_ipv6_only:t.test") != std::string::npos);
         // Each carries its fix (the alpha.120 report, problem C): the site to hand back, named on the one it
         // cut off too, and the order (one after another, the moved ones IPv6-only until the last leaves).
+        // own.test is hand-written (the main file): its way is its file's line, never a ctl command,
+        // which answers "not managed" (the alpha.121 report, problem B).
+        const std::string e_file = (dir / "e.toml").string();
         for (const auto& n : access_notices(c)) {
-            if (n.code == "listen_family_split") CHECK(n.site == "own.test" && n.fix.find("site-update own.test --listen-default") != std::string::npos && n.fix.find("one after another") != std::string::npos);
-            if (n.code == "listen_ipv6_only") CHECK(n.site == "t.test" && n.fix.find("site-update own.test --listen-default") != std::string::npos && n.text.find("(own.test)") != std::string::npos);
+            if (n.code == "listen_family_split")
+                CHECK(n.site == "own.test" && n.fix.find("remove the listen line of own.test in " + e_file + " and reload") == 0 && n.fix.find("site-update") == std::string::npos &&
+                      n.fix.find("one after another") != std::string::npos && n.text.find("remove the listen line of own.test in " + e_file) != std::string::npos);
+            if (n.code == "listen_ipv6_only")
+                CHECK(n.site == "t.test" && n.fix.find("remove the listen line of own.test in " + e_file) != std::string::npos && n.fix.find("site-update") == std::string::npos &&
+                      n.text.find("(own.test)") != std::string::npos);
         }
+        // A managed site (the control plane's marker on its file's first line) gets the command as it runs,
+        // with --yes and --reason (the alpha.121 report: the fix failed as written without them).
+        fs::create_directories(dir / "sites.d");
+        std::ofstream(dir / "sites.d" / "m.test.toml") << "# agensio:managed {}\n[[site]]\nserver_name = [\"m.test\"]\nlisten = [\"0.0.0.0:8080\"]\n" + root;
+        Config m = load("m.toml", "include = [\"sites.d/*.toml\"]\n[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\"]\nacme = { email = \"me@x.test\" }\n"
+                                      "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n");
+        CHECK(m.sites.size() == 2 && m.sites[1].managed && !m.sites[0].managed);
+        for (const auto& n : access_notices(m)) {
+            if (n.code == "listen_family_split")
+                CHECK(n.site == "m.test" && n.fix.find("agensio ctl site-update m.test --listen-default --yes --reason \"the server's addresses\" (MCP site_update") == 0);
+            if (n.code == "listen_ipv6_only") CHECK(n.site == "t.test" && n.fix.find("site-update m.test --listen-default --yes --reason") != std::string::npos);
+        }
+        fs::remove(dir / "sites.d" / "m.test.toml");
+        // A site on the host's one IPv4 address apart from loopback cuts the others off the same way
+        // (the alpha.121 report, problem A: the VPS's only public address); one of several does not.
+#ifdef __linux__
+        set_host_addresses(HostAddresses{{"192.0.2.10"}});
+        Config one = load("h.toml", "[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\"]\nacme = { email = \"me@x.test\" }\n"
+                                        "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n"
+                                        "[[site]]\nserver_name = [\"own.test\"]\nlisten = [\"192.0.2.10:8080\"]\n" + root);
+        CHECK(codes_of(one).find("listen_family_split:own.test") != std::string::npos && codes_of(one).find("listen_ipv6_only:t.test") != std::string::npos);
+        for (const auto& n : access_notices(one))
+            if (n.code == "listen_family_split") CHECK(n.text.find("192.0.2.10:8080 of its own, the host's one IPv4 address apart from loopback") != std::string::npos);
+        set_host_addresses(HostAddresses{{"192.0.2.10", "198.51.100.7"}});
+        Config two = load("h.toml", "[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\"]\nacme = { email = \"me@x.test\" }\n"
+                                        "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n"
+                                        "[[site]]\nserver_name = [\"own.test\"]\nlisten = [\"192.0.2.10:8080\"]\n" + root);
+        CHECK(codes_of(two).find("listen_") == std::string::npos);
+        set_host_addresses(std::nullopt);
+#endif
         // Only one key named (problem B): the other's default is a site's when one uses it, never opened at
         // start (a host with listen_plain alone opened [::]:443 too, and failed to bind it unprivileged).
         Config g = load("g.toml", "[server]\nlisten_plain = [\"[::]:8080\"]\n[[site]]\nserver_name = [\"p.test\"]\n" + root);
@@ -10821,6 +10858,13 @@ static void test_config_reference() {
     for (const auto& k : ref["keys"].items())
         if (k.get("key") == "workers" && k.get("table") == "[server]") workers = k["running"].num() == 3 && k.get("applies") == "restart" && k.get("via") == "file" && k.get("file") == (dir / "a.toml").string();
     CHECK(workers && !ref["how_to_change"].get("file").empty());
+    // The server's addresses and protocols carry their running values (the alpha.121 report: null
+    // there read as "the built-in defaults", and the agent told the operator to add keys the file had).
+    std::map<std::string, std::string> listed;  // key -> the first running value (the rows come in the table's order)
+    for (const auto& k : ref["keys"].items())
+        if (k.get("table") == "[server]" && (k.get("key") == "listen_tls" || k.get("key") == "listen_plain" || k.get("key") == "protocols") && k["running"].is_array() && !k["running"].items().empty())
+            listed[std::string(k.get("key"))] = std::string(k["running"].items()[0].str());
+    CHECK(listed.size() == 3 && listed["listen_tls"].ends_with(":443") && listed["listen_plain"].ends_with(":80") && listed["protocols"] == "h2");
     CHECK(reference_markdown().find("| `workers` |") != std::string::npos);
     fs::remove_all(dir);
 }

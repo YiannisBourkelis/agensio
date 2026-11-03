@@ -77,7 +77,6 @@ A single-page application that routes on the client:
 ```toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/app/dist"
 try_files = ["$uri", "$uri/", "/index.html"]   # unknown paths get the shell, assets stay assets
 ```
@@ -269,7 +268,10 @@ several (`listen = ["203.0.113.5:443"]`), a loopback-only one, or another port; 
 choose a family. The kernel hands a connection to the most specific socket before a byte is read,
 so a site on `0.0.0.0:443` beside sites on the server's `[::]:443` takes every IPv4 connection of
 the port, and the others are reachable over IPv6 only: `-t`, the dry run and health warn
-(`listen_family_split` on the site that caused it, `listen_ipv6_only` on the ones it cut off). To
+(`listen_family_split` on the site that caused it, `listen_ipv6_only` on the ones it cut off). A
+site on the host's one IPv4 address apart from loopback does the same from outside, since there is
+no other address the others could answer on, and is warned about the same way (the alpha.121
+report); a loopback address, or one of several the host has, is not. To
 keep one family out of a site, use an access rule (section 19), which answers 403 on purpose. An
 address below 1024 the server does not hold cannot be added by a site's `listen` once the server
 dropped root: `site_create` and `site_update` say so and give the way (the main file and a restart,
@@ -296,7 +298,6 @@ Any `.php` file under the root runs; `index.php` or `index.html` serves director
 ```toml
 [[site]]
 server_name = ["php.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/php-site"
 app = "php"
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
@@ -307,7 +308,6 @@ What it expands to, written by hand:
 ```toml
 [[site]]
 server_name = ["php.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/php-site"
 index = ["index.php", "index.html"]
 try_files = ["$uri", "$uri/", "=404"]
@@ -332,7 +332,6 @@ and the served directory in `served_dir`:
 ```toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/app.example.com/app"   # the project directory
 served_dir = "public"
 app = "php"
@@ -361,7 +360,6 @@ resolved. A served directory that does not exist yet loads (the install brings i
 ```toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/app"
 app = "laravel"
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
@@ -372,7 +370,6 @@ Equivalent by hand:
 ```toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/app/public"
 index = ["index.php"]
 try_files = ["$uri", "$uri/", "/index.php?$query_string"]
@@ -418,7 +415,6 @@ max_body_size = "64MB"    # media uploads (a server-wide setting)
 
 [[site]]
 server_name = ["blog.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/blog"
 app = "wordpress"
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
@@ -429,7 +425,6 @@ Equivalent by hand:
 ```toml
 [[site]]
 server_name = ["blog.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/blog"
 index = ["index.php"]
 try_files = ["$uri", "$uri/", "/index.php?$query_string"]   # pretty permalinks
@@ -501,7 +496,6 @@ password and the salts in them; the exact name was 404). The presets catalogue
 ```toml
 [[site]]
 server_name = ["drupal.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/drupal"            # the composer project; its web/ is served (a tarball without web/ is served as is)
 app = "drupal"
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
@@ -643,7 +637,6 @@ lines) is.
 ```toml
 [[site]]
 server_name = ["grav.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/grav"              # the Grav directory itself (index.php, system/, user/)
 app = "grav"
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
@@ -732,7 +725,6 @@ needed; hand-written locations serve files from disk next to the proxied applica
 ```toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:80"]
 app = "proxy"
 upstream = "http://127.0.0.1:3000"        # or a list: round-robin with health marking
 proxy = { read_timeout = 120 }            # defaults for every proxied location of the site
@@ -784,7 +776,6 @@ installed; only Active Storage's image variants need it.
 ```toml
 [[site]]
 server_name = ["ag5.example.com"]
-listen = ["0.0.0.0:443"]
 tls = "auto"
 app = "rails"
 root = "/var/www/ag5.example.com/app"   # the project directory: tasks run here, nothing is served from it
@@ -873,7 +864,6 @@ created under that name, an installed one must match its own.
 ```toml
 [[site]]
 server_name = ["ag8.example.com"]
-listen = ["0.0.0.0:443"]
 tls = "auto"
 app = "wagtail"
 root = "/var/www/ag8.example.com/app"   # the project directory; only static/ and media/ below it are served
@@ -1013,7 +1003,6 @@ until the application is installed: `site-install`'s facts guess it from `packag
 ```toml
 [[site]]
 server_name = ["ag9.example.com"]
-listen = ["0.0.0.0:443"]
 tls = "auto"
 app = "node"
 root = "/var/www/ag9.example.com/app"   # the project directory: npm runs here, nothing is served from it
@@ -1103,7 +1092,6 @@ Example, Laravel with streaming responses (server-sent events) and a shorter ass
 ```toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/app"
 app = "laravel"
 php = { socket = "unix:/run/php/php8.4-fpm.sock", buffering = false, read_timeout = 300 }
@@ -1245,7 +1233,6 @@ block in a nested level does, and every type it does not list is lost).
 
 [[site]]
 server_name = ["example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
 
@@ -1590,7 +1577,6 @@ as php-fpm sees it:
 ```toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/srv/app"                       # the project on this host (bind-mounted into the container)
 app = "laravel"
 php = { socket = "127.0.0.1:9000", remote_root = "/var/www/html/public" }
@@ -1681,7 +1667,6 @@ user = "agensio"             # the account the server serves as; its group reads
 
 [[site]]
 server_name = ["shop.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/clients/web1/shop"
 user = "web1"
 group = "client1"            # optional, default: the user's primary group
@@ -1873,7 +1858,6 @@ are one line per location:
 ```toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/app/public"      # static files served here where a location says so
 tls = { cert = "...", key = "..." }
 proxy = { read_timeout = 120 }    # site-wide defaults for every proxy location below
@@ -2287,7 +2271,6 @@ troubleshooting, is [tls.md](tls.md); this section is the reference.
 ```toml
 [[site]]
 server_name = ["example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example"
 tls = { cert = "/etc/ssl/example/fullchain.pem", key = "/etc/ssl/example/privkey.pem" }
 ```
@@ -2352,12 +2335,10 @@ acme = { email = "admin@example.com" }
 
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/example/public"
 
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example/public"
 tls = "auto"
 ```
@@ -2404,7 +2385,6 @@ What happens:
 ```toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example/public"
 tls = "auto"
 hsts = "1y"
@@ -2467,7 +2447,6 @@ lists every name; `canonical` names the one the others redirect to:
 [[site]]
 server_name = ["example.com", "www.example.com"]
 canonical = "www.example.com"
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"                        # one certificate covering both names
 ```
@@ -2503,7 +2482,6 @@ provides, and its port 80, which comes with port 443, goes straight to the new h
 ```toml
 [[site]]
 server_name = ["example.net", "www.example.net"]
-listen = ["0.0.0.0:443"]
 tls = "auto"
 
 [[site.redirect]]

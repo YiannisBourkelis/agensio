@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <ostream>
 #include <optional>
@@ -434,6 +435,10 @@ struct SiteConfig {
     // reload carried over because that file was set aside (docs/design-site-operations.md 26).
     std::string source;
     bool carried = false;
+    // The file's first line carries the control plane's marker ("# agensio:managed ", sites.cpp
+    // kManagedMarker): site_update rewrites it, so a fix for the site is its command; a hand-written
+    // site's fix is its file (the alpha.121 report: the fix sent a main-file site to a sites.d file).
+    bool managed = false;
     // The digest (file_digest) of the text the site was parsed from: a carried site keeps its
     // own, so the record of the files served names the version that is served.
     std::size_t source_digest = 0;
@@ -681,6 +686,7 @@ struct Config {
     // A digest of each loaded file's text: a reload tells a file it already runs unchanged from
     // a newcomer when two of them conflict (the running one keeps its place).
     std::map<std::string, std::size_t> file_digests;
+    std::set<std::string> managed_files;  // the included files whose first line is the control plane's marker
     // At start (no running configuration): the site files the server served at its last start or
     // reload, with their digests, from the record (served_record): the ranking of conflicts uses
     // them as a reload uses the running configuration (the alpha.63 report, finding 1).
@@ -831,6 +837,16 @@ struct Ipv6Facts {
 Ipv6Facts probe_ipv6();
 void set_ipv6_facts(std::optional<Ipv6Facts> facts);
 Ipv6Facts ipv6_facts();
+// The host's IPv4 addresses apart from loopback, as the IP stack prints them, of the interfaces that
+// are up (getifaddrs; empty where it cannot be asked). For the listen notices: a site's own address
+// that is the host's one IPv4 address takes every outside IPv4 connection of its port, as 0.0.0.0
+// does (the alpha.121 report). Probed once per process; the unit tests set it.
+struct HostAddresses {
+    std::vector<std::string> ipv4;
+};
+HostAddresses probe_host_addresses();
+void set_host_addresses(std::optional<HostAddresses> addresses);
+HostAddresses host_addresses();
 // The default addresses as this host can bind them: "[::]:P" alone, "0.0.0.0:P" without IPv6, both
 // without dual-stack sockets; `note` says which, "" when nothing changed.
 std::vector<std::string> resolve_default_listen(const std::vector<std::string>& given, const Ipv6Facts& facts, std::string& note);

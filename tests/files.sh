@@ -70,6 +70,10 @@ check "approved with root's approver: written as t1 with the directory's pattern
 ctl site-file-edit a.test index.html --old '<body>hello</body>' --new '<body>hi</body>' --dry-run --yes --reason "a word" > $T/out
 check "an edit's dry run: the diff (the line gone, the one in its place), the verdict, needs_approval, no whole texts, nothing queued, nothing written" "yes 200: yes no 0 hello" \
   "$(j '"yes" if "-<body>hello</body>" in d["diff"] and "+<body>hi</body>" in d["diff"] else d') $(j 'd["site_does"][:4]') $(j '"yes" if d.get("needs_approval") else "no"') $(j '"yes" if "new_text" in d or "text" in d["current"] else "no"') $(curl -sS --unix-socket $CS http://control/v1/approvals | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["waiting"]))') $(grep -o 'hello\|hi' $A/index.html)"
+# A write of the text the file already holds changes nothing and waits for nobody (the alpha.121 report).
+ctl site-file-write a.test index.html $T/page.html --overwrite --yes --reason "same" > $T/out
+check "a write of the file's own text: unchanged, no diff, not pending, nothing queued, the file untouched" "True no change yes 0 hello" \
+  "$(j 'd["unchanged"]') $(j 'd["diff"].strip()') $(j '"yes" if not d.get("pending") and not d.get("needs_approval") else d') $(curl -sS --unix-socket $CS http://control/v1/approvals | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["waiting"]))') $(grep -o 'hello' $A/index.html)"
 # A change to the page: the history keeps the one before, root's alone; the link keeps t1's ownership.
 printf '<html><head><title>A2</title></head>\n<body>hello</body></html>\n' > $T/page2.html
 ctl site-file-write a.test index.html $T/page2.html --overwrite --yes --reason "v2" > /dev/null; approve > /dev/null

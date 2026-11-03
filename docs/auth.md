@@ -42,7 +42,6 @@ chown root:agensio /etc/agensio/staging.users && chmod 640 /etc/agensio/staging.
 ```toml
 [[site]]
 server_name = ["staging.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/staging/web"
 tls = "auto"
 
@@ -456,7 +455,6 @@ plain_http = "allow"            # health keeps auth_plain_http as a warning
 ```toml
 [[site]]
 server_name = ["grafana.example.com"]
-listen = ["0.0.0.0:443"]
 tls = "auto"
 app = "proxy"
 upstream = "http://127.0.0.1:3000"

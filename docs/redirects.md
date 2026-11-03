@@ -133,7 +133,7 @@ trusted_proxies = ["173.245.48.0/20", "103.21.244.0/22"]   # the proxy's ranges
 
 [[site]]
 server_name = ["example.com"]
-listen = ["0.0.0.0:80"]          # the proxy reaches agensio on port 80
+# no tls: the proxy in front ends TLS and reaches agensio on the server's listen_plain (port 80)
 root = "/var/www/example.com/web"
 http = "redirect"                # redirect only clients that really used plain HTTP
 ```
@@ -156,7 +156,6 @@ by name as always:
 [[site]]
 server_name = ["example2.com", "www.example2.com"]
 canonical = "example2.com"
-listen = ["0.0.0.0:443"]
 root = "/var/www/example2.com/web"
 tls = "auto"                     # its own http = "redirect" also listens on port 80
 hsts = "1y"
@@ -198,7 +197,6 @@ trusted_proxies = ["@cdn_a", "@cdn_b"]      # every proxy allowed in front of th
 
 [[site]]
 server_name = ["example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/example.com/web"
 http = "redirect"
 trusted_proxies = ["@cdn_a"]                # only CDN A speaks for this site
@@ -208,7 +206,6 @@ trusted_proxies = ["@cdn_a"]                # only CDN A speaks for this site
 # /etc/agensio/sites.d/example2.com.toml
 [[site]]
 server_name = ["example2.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/example2.com/web"
 http = "redirect"
 trusted_proxies = ["@cdn_b"]                # only CDN B
@@ -886,12 +883,10 @@ Today, as `site_create` renders a WordPress site with HTTPS, a redirect and HSTS
 ```toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
 redirect = "https"
 
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 app = "wordpress"
 user = "example"
@@ -908,7 +903,6 @@ With the new settings:
 [[site]]
 server_name = ["example.com", "www.example.com"]
 canonical = "example.com"
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 app = "wordpress"
 user = "example"
@@ -947,7 +941,6 @@ WordPress still sees `HTTPS=on` through `trusted_proxies`:
 [[site]]
 server_name = ["example.com", "www.example.com"]
 canonical = "example.com"
-listen = ["0.0.0.0:80"]
 root = "/var/www/example.com/web"
 app = "wordpress"
 user = "example"
@@ -963,7 +956,6 @@ A WordPress multisite on subdomains has a host name per site: it keeps its names
 ```toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/app.example.com"
 app = "laravel"
 user = "app"
@@ -985,7 +977,6 @@ hsts = "1y"
 [[site]]
 server_name = ["notes.example.com", "www.notes.example.com"]
 canonical = "notes.example.com"
-listen = ["0.0.0.0:443"]
 tls = "auto"
 hsts = "1y"
 app = "node"
@@ -1022,7 +1013,6 @@ the proxy.
 ```toml
 [[site]]
 server_name = ["tracker.example.com"]
-listen = ["0.0.0.0:443"]
 tls = "auto"
 hsts = "1y"
 app = "redmine"
@@ -1043,7 +1033,6 @@ upstream = "http://127.0.0.1:3001"
 [[site]]
 server_name = ["example.org", "www.example.org"]
 canonical = "example.org"
-listen = ["0.0.0.0:443"]
 tls = "auto"
 hsts = "1y"
 app = "wagtail"
@@ -1064,7 +1053,6 @@ The preset's `agensio_settings.py` already sets `SECURE_PROXY_SSL_HEADER`, `ALLO
 [[site]]
 server_name = ["example.net", "www.example.net"]
 canonical = "example.net"
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.net/public"
 app = "static"
 tls = "auto"

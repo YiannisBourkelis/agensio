@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.0-alpha.122
+
+- **A site on the host's one IPv4 address is named as cutting the others off** (the alpha.121 report,
+  problem A). With SO_REUSEPORT the kernel hands a specific socket every connection sent to it, so a
+  site with `listen = ["203.0.113.5:443"]` on a host whose only IPv4 address that is takes every
+  outside IPv4 connection of the port, as `0.0.0.0:443` does, and the sites on the server's `[::]:443`
+  answer over IPv6 only; nothing said so. `-t`, the dry run and health now warn (`listen_family_split`
+  naming the address, `listen_ipv6_only` on the sites cut off) when the address is the host's one IPv4
+  address apart from loopback (`getifaddrs`, the interfaces that are up); one of several, or a
+  loopback address, stays silent, since the other sites keep the rest.
+- **The listen findings' fix runs as written, and a hand-written site is sent to its file** (problem
+  B): the command carries `--yes --reason`, and for a site the control plane does not manage (the main
+  file's, or a hand-written file) the fix and the text say "remove the listen line of NAME in FILE and
+  reload" instead of a `site-update` that answers "not managed"; that answer now names the file the
+  site came from, not a `sites.d` path that does not exist. `SiteConfig::managed` (the marker on the
+  file's first line) is the loader's.
+- **The documentation's sites name no address** (problem C): 121 example sites in the guides, the
+  cookbook and the README carried `listen = ["0.0.0.0:443"]` or `["0.0.0.0:80"]`, which copied beside
+  sites on the server's addresses makes the split section 1c warns about; they take the server's
+  addresses now, and only the examples whose point is an address keep one. The README's first example
+  had two `example.com` sites claiming port 80 since the automatic redirect of alpha.76: one site now.
+- **`config_reference` answers the running `listen_tls`, `listen_plain` and `protocols`** (problem D):
+  the three rows had no running value, which read as "the built-in defaults" and had the agent tell
+  the operator to add keys the file already had.
+- `listen_unbound` in a `site_update` answer says "create or update the site"; a write of the text a
+  file already holds (`site_file_write`, `site_file_edit`) changes nothing, keeps nothing in the
+  history and waits for nobody's approval (`unchanged: true`, the dry run's `diff` "no change").
+
 ## 0.1.0-alpha.121 (2026-11-03)
 
 - **Fix: `listen_plain` named alone no longer opens the TLS default too.** One flag stood for both

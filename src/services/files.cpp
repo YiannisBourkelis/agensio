@@ -459,9 +459,16 @@ json::Value do_write(const Op& op, bool edit) {
     } else if (cur.exists && !op.overwrite) {
         return done(fail(abs + " exists; overwrite: true replaces it (the one there is kept in the history)"));
     }
+    const bool secret = secret_path(op.path, op.secrets);
+    if (cur.exists && cur.content_known && content == cur.content) {
+        // The file holds this text already: nothing written, nothing kept in the history, and the
+        // handler queues nothing for approval (the alpha.121 report).
+        return done(json::Value::object().set("ok", true).set("unchanged", true).set("dry_run", op.dry_run).set("as", install::executing_account()).set("path", abs)
+                        .set("bytes", static_cast<double>(content.size())).set("mode", install::mode_string(cur.st.st_mode & 07777)).set("sha256", cur.sha256)
+                        .set("secured", secret).set("current", current_json(cur)).set("note", abs + " already holds this text; nothing to change"));
+    }
     struct stat ds {};
     ::fstat(dfd, &ds);
-    const bool secret = secret_path(op.path, op.secrets);
     // An existing file keeps its mode; a new one takes the directory's pattern, its execute bits only
     // when asked. No set-uid or set-gid bit is ever made.
     unsigned mode = cur.exists ? (cur.st.st_mode & 0777) : (ds.st_mode & 0666);

@@ -28,7 +28,6 @@ error = "/var/log/agensio/error.log"
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]   # the Host names this site answers
-listen = ["0.0.0.0:80"]
 root = "/var/www/example.com/web"
 ```
 
@@ -86,10 +85,9 @@ acme = { email = "admin@example.com" }   # the CA's contact for expiry warnings;
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"                   # one certificate for every name above, obtained and renewed by agensio
-# http is left out: "redirect", so the site also listens on 0.0.0.0:80 and sends plain HTTP to HTTPS
+# http is left out: "redirect", so the site also answers on the server's listen_plain (port 80) and sends plain HTTP to HTTPS
 ```
 
 **What it does.** One block serves both schemes. On port 80 every request gets a `308` to
@@ -152,7 +150,6 @@ chown root:agensio /etc/ssl/example.com/privkey.pem && chmod 640 /etc/ssl/exampl
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = { cert = "/etc/ssl/example.com/fullchain.pem", key = "/etc/ssl/example.com/privkey.pem" }
 # port 80 beside it redirects to HTTPS (http, left out), as in the recipe above
@@ -216,7 +213,6 @@ agensio -t -c /etc/agensio/agensio.toml   # names anything on the way still clos
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = { cert = "/etc/letsencrypt/live/example.com/fullchain.pem", key = "/etc/letsencrypt/live/example.com/privkey.pem" }
 ```
@@ -225,7 +221,6 @@ tls = { cert = "/etc/letsencrypt/live/example.com/fullchain.pem", key = "/etc/le
 # /etc/agensio/sites.d/shop.example.com.toml: another site under the same wildcard
 [[site]]
 server_name = ["shop.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/shop.example.com/web"
 tls = { cert = "/etc/letsencrypt/live/example.com/fullchain.pem", key = "/etc/letsencrypt/live/example.com/privkey.pem" }
 ```
@@ -296,7 +291,6 @@ acme = { email = "admin@example.com" }
 [[site]]
 server_name = ["example.com", "www.example.com"]
 canonical = "www.example.com"          # the other names redirect here
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"                           # one certificate for both names: browsers check it before they follow a redirect
 ```
@@ -350,7 +344,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
 
@@ -386,7 +379,6 @@ status = 410                   # gone, nothing replaces it
 # /etc/agensio/sites.d/old-shop.com.toml: a domain that moved, kept for a year or more
 [[site]]
 server_name = ["old-shop.com", "www.old-shop.com"]
-listen = ["0.0.0.0:443"]
 tls = "auto"                   # its https:// links show the redirect, not a certificate error
 
 [[site.redirect]]
@@ -645,7 +637,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
 hsts = "1y"                    # Strict-Transport-Security: max-age=31536000 on every HTTPS answer of the site
@@ -729,7 +720,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 app = "wordpress"
 php = { socket = "unix:/run/php/php-fpm.sock" }
@@ -737,14 +727,12 @@ tls = "auto"
 
 [[site]]
 server_name = ["docs.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/docs.example.com/web"
 app = "static"
 tls = "auto"
 
 [[site]]
 server_name = ["legacy.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/legacy.example.com/web"
 app = "static"
 response_headers_baseline = false                       # the baseline off for this site
@@ -800,7 +788,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 app = "php"
 php = { socket = "unix:/run/php/php-fpm.sock" }
@@ -884,7 +871,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 app = "php"
 php = { socket = "unix:/run/php/php-fpm.sock" }
@@ -951,7 +937,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/app.example.com.toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/app.example.com/dist"
 tls = "auto"
 try_files = ["$uri", "$uri/", "/index.html"]   # a file, a directory's index, else the shell
@@ -1005,7 +990,6 @@ level = "warn"
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
 access_log = "/var/log/agensio/sites/example.com/access.log"   # the port-80 redirects in the same file
@@ -1063,7 +1047,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/blog.example.com.toml
 [[site]]
 server_name = ["blog.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/blog.example.com/web"
 app = "wordpress"
 user = "blog"
@@ -1131,7 +1114,6 @@ precompressed = true           # the default; false stops the lookup on every si
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
 ```
@@ -1177,7 +1159,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
 
@@ -1232,7 +1213,6 @@ database of a tutorial), or a file the application needs where it is but nobody 
 # /etc/agensio/sites.d/data.example.com.toml
 [[site]]
 server_name = ["data.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/data.example.com/web"
 app = "static"
 public_archives = ["/downloads/world-cities.sql.gz", "/datasets/"]   # published on purpose

@@ -37,7 +37,6 @@ trash_keep = 30                          # days a site deleted with its files ca
 # /etc/agensio/sites.d/default.toml
 [[site]]
 server_name = ["*"]                      # every name no other site lists, and the bare IP address
-listen = ["0.0.0.0:80"]
 root = "/var/www/html"
 ```
 
@@ -98,7 +97,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/shop.example.com.toml
 [[site]]
 server_name = ["shop.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/shop.example.com/web"
 app = "wordpress"
 user = "acme"                                                 # PHP runs as acme, in a pool agensio generates
@@ -111,7 +109,6 @@ tls = "auto"
 # /etc/agensio/sites.d/blog.example.com.toml
 [[site]]
 server_name = ["blog.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/blog.example.com/web"
 app = "wordpress"
 user = "acme"                                                 # the same customer, the same pool
@@ -124,7 +121,6 @@ tls = "auto"
 # /etc/agensio/sites.d/bakery.example.com.toml
 [[site]]
 server_name = ["bakery.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/bakery.example.com/web"
 app = "php"
 user = "bakery"                                               # another customer: its own pool, socket and state
@@ -238,7 +234,6 @@ admins = "agensio-admin"
 
 [[site]]
 server_name = ["shop.example.com", "www.shop.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/shop.example.com/web"
 app = "wordpress"
 user = "shop"
@@ -629,7 +624,6 @@ host_protection = "external"            # the panel runs the firewall and fail2b
 # /etc/agensio/sites.d/example.com.toml: written by the panel
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]                           # port 80 beside it redirects to HTTPS (http, left out)
 root = "/var/www/example.com/web"                  # the panel's web/
 user = "web35"                                     # the panel's account for this site
 group = "client8"                                  # the customer's group: it reads the site's log

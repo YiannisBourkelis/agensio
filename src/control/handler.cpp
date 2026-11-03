@@ -1814,7 +1814,7 @@ bool ControlHandler::site_update(Stream& s, std::string_view name, const json::V
     const auto file = existing ? control::site_file(cfg, existing->server_names.front()) : held;
     if (!control::read_managed(file, spec)) {
         reply(s, 409, json::Value::object().set("error", "this site is not managed by agensio ctl (hand-written or edited)")
-                          .set("file", file.string())
+                          .set("file", existing ? existing->source : file.string())  // the file it came from (the main file's site: that file; alpha.121 report)
                           .set("hint", "edit the file by hand and reload; a site the tools manage takes root's extra locations in " +
                                            std::string(kRootAdditionsSuffix) + " beside its file instead (site_show: root_additions), so it stays managed"));
         return false;
@@ -2340,19 +2340,10 @@ void ControlHandler::site_files(Stream& s, std::string_view name, const json::Va
     backend_->install_async(req, [this, &s, what = std::string(what), op, change, dry_run, before, rel = parsed.path, to = parsed.to, site_root,
                                   domain = site->server_names.front(), done, new_content, new_is_text](json::Value r) {
         const bool ok = r["ok"].boolean();
-        // A dry run of a write or an edit answers the change as the person will see it, the diff against
-        // the file there (the approval's preview is made from it), never the texts whole: a one-word
-        // edit's answer carried the file twice (the alpha.120 report, problem D).
-        if (ok && dry_run && (op == "write" || op == "edit")) {
-            const json::Value& cur = r["current"];
-            const std::string after = op == "edit" ? std::string(r.get("new_text")) : new_content;
-            std::string diff;
-            if (!new_is_text) diff = "binary content: " + std::to_string(after.size()) + " bytes\n";
-            else if (cur["exists"].boolean() && cur["text"].is_string()) diff = control::unified_diff(cur["text"].str(), after, 0);
-            else if (cur["exists"].boolean()) diff = "the file there is not shown (binary, or larger than " + std::to_string(files::kContentMax / 1024) + " KB); its new text:\n" + control::unified_diff("", after, 0);
-            else diff = control::unified_diff("", after, 0);
+        // The answer without the texts whole: current keeps exists, bytes, sha256 and mode.
+        auto without_texts = [](const json::Value& in) {
             json::Value slim = json::Value::object();
-            for (const auto& [k, v] : r.members()) {
+            for (const auto& [k, v] : in.members()) {
                 if (k == "new_text") continue;
                 if (k != "current") {
                     slim.set(k, v);
@@ -2363,7 +2354,25 @@ void ControlHandler::site_files(Stream& s, std::string_view name, const json::Va
                     if (ck != "text") c.set(ck, cv);
                 slim.set(k, std::move(c));
             }
-            r = std::move(slim.set("diff", std::move(diff)));
+            return slim;
+        };
+        if (ok && r["unchanged"].boolean()) {
+            // The file holds this text already (the helper wrote nothing): nothing to approve either
+            // (the alpha.121 report: a write of the file's own text waited for a person's code).
+            notes_.erase(&s);
+            r = std::move(without_texts(r).set("diff", "no change\n"));
+        } else if (ok && dry_run && (op == "write" || op == "edit")) {
+            // A dry run of a write or an edit answers the change as the person will see it, the diff
+            // against the file there (the approval's preview is made from it), never the texts whole: a
+            // one-word edit's answer carried the file twice (the alpha.120 report, problem D).
+            const json::Value& cur = r["current"];
+            const std::string after = op == "edit" ? std::string(r.get("new_text")) : new_content;
+            std::string diff;
+            if (!new_is_text) diff = "binary content: " + std::to_string(after.size()) + " bytes\n";
+            else if (cur["exists"].boolean() && cur["text"].is_string()) diff = control::unified_diff(cur["text"].str(), after, 0);
+            else if (cur["exists"].boolean()) diff = "the file there is not shown (binary, or larger than " + std::to_string(files::kContentMax / 1024) + " KB); its new text:\n" + control::unified_diff("", after, 0);
+            else diff = control::unified_diff("", after, 0);
+            r = std::move(without_texts(r).set("diff", std::move(diff)));
         }
         const SiteConfig* now_site = control::find_site(backend_->running(), domain);
         if (ok && now_site && (op == "write" || op == "edit" || op == "restore")) r.set("site_does", path_verdict(backend_->running(), *now_site, site_root, rel));
@@ -3169,6 +3178,7 @@ bool ControlHandler::queue_for_approval(Stream& s, WorkerState& ws, std::string_
         // site's prerequisites missing, with root's commands to run first).
         if (rs->response.status != 200) reply(s, rs->response.status, v);
         else if (v.is_object() && v["ok"].type() == json::Value::Type::boolean && !v["ok"].boolean()) reply(s, 409, v);
+        else if (v.is_object() && v["unchanged"].boolean()) reply(s, 200, v);  // the file holds that text already: nothing to do, nothing to approve
         else store(v);
         finish();
     };

@@ -40,7 +40,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
 ```

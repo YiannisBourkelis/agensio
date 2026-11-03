@@ -69,16 +69,10 @@ error = "stderr"
 
 include = ["sites.d/*.toml"]
 
-[[site]]
+[[site]]                     # on the server's addresses: [::]:443, and [::]:80 redirecting to it
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/example"
 index = ["index.html"]
-
-[[site]]
-server_name = ["example.com"]
-listen = ["0.0.0.0:443"]
-root = "/var/www/example"
 tls = { cert = "/etc/ssl/example/fullchain.pem", key = "/etc/ssl/example/privkey.pem" }
 try_files = ["$uri", "$uri/", "/index.html"]   # single-page app: unknown paths get the app shell
 
@@ -89,7 +83,6 @@ try_files = ["$uri", "=404"]
 
 [[site]]                     # a Laravel project: the preset is the whole configuration
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:80"]
 root = "/var/www/app"      # the project; the preset serves its public/
 app = "laravel"
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
@@ -138,7 +131,6 @@ HTTP with a redirect to HTTPS by itself):
 ```toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
 ```

@@ -288,6 +288,9 @@ json::Value running_value(const Config& c, const std::string& table, const std::
         if (key == "sendfile") return V(c.sendfile);
         if (key == "sendfile_max_chunk") return V(size_words(c.sendfile_max_chunk));
         if (key == "server_header") return V(c.server_header);
+        if (key == "listen_tls") return strings(c.listen_tls);      // the values in force (a reload keeps them; the file's wait for a restart)
+        if (key == "listen_plain") return strings(c.listen_plain);  // the alpha.121 report: null here read as "the built-in defaults"
+        if (key == "protocols") return strings(c.protocols);
         if (key == "trusted_proxies") {  // the ranges themselves: an access rule that allows one of them passes what the proxy sends without X-Forwarded-For
             std::vector<std::string> ranges;
             for (const auto& t : c.trusted_proxies) ranges.push_back(t.text());

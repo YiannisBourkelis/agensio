@@ -1768,7 +1768,7 @@ std::vector<Problem> preflight(const SiteSpec& spec, const Config& cfg, bool pri
                 out.push_back({"listen_unbound",
                                "the server's address " + address + " is not open yet (no site uses it and the main file does not name it), and a reload "
                                    "cannot bind a port below 1024 once the server dropped root: name the server's addresses in the main file and restart, "
-                                   "then create the site",
+                                   "then create or update the site",
                                "# in /etc/agensio/agensio.toml under [server]: listen_tls = [\"" + join_list(cfg.listen_tls) + "\"] and listen_plain = [\"" +
                                    join_list(cfg.listen_plain) + "\"], then: systemctl restart agensio",
                                true, json::Value()});
@@ -1776,7 +1776,7 @@ std::vector<Problem> preflight(const SiteSpec& spec, const Config& cfg, bool pri
                 out.push_back({"listen_unbound",
                                "the site's own address " + address + " is a port below 1024 the server does not hold, and a reload cannot bind one "
                                    "once the server dropped root: put the address in the main file's [server] listen_tls or listen_plain and restart, then "
-                                   "create the site on the server's addresses (omit listen_tls and listen_plain), or use a port above 1023",
+                                   "create or update the site on the server's addresses (listen_tls and listen_plain left out, or sent as \"\"), or use a port above 1023",
                                "# in /etc/agensio/agensio.toml under [server]: add " + address + " to listen_tls or listen_plain, then: systemctl restart agensio", true,
                                json::Value()});
         }

@@ -26,7 +26,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/blog.example.com.toml
 [[site]]
 server_name = ["blog.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/blog.example.com/web"
 app = "wordpress"
 user = "blog"                    # PHP runs as blog, in a php-fpm pool agensio writes
@@ -104,7 +103,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/crm.example.com.toml
 [[site]]
 server_name = ["crm.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/crm.example.com/project"   # the project, not its public/: the preset serves public/
 app = "laravel"
 user = "crm"
@@ -169,7 +167,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/magazine.example.com.toml
 [[site]]
 server_name = ["magazine.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/magazine.example.com/project"   # a composer project's web/ is served when it holds index.php; a release archive as it is
 app = "drupal"
 user = "magazine"
@@ -236,7 +233,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/magazine.example.com.toml
 [[site]]
 server_name = ["magazine.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/magazine.example.com/project"
 app = "drupal"
 user = "magazine"
@@ -291,7 +287,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/docs.example.com.toml
 [[site]]
 server_name = ["docs.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/docs.example.com/web"   # the Grav directory itself: index.php, system/, user/
 app = "grav"
 user = "docs"
@@ -353,7 +348,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/tasks.example.com.toml
 [[site]]
 server_name = ["tasks.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/tasks.example.com/web"
 app = "php"
 user = "tasks"
@@ -452,7 +446,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/app.example.com.toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/app.example.com/app"   # the project directory
 served_dir = "public"                   # the directory of it that is served
 app = "php"
@@ -523,7 +516,6 @@ pool, a pool you tuned), or a site moved from nginx with its pool.
 # /etc/agensio/sites.d/www.example.com.toml
 [[site]]
 server_name = ["www.example.com", "example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/www.example.com/web"
 app = "wordpress"
 tls = { cert = "/etc/ssl/www.example.com/fullchain.pem", key = "/etc/ssl/www.example.com/privkey.pem" }
@@ -582,7 +574,6 @@ and agensio on the host serves the site.
 # /etc/agensio/sites.d/wp.example.com.toml
 [[site]]
 server_name = ["wp.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/wp.example.com/web"            # the files on this host, bind-mounted into the container
 app = "wordpress"
 tls = { cert = "/etc/ssl/wp.example.com/fullchain.pem", key = "/etc/ssl/wp.example.com/privkey.pem" }
@@ -627,7 +618,6 @@ minutes.
 # /etc/agensio/sites.d/shop.example.com.toml
 [[site]]
 server_name = ["shop.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/shop.example.com/web"
 app = "wordpress"
 user = "shop"
@@ -692,7 +682,6 @@ php_version = "8.4"              # every site that names no version; pinned, so 
 # /etc/agensio/sites.d/grav.example.com.toml
 [[site]]
 server_name = ["grav.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/grav.example.com/web"
 app = "grav"
 user = "grav"
@@ -762,7 +751,6 @@ progress page, a large export that should start downloading at once.
 # /etc/agensio/sites.d/reports.example.com.toml
 [[site]]
 server_name = ["reports.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/reports.example.com/web"
 app = "php"
 user = "reports"
@@ -800,7 +788,6 @@ run there and nowhere else, and no `.php` elsewhere may be sent as text.
 # /etc/agensio/sites.d/info.example.com.toml
 [[site]]
 server_name = ["info.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/info.example.com/web"
 user = "info"                    # a fastcgi location without a socket of its own: agensio generates the pool
 tls = { cert = "/etc/ssl/info.example.com/fullchain.pem", key = "/etc/ssl/info.example.com/privkey.pem" }
@@ -857,7 +844,6 @@ your domain.
 # /etc/agensio/sites.d/blog.example.com.toml
 [[site]]
 server_name = ["blog.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/blog.example.com/web"
 app = "wordpress"
 user = "blog"

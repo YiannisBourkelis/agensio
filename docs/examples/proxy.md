@@ -25,7 +25,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/notes.example.com.toml
 [[site]]
 server_name = ["notes.example.com"]
-listen = ["0.0.0.0:443"]
 tls = "auto"
 app = "node"
 root = "/var/www/notes.example.com/app"   # the project directory, where package.json is; nothing is served from it
@@ -100,7 +99,6 @@ on a loopback port, and its precompiled assets should come from disk.
 # /etc/agensio/sites.d/projects.example.com.toml
 [[site]]
 server_name = ["projects.example.com"]
-listen = ["0.0.0.0:443"]
 tls = { cert = "/etc/ssl/projects.example.com/fullchain.pem", key = "/etc/ssl/projects.example.com/privkey.pem" }
 app = "rails"
 root = "/var/www/projects.example.com/app"   # the project directory: site tasks run here
@@ -169,7 +167,6 @@ line for root.
 # /etc/agensio/sites.d/cms.example.com.toml
 [[site]]
 server_name = ["cms.example.com"]
-listen = ["0.0.0.0:443"]
 tls = { cert = "/etc/ssl/cms.example.com/fullchain.pem", key = "/etc/ssl/cms.example.com/privkey.pem" }
 app = "wagtail"                         # or "django": the same, without Wagtail's documents rule
 root = "/var/www/cms.example.com/app"   # where manage.py is; only static/ and media/ below it are served
@@ -233,7 +230,6 @@ loopback port, and its users upload files.
 # /etc/agensio/sites.d/chat.example.com.toml
 [[site]]
 server_name = ["chat.example.com"]
-listen = ["0.0.0.0:443"]
 tls = { cert = "/etc/ssl/chat.example.com/fullchain.pem", key = "/etc/ssl/chat.example.com/privkey.pem" }
 app = "proxy"
 upstream = "http://127.0.0.1:3000"
@@ -292,7 +288,6 @@ and devices post telemetry over HTTP at a high rate.
 # /etc/agensio/sites.d/iot.example.com.toml
 [[site]]
 server_name = ["iot.example.com"]
-listen = ["0.0.0.0:443"]
 tls = { cert = "/etc/ssl/iot.example.com/fullchain.pem", key = "/etc/ssl/iot.example.com/privkey.pem" }
 app = "proxy"
 upstream = "http://127.0.0.1:8080"
@@ -331,7 +326,6 @@ service: a booking API in Node or Go, a search engine, an older application.
 # /etc/agensio/sites.d/shop.example.com.toml
 [[site]]
 server_name = ["shop.example.com"]
-listen = ["0.0.0.0:443"]
 tls = { cert = "/etc/ssl/shop.example.com/fullchain.pem", key = "/etc/ssl/shop.example.com/privkey.pem" }
 root = "/var/www/shop.example.com/web"
 app = "wordpress"
@@ -402,7 +396,6 @@ and a process that is down should be skipped.
 # /etc/agensio/sites.d/app.example.com.toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:443"]
 tls = { cert = "/etc/ssl/app.example.com/fullchain.pem", key = "/etc/ssl/app.example.com/privkey.pem" }
 app = "proxy"
 upstream = ["http://127.0.0.1:3000", "http://127.0.0.1:3001"]   # round-robin
@@ -452,7 +445,6 @@ or it runs on another host and the traffic between crosses a network you do not 
 # /etc/agensio/sites.d/reports.example.com.toml
 [[site]]
 server_name = ["reports.example.com"]
-listen = ["0.0.0.0:443"]
 tls = { cert = "/etc/ssl/reports.example.com/fullchain.pem", key = "/etc/ssl/reports.example.com/privkey.pem" }
 app = "proxy"
 upstream = "https://127.0.0.1:8443"   # another host is written the same way, by address
@@ -497,7 +489,6 @@ agensio ctl logs --level error --since 1h | grep tls_error
 # /etc/agensio/sites.d/portal.example.com.toml
 [[site]]
 server_name = ["portal.example.com"]
-listen = ["0.0.0.0:443"]
 tls = { cert = "/etc/ssl/portal.example.com/fullchain.pem", key = "/etc/ssl/portal.example.com/privkey.pem" }
 app = "proxy"
 upstream = "http://127.0.0.1:8080"
@@ -555,7 +546,6 @@ a while, or reads uploads as they arrive.
 # /etc/agensio/sites.d/dashboard.example.com.toml
 [[site]]
 server_name = ["dashboard.example.com"]
-listen = ["0.0.0.0:443"]
 tls = { cert = "/etc/ssl/dashboard.example.com/fullchain.pem", key = "/etc/ssl/dashboard.example.com/privkey.pem" }
 app = "proxy"
 upstream = "http://127.0.0.1:3000"
@@ -614,7 +604,6 @@ running next to the site.
 # /etc/agensio/sites.d/tools.example.com.toml
 [[site]]
 server_name = ["tools.example.com"]
-listen = ["0.0.0.0:443"]
 tls = { cert = "/etc/ssl/tools.example.com/fullchain.pem", key = "/etc/ssl/tools.example.com/privkey.pem" }
 root = "/var/www/tools.example.com/web"
 

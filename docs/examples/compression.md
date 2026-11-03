@@ -21,7 +21,6 @@ CSS and JavaScript go out at full size.
 # /etc/agensio/sites.d/shop.example.com.toml
 [[site]]
 server_name = ["shop.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/shop.example.com/web"
 app = "wordpress"
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
@@ -80,7 +79,6 @@ enabled = true          # every site that does not say otherwise
 # /etc/agensio/sites.d/blog.example.com.toml: says nothing, so it is compressed
 [[site]]
 server_name = ["blog.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/blog.example.com/web"
 app = "wordpress"
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
@@ -91,7 +89,6 @@ tls = { cert = "/etc/letsencrypt/live/blog.example.com/fullchain.pem", key = "/e
 # /etc/agensio/sites.d/help.example.com.toml: kept off
 [[site]]
 server_name = ["help.example.com"]
-listen = ["0.0.0.0:443"]
 app = "proxy"
 upstream = "http://127.0.0.1:8200"
 tls = { cert = "/etc/letsencrypt/live/help.example.com/fullchain.pem", key = "/etc/letsencrypt/live/help.example.com/privkey.pem" }
@@ -124,7 +121,6 @@ hold a form token beside what the visitor typed: the shape BREACH needs.
 # /etc/agensio/sites.d/store.example.com.toml
 [[site]]
 server_name = ["store.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/store.example.com/web"
 app = "wordpress"
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
@@ -168,7 +164,6 @@ enabled = true          # zstd, brotli, gzip: zstd first for browsers that come 
 # /etc/agensio/sites.d/www.example.org.toml: behind the CDN
 [[site]]
 server_name = ["www.example.org"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/www.example.org/web"
 app = "static"
 tls = { cert = "/etc/letsencrypt/live/www.example.org/fullchain.pem", key = "/etc/letsencrypt/live/www.example.org/privkey.pem" }
@@ -201,7 +196,6 @@ they compress with gzip themselves.
 # /etc/agensio/sites.d/app.example.com.toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:443"]
 app = "proxy"
 upstream = "http://127.0.0.1:3000"
 tls = { cert = "/etc/letsencrypt/live/app.example.com/fullchain.pem", key = "/etc/letsencrypt/live/app.example.com/privkey.pem" }
@@ -241,7 +235,6 @@ chmod 640 /etc/agensio/auth/review.example.com.users
 # /etc/agensio/sites.d/review.example.com.toml
 [[site]]
 server_name = ["review.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/review.example.com/web"
 app = "wordpress"
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
@@ -282,7 +275,6 @@ go out at full size. The built-in list already has every `+json` and `+xml` type
 # /etc/agensio/sites.d/api.example.com.toml
 [[site]]
 server_name = ["api.example.com"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/api.example.com/web"
 tls = { cert = "/etc/letsencrypt/live/api.example.com/fullchain.pem", key = "/etc/letsencrypt/live/api.example.com/privkey.pem" }
 mime_types = { "yaml" = "application/yaml", "ndjson" = "application/x-ndjson" }
@@ -320,7 +312,6 @@ levels = { gzip = 1 }            # the few clients that take gzip alone: half of
 # /etc/agensio/sites.d/media.example.net.toml: paid by the byte
 [[site]]
 server_name = ["media.example.net"]
-listen = ["0.0.0.0:443"]
 root = "/var/www/media.example.net/web"
 app = "static"
 tls = { cert = "/etc/letsencrypt/live/media.example.net/fullchain.pem", key = "/etc/letsencrypt/live/media.example.net/privkey.pem" }
