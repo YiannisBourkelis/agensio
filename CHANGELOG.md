@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.124 (unreleased)
+## 0.1.0-alpha.124 (2026-11-04)
 
 - **Fix: no value of a credential file leaves the server through a preview, a dry run or a result**
   (the grabloop.app report). An edit of `shared/.env` answered a diff whose three context lines
