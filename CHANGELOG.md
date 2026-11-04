@@ -20,6 +20,11 @@
 - An address split's text, with other sites on that address, says to give every one of them the
   server's addresses in one go: handed back alone, the site answers over the other family only while
   the others keep the socket. The fix already said so.
+- A skipped scheduled run (a task runs on the site, or the last minute's run still does) exits 0, its
+  record still printed: exit 1 had systemd record the scheduler's unit as failed for each minute a
+  deploy's task ran, though agensio counts it as skipped (the report's small item, the owner's decision).
+- `[control] task_network`'s description names the seven tasks it refuses, the Python and Node ones
+  among them, and says it keeps no task off the network.
 
 ## 0.1.0-alpha.126 (2026-11-04)
 

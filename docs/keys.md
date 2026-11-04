@@ -158,7 +158,7 @@ section of `docs/configuration.md` that explains the key.
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
 | `host_protection` | enum: check \| external \| off | check | Whether health looks for the host's protection when a listener is public: per-address limits on the web ports in the kernel's firewall and a fail2ban jail over the access logs (agensio ctl protection and the MCP tool protection_show render both for this host and say what is in place). check warns when either is missing; external says a panel or the administrator manages them, so the findings are informational; off skips the probe. | reload | file | 18 |
-| `task_network` | bool | true | Site tasks that download (gem_install_rails, rails_new, bundle_install) may run; false refuses them, for a host that installs archives carrying vendor/bundle instead. | reload | file | 15 |
+| `task_network` | bool | true | Site tasks that download packages (gem_install_rails, rails_new, bundle_install, pip_install, pip_install_requirements, npm_ci, npm_run) may run; false refuses them, for a host that installs archives carrying their dependencies (vendor/bundle, node_modules) instead. Other tasks are not limited: what they run may use the network. | reload | file | 15 |
 ## `task_limits = {}`
 
 | key | type | default | meaning | applies | via | doc |

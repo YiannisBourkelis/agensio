@@ -470,7 +470,8 @@ run holds no task slot (a deploy's `migrate_force` is never refused for it), is 
 runs on the site or the previous minute's still runs, keeps its record apart from the deploy's output,
 and is named in the audit log only when its outcome changes; `ctl --scheduled` prints the run's record,
 which systemd keeps in the journal, only for a run that failed, was skipped or changed the outcome, so a
-quiet minute leaves systemd's own lines alone. `site-service NAME` says whether a
+quiet minute leaves systemd's own lines alone; a skipped run exits 0, so systemd does not record the
+unit as failed for each minute a deploy's task runs (until 0.1.0-alpha.127 it exited 1). `site-service NAME` says whether a
 scheduler exists before anyone makes another: agensio's timer as installed, any cron line that runs
 `schedule:run` for the site (the account's crontab, `/etc/crontab`, `/etc/cron.d`, named by file and
 line, never by text), and the runs agensio recorded; health warns `site_schedule_duplicate` when two
@@ -2934,7 +2935,7 @@ site_limits = { max_body_size = "512MB", memory_limit = "512M", max_execution_ti
                                        # the ceilings site-create / site-update may raise a site's limits to (these are the defaults)
 runtimes = { ruby = "/usr/bin" }       # where site tasks find ruby, gem and bundle (also node, php, python3); root's files only; reload applies it
 task_limits = { timeout = 1200, processes = 512 }   # a task's wall-clock seconds and the processes its account may have
-task_network = true                    # tasks that download (gem install, rails new, bundle install) may run
+task_network = true                    # tasks that download packages (gem, bundle, pip, npm) may run; no other limit on the network
 trash_keep = 60                        # days a site deleted with its files stays in <sites_root>/.trash; 0 keeps entries until trash-delete
 file_history = { versions = 5, days = 30 }   # what the file tools replace or remove, kept in <sites_root>/.history for an undo
 ```
@@ -3240,7 +3241,7 @@ task's process group gets SIGTERM and ten seconds later SIGKILL; `processes`, 51
 `RLIMIT_NPROC` of the account while the task runs, threads included), 4096 open files,
 no core files. When the program exits, whatever it left running in its process group is
 killed. One task per site at a time. `[control] task_network = false` refuses the tasks
-that download. The three keys apply on reload: the helper reads them from root's file for
+that download packages (each listed with `network: true`); it keeps no task off the network. The three keys apply on reload: the helper reads them from root's file for
 every task (only the main file can hold `[control]`; included files carry sites alone).
 
 After every run the credential sweep makes the preset's credential files the site's

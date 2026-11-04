@@ -1605,11 +1605,19 @@ int main(int argc, char** argv) {
             // The scheduler's run every minute (the alpha.125 report: each one's whole record went to the
             // journal, 5,760 lines a day for one site): a success like the run before prints nothing; a
             // failure, a skip and a changed outcome print the record, as the audit log names only those.
-            if (command == "site-task" && body["scheduled"].boolean() && reply.status == 200) {
+            if (command == "site-task" && body["scheduled"].boolean()) {
                 agensio::json::Value u;
                 std::string perr;
-                if (agensio::json::parse(reply.body, u, perr) && u["outcome_changed"].type() == agensio::json::Value::Type::boolean && !u["outcome_changed"].boolean())
+                const bool parsed = agensio::json::parse(reply.body, u, perr);
+                if (reply.status == 200 && parsed && u["outcome_changed"].type() == agensio::json::Value::Type::boolean && !u["outcome_changed"].boolean())
                     return 0;
+                // A skip (a task runs on the site, or the last minute's run still does) is no failure: its
+                // record printed, exit 0, so systemd does not mark the unit failed for each minute of a
+                // deploy (the alpha.126 report, the owner's decision); agensio counts it as skipped.
+                if (reply.status == 409 && parsed && u["skipped"].boolean()) {
+                    std::cout << reply.body;
+                    return 0;
+                }
             }
             if ((command == "access-check" || command == "path-check") && reply.status == 200) {  // the verdict first, the details after
                 agensio::json::Value u;

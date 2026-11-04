@@ -538,10 +538,12 @@ check "the first scheduled run prints its record (outcome_changed), the second, 
 check "--scheduled is for schedule_run alone" "400" "$(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS -X POST -H 'Content-Type: application/json' -d '{"task":"optimize","scheduled":true,"confirm":true}' http://control/v1/sites/lv.test/task)"
 touch $LV/releases/r2/slow; chown r9:r9 $LV/releases/r2/slow
 ctl site-task lv.test optimize --yes --reason deploy > $T/out.bg & BG=$!; sleep 1
-ctl site-task lv.test schedule_run --scheduled --yes --reason scheduler > $T/out
+ctl site-task lv.test schedule_run --scheduled --yes --reason scheduler > $T/out; RC=$?
 wait $BG
-check "while a deploy task runs, the minute's scheduled run is skipped, and the deploy task is not refused for it" "True yes True" \
-  "$(j 'd["skipped"]') $(grep -q 'a task runs on the site' $T/out && echo yes) $(python3 -c "import json; print(json.load(open('$T/out.bg'))['ok'])")"
+# A skip exits 0, its record printed (the alpha.126 report: exit 1 had systemd mark the unit failed for
+# each minute a deploy's task ran).
+check "while a deploy task runs, the minute's scheduled run is skipped (printed, exit 0), and the deploy task is not refused for it" "True yes 0 True" \
+  "$(j 'd["skipped"]') $(grep -q 'a task runs on the site' $T/out && echo yes) $RC $(python3 -c "import json; print(json.load(open('$T/out.bg'))['ok'])")"
 rm -f $LV/releases/r2/slow
 ctl site-unit lv.test > $T/out
 check "site-unit renders the scheduler: two units, the service asking agensio as the server's account, nothing naming a release; --out writes the one it names" "scheduler 2 yes yes 0 2" \
