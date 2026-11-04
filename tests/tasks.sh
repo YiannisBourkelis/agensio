@@ -69,6 +69,8 @@ cat > $RT/php9.9 <<'SH'
 #!/bin/sh
 echo "prog=php9.9 args=$*"; echo "uid=$(id -un) cwd=$(pwd)"
 if [ -e slow ]; then sleep 3; fi
+# Laravel's line for a scheduled command with runInBackground() (ScheduleRunCommand::runEvent).
+if [ -e bg ]; then echo "  2026-11-04 10:00:00 Running ['artisan' report:send] in background .... 1ms DONE"; fi
 SH
 printf '#!/bin/sh\necho "PHP 9.9.0 (fpm-fcgi)"\n' > $RT/php-fpm9.9; : > $RT/php-fpm9.9.conf; mkdir -p $RT/pool.d
 chmod 755 $RT/php9.9 $RT/php-fpm9.9
@@ -439,8 +441,11 @@ out=$(ctl site-create --domain lv.test --app php --root $LV --served-dir release
 # A php root runs files, so its creation waits for a person's approval (docs/approvals.md).
 echo "$out" | grep -q '"pending":true' && out=$(approve)
 mkdir -p $LV/releases/r1/public $LV/releases/r2/public $LV/shared; echo '<?php' > $LV/releases/r1/artisan; chown -R r9:r9 $LV/releases $LV/shared
-check "a php site with served_dir on a release lists Laravel's seven tasks, in the release that holds artisan, with the site's PHP binary" "yes 7 $LV/releases/r1 $RT/php9.9 True" \
+check "a php site with served_dir on a release lists Laravel's eight tasks, in the release that holds artisan, with the site's PHP binary" "yes 8 $LV/releases/r1 $RT/php9.9 True" \
   "$(echo "$out" | grep -q '"ok":true' && echo yes) $(ctl site-tasks lv.test > $T/out; j 'len(d["tasks"]), d["directory"], [t for t in d["tasks"] if t["task"] == "optimize"][0]["interpreter"]["program"], all(t["interpreter"]["ok"] for t in d["tasks"])' | tr -d '(),' | tr -d "'")"
+ctl site-task lv.test schedule_clear_cache --yes --reason locks > $T/out
+check "schedule_clear_cache runs php9.9 artisan schedule:clear-cache (the locks of withoutOverlapping() commands)" "True yes" \
+  "$(j 'd["ok"]') $(grep -q 'prog=php9.9 args=artisan schedule:clear-cache --no-interaction' $T/out && echo yes)"
 ctl site-task lv.test migrate_force --yes --reason deploy > $T/out
 check "migrate_force runs php9.9 artisan migrate --force as r9 in the release" "True yes yes" \
   "$(j 'd["ok"]') $(grep -q 'prog=php9.9 args=artisan migrate --force --no-interaction' $T/out && echo yes) $(grep -q "uid=r9 cwd=$LV/releases/r1" $T/out && echo yes)"
@@ -570,6 +575,16 @@ SH
   echo installed > $T/sched-state
   check "agensio's timer installed beside the cron line: site-service says duplicate, health warns site_schedule_duplicate" "True warn" \
     "$(ctl site-service lv.test > $T/out; j 'd["duplicate"]') $(ctl health > $T/out; j '[f["severity"] for f in d["findings"] if f["code"] == "site_schedule_duplicate" and f.get("site") == "lv.test"][0]')"
+  # A command started with runInBackground() is ended when schedule:run exits (the alpha.126 report,
+  # problem 4): site-service names it from the run's output, with what the application changes.
+  ctl site-service lv.test > $T/out
+  check "before a run starts a command in background, site-service names none" "None" "$(j 'd["runs"].get("background")')"
+  for r in r1 r2; do touch $LV/releases/$r/bg; done
+  ctl site-task lv.test schedule_run --scheduled --yes --reason scheduler > /dev/null
+  rm -f $LV/releases/r1/bg $LV/releases/r2/bg
+  ctl site-service lv.test > $T/out
+  check "a scheduled run that started a command in background: site-service names it, the summary says agensio ends it, a step says what to change and schedule_clear_cache" "yes 1 yes yes" \
+    "$(j '"yes" if d["runs"]["background"]["command"] == "\x27artisan\x27 report:send" else d["runs"]') $(j 'int(d["runs"]["background"]["runs"])') $(j '"yes" if "agensio ends it when schedule:run exits" in d["summary"] else d["summary"]') $(j '"yes" if any("runInBackground()" in s and "schedule_clear_cache" in s and "queue" in s for s in d["next_steps"]) else d["next_steps"]')"
   rm -f /var/spool/cron/crontabs/r9 /usr/bin/systemctl
   [ -e /usr/bin/systemctl.agensio-orig ] && mv /usr/bin/systemctl.agensio-orig /usr/bin/systemctl
 fi

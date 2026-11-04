@@ -276,6 +276,10 @@ public:
         std::string last_at, last_skipped_at, last_error, last_output;  // the last run's end of output, 2 KB at most
         bool last_ok = false;
         double last_exit = -1, last_duration_ms = 0;
+        // Runs whose output says a command started in background (runInBackground()), which the task
+        // runner ends when schedule:run exits (the alpha.126 report, problem 4): the last such command.
+        std::size_t background = 0;
+        std::string background_at, background_command;
     };
     // Health's view (site_schedule_failing) and site_service_status's.
     const std::map<std::string, ScheduleRecord>& schedule_records() const noexcept { return schedule_; }

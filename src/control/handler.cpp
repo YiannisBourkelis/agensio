@@ -2599,6 +2599,11 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
             rec.last_duration_ms = r["duration_ms"].num();
             rec.last_error = std::string(r.get("error"));
             std::string out(r.get("output"));
+            if (const auto bg = control::scheduled_in_background(out)) {
+                ++rec.background;
+                rec.background_at = rec.last_at;
+                rec.background_command = *bg;
+            }
             if (out.size() > 2048) {
                 std::size_t at = out.size() - 2048;
                 while (at < out.size() && (static_cast<unsigned char>(out[at]) & 0xc0) == 0x80) ++at;  // never inside a UTF-8 character
@@ -2829,14 +2834,29 @@ void ControlHandler::site_service(Stream& s, std::string_view name, bool logs, s
             if (installed && v["enabled"].boolean() == false && !crons) steps.push("as root: systemctl enable --now " + std::string(v.get("timer_unit")));
             if (v["matches_render"].type() == json::Value::Type::boolean && !v["matches_render"].boolean())
                 steps.push("the installed units are not what site_service_unit renders now: root installs the render again");
+            // A command started with runInBackground() is ended when schedule:run exits, as whatever a
+            // task leaves running is (the alpha.126 report, problem 4): said where the scheduler is looked at.
+            const auto it = schedule_.find(key);
+            const bool background = it != schedule_.end() && it->second.background;
+            if (background) {
+                summary += "; a scheduled command runs in background (" + it->second.background_command + "), and agensio ends it when schedule:run exits";
+                steps.push("the scheduled command " + it->second.background_command + " uses runInBackground() (last started " + it->second.background_at +
+                           "): agensio ends whatever schedule:run leaves running the moment it exits, so that command is cut off at once, and with "
+                           "withoutOverlapping() its lock then makes the scheduler skip it for a day (the site task schedule_clear_cache removes the lock); "
+                           "the application drops runInBackground() from it (the commands after it in the minute then wait for it) or dispatches its work to the queue");
+            }
             json::Value out = json::Value::object().set("ok", true).set("site", key).set("kind", "scheduler").set("summary", summary).set("scheduler", v)
                                   .set("duplicate", duplicate).set("next_steps", std::move(steps));
-            if (const auto it = schedule_.find(key); it != schedule_.end()) {
+            if (it != schedule_.end()) {
                 const ScheduleRecord& rec = it->second;
-                out.set("runs", json::Value::object().set("since_start", static_cast<double>(rec.runs)).set("failed", static_cast<double>(rec.failures))
-                                    .set("skipped", static_cast<double>(rec.skipped)).set("last_at", rec.last_at).set("last_ok", rec.last_ok)
-                                    .set("last_exit", rec.last_exit).set("last_duration_ms", rec.last_duration_ms).set("last_error", rec.last_error)
-                                    .set("last_output_end", rec.last_output).set("last_skipped_at", rec.last_skipped_at));
+                json::Value runs = json::Value::object().set("since_start", static_cast<double>(rec.runs)).set("failed", static_cast<double>(rec.failures))
+                                       .set("skipped", static_cast<double>(rec.skipped)).set("last_at", rec.last_at).set("last_ok", rec.last_ok)
+                                       .set("last_exit", rec.last_exit).set("last_duration_ms", rec.last_duration_ms).set("last_error", rec.last_error)
+                                       .set("last_output_end", rec.last_output).set("last_skipped_at", rec.last_skipped_at);
+                if (background)
+                    runs.set("background", json::Value::object().set("runs", static_cast<double>(rec.background)).set("last_at", rec.background_at)
+                                               .set("command", rec.background_command));
+                out.set("runs", std::move(runs));
             } else {
                 out.set("runs", json::Value::object().set("since_start", 0.0).set("note", "no scheduled run reached agensio since it started"));
             }

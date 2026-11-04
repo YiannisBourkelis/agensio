@@ -250,6 +250,12 @@ json::Value service_unit(const SiteConfig& site, const Config& cfg);
 // account's own crontab when it has no other Laravel site). Line numbers from 1, increasing, at most
 // `max`; never the text, which may carry a secret. Fuzzed (fuzz_cron_lines).
 std::vector<std::size_t> scheduler_cron_lines(std::string_view text, std::string_view project, bool any_line, std::size_t max);
+// The command of the last line of schedule:run's output that says it started one in background
+// ("Running [COMMAND] in background": Laravel 9 and later, ScheduleRunCommand::runEvent, for an event
+// with runInBackground()), which the task runner ends when schedule:run exits (the alpha.126 report,
+// problem 4); nullopt when no line says so. At most 160 bytes of the command, never cut inside a
+// UTF-8 character.
+std::optional<std::string> scheduled_in_background(std::string_view output);
 // How a PHP version's master rereads its pools ("systemctl reload php8.4-fpm" on Debian); "" = the
 // server's default version. A version not installed gets the Debian line with a note.
 std::string php_fpm_reload_command(const Config& cfg, const std::string& version);

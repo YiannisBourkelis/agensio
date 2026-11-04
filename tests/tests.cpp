@@ -3416,7 +3416,7 @@ static void test_served_dir() {
     // WordPress; a fixed argv of artisan; run in the directory that holds artisan, the nearest one from
     // served_dir up to the project (a release below it), with the site's own PHP command-line binary.
     {
-        for (const char* t : {"migrate_force", "optimize", "optimize_clear", "storage_link", "queue_restart", "schedule_run", "queue_work_once"})
+        for (const char* t : {"migrate_force", "optimize", "optimize_clear", "storage_link", "queue_restart", "schedule_run", "schedule_clear_cache", "queue_work_once"})
             CHECK(tasks::find("laravel", t) && tasks::find("php", t) && !tasks::find("wordpress", t) && !tasks::find("rails", t));
         tasks::Context tc;
         tc.root = "/x";
@@ -3510,8 +3510,8 @@ static void test_tasks() {
     }
     CHECK(tasks::names("rails").size() == 7 && tasks::names("proxy").empty() && !tasks::has_tasks("wordpress") && tasks::has_tasks("rails"));
     CHECK(tasks::find("rails", "rails_new") && !tasks::find("proxy", "rails_new") && !tasks::find("rails", "sh"));
-    CHECK(tasks::all_names().size() == 28 && tasks::all_params().size() == 7);
-    CHECK(tasks::names("laravel").size() == 7 && tasks::names("php") == tasks::names("laravel") && !tasks::has_tasks("drupal"));
+    CHECK(tasks::all_names().size() == 29 && tasks::all_params().size() == 7);
+    CHECK(tasks::names("laravel").size() == 8 && tasks::names("php") == tasks::names("laravel") && !tasks::has_tasks("drupal"));
     // Redmine: the Rails rows for an existing application and its own; never the new-application ones.
     const auto redmine = tasks::names("redmine");
     CHECK(redmine.size() == 8 && !tasks::find("redmine", "rails_new") && !tasks::find("redmine", "gem_install_rails") && tasks::find("redmine", "bundle_install") &&
@@ -4482,6 +4482,19 @@ static void test_appenv() {
         CHECK((control::scheduler_cron_lines(tab, "/srv/grab", true, 16) == std::vector<std::size_t>{2, 4, 5}));
         CHECK((control::scheduler_cron_lines(tab, "/srv/grab", true, 1) == std::vector<std::size_t>{2}));
         CHECK(control::scheduler_cron_lines(tab, "", false, 16).empty());
+        // schedule:run's line for a command it started with runInBackground() (Laravel 9 and later), which
+        // the task runner ends when schedule:run exits (the alpha.126 report, problem 4): the last one,
+        // brackets of its own kept, a long one cut on a character, none for a run in the foreground.
+        const std::string ran = "  2026-11-04 10:00:00 Running ['artisan' inspire] .... 3ms DONE\n"
+                                "  2026-11-04 10:00:00 Running ['artisan' report:send --to=[ops]] in background .... 1ms DONE\n"
+                                "  ⇂ 'artisan' report:send > '/dev/null' 2>&1\n";
+        CHECK(control::scheduled_in_background(ran) == std::optional<std::string>("'artisan' report:send --to=[ops]"));
+        CHECK(control::scheduled_in_background(ran + "  2026-11-04 10:00:00 Running [Callback] in background ... DONE\n") == std::optional<std::string>("Callback"));
+        CHECK(!control::scheduled_in_background("  2026-11-04 10:00:00 Running ['artisan' inspire] .... 3ms DONE\n"));
+        CHECK(!control::scheduled_in_background("no Running here\n] in background\n"));
+        CHECK(!control::scheduled_in_background(""));
+        const std::optional<std::string> longer = control::scheduled_in_background("Running [" + std::string(159, 'a') + "é" + std::string(50, 'b') + "] in background");
+        CHECK(longer && *longer == std::string(159, 'a') + "...");
     }
     CHECK(inspect(envdir + "-none", me, {"ok.test"})["sites"].items().empty());
     // Which sites have a file (site_delete names the file only then).

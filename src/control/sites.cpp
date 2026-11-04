@@ -1912,6 +1912,26 @@ std::vector<std::size_t> scheduler_cron_lines(std::string_view text, std::string
     return out;
 }
 
+std::optional<std::string> scheduled_in_background(std::string_view output) {
+    constexpr std::string_view mark = "] in background", running = "Running [";
+    for (std::size_t at = output.rfind(mark); at != std::string_view::npos; at = at == 0 ? std::string_view::npos : output.rfind(mark, at - 1)) {
+        const std::size_t nl = output.rfind('\n', at);
+        const std::size_t from = nl == std::string_view::npos ? 0 : nl + 1;
+        const std::size_t open = output.substr(from, at - from).find(running);
+        if (open == std::string_view::npos) continue;
+        // The command may hold brackets of its own; the line's last "] in background" closes it.
+        std::string cmd(output.substr(from + open + running.size(), at - from - open - running.size()));
+        if (cmd.size() > 160) {
+            std::size_t n = 160;
+            while (n > 0 && (static_cast<unsigned char>(cmd[n]) & 0xc0) == 0x80) --n;
+            cmd.resize(n);
+            cmd += "...";
+        }
+        return cmd;
+    }
+    return std::nullopt;
+}
+
 namespace {
 
 // The path of the agensio binary that runs now, for the scheduler unit's ExecStart.

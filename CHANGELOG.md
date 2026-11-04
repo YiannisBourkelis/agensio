@@ -23,6 +23,14 @@
 - A skipped scheduled run (a task runs on the site, or the last minute's run still does) exits 0, its
   record still printed: exit 1 had systemd record the scheduler's unit as failed for each minute a
   deploy's task ran, though agensio counts it as skipped (the report's small item, the owner's decision).
+- **A scheduled command with `runInBackground()` is named, and its lock can be cleared** (the
+  alpha.126 report, problem 4; the owner's decision to say so rather than keep such commands running).
+  agensio ends whatever a task leaves running, the scheduler's runs included, so such a command is cut
+  off the moment `schedule:run` exits, and with `withoutOverlapping()` its lock then keeps the scheduler
+  from running it for a day. `site_service_status` names the command a recorded run started in
+  background (`runs.background`), with what the application changes; the new Laravel task
+  `schedule_clear_cache` (`php artisan schedule:clear-cache`) removes the locks; the scheduler's
+  documentation and the MCP texts say so.
 - **Renamed: `[control] task_network` is `task_downloads`, and a task's `network` field is
   `downloads`** (in `site_tasks_list`, a dry run's answer and a run's record). Both names read as a
   limit on the network, which they never were: they say which tasks download packages (gem, bundle,
