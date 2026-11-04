@@ -619,6 +619,17 @@ bool fingerprint_key(int dfd, unsigned owner, std::string& key, bool create) {
 
 }  // namespace
 
+std::string fingerprint_key_of(const std::string& dir, unsigned owner) {
+    Status st;
+    int dfd = open_dir(dir, owner, st);
+    if (dfd == -2 && ::geteuid() == owner && ::mkdir(dir.c_str(), 0700) == 0) dfd = open_dir(dir, owner, st);  // a host with no environment file yet
+    if (dfd < 0) return "";
+    std::string key;
+    const bool ok = fingerprint_key(dfd, owner, key, true);
+    ::close(dfd);
+    return ok ? key : std::string();
+}
+
 bool read(const std::string& dir, std::string_view site, unsigned owner, std::vector<Var>& out, Status& st) {
     out.clear();
     if (!valid_site(site)) {

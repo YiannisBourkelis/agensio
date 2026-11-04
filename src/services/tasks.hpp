@@ -135,6 +135,9 @@ struct CatalogContext {
     unsigned timeout_cap = 0;
     std::function<std::string(std::string_view runtime)> runtime_dir;
     std::string sites_root;
+    std::string php_program;  // the site's PHP command-line binary for the "php" runtime's rows; "" when it has none
+    std::string php_problem;  // why it has none, and run_as_root for it
+    std::string php_run_as_root;
 };
 json::Value catalog(std::string_view app, const CatalogContext* ctx = nullptr);
 
@@ -145,6 +148,10 @@ std::string check_params(const Row& row, const json::Value& params);
 
 struct Context {
     std::string runtime_dir;  // [control] runtimes.<row.runtime>
+    // The interpreter itself, when it is not runtime_dir/program: a PHP site's own version's
+    // command-line binary (php::Runtime::cli, /usr/bin/php8.5), never the host's default php
+    // (the grabloop.app report). The interpreter rule (trusted_program) applies to it the same.
+    std::string program;
     std::string root;         // the site's directory: the working directory
     std::string home;         // the account's home (<state_dir>/<account>); TMPDIR is its tmp/
     std::string app;          // the site's preset: its family's environment and credential patterns

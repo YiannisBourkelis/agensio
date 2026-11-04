@@ -53,6 +53,7 @@
 #include "services/totp.hpp"
 #include "http/request_assembly.hpp"
 #include "services/appenv.hpp"
+#include "services/dotenv.hpp"
 #include <chrono>
 #include <csignal>
 #ifdef AGENSIO_HAS_ZLIB
@@ -1389,6 +1390,65 @@ static void test_listen_canonical() {
     spec.listen_plain = "0.0.0.0:18091";
     CHECK(codes(spec).find("needs_restart") == std::string::npos);
     fs::remove_all(dir);
+}
+
+// A Laravel application's .env through site_env and site_env_set (2026-11-04, the grabloop.app answer):
+// names, lengths and fingerprints read, values written without passing through an agent, every other
+// line kept, quoting as phpdotenv reads it, APP_KEY in Laravel's form, the file reached without a
+// symlink and written root's with the site's group (here the test's own account), 0640.
+static void test_dotenv() {
+    namespace fs = std::filesystem;
+    const std::string text = "# grabloop\nAPP_NAME=Grab\nAPP_KEY=\nexport DB_PASSWORD='s3 cr3t'\nMAIL_FROM=\"a@b.c\" # inline\nMULTI=\"line\none\"\n\n";
+    const auto lines = dotenv::parse(text);
+    std::map<std::string, std::string> v;
+    std::size_t unreadable = 0;
+    for (const auto& l : lines) {
+        if (l.assignment && l.readable) v[l.name] = l.value;
+        if (l.assignment && !l.readable) ++unreadable;
+    }
+    CHECK(v["APP_NAME"] == "Grab" && v["APP_KEY"].empty() && v["DB_PASSWORD"] == "s3 cr3t" && v["MAIL_FROM"] == "a@b.c" && unreadable == 1);
+    std::string out;
+    CHECK(dotenv::render_value("plain-Value_1.2:3@x/y+z=", out).empty() && out == "plain-Value_1.2:3@x/y+z=");
+    CHECK(dotenv::render_value("with space $HOME", out).empty() && out == "'with space $HOME'");
+    CHECK(dotenv::render_value("it's", out).empty() && out == "\"it's\"");
+    CHECK(!dotenv::render_value("it's \"$x\"", out).empty());
+    const std::string key = dotenv::laravel_key();
+    CHECK(key.size() == 51 && key.starts_with("base64:") && files::base64_decode(key.substr(7)) && files::base64_decode(key.substr(7))->size() == 32);
+    appenv::Change ch;
+    ch.set.push_back({"APP_DEBUG", "false"});
+    ch.set.push_back({"DB_PASSWORD", "n3w"});
+    ch.unset.push_back("MAIL_FROM");
+    ch.generate.push_back("APP_KEY");   // empty counts as missing
+    ch.generate.push_back("APP_NAME");  // present: kept
+    const dotenv::Result r = dotenv::apply(text, ch);
+    CHECK(r.error.empty() && r.text.find("# grabloop\nAPP_NAME=Grab\n") == 0 && r.text.find("\nexport DB_PASSWORD=n3w\n") != std::string::npos &&
+          r.text.find("MAIL_FROM") == std::string::npos && r.text.find("\nAPP_DEBUG=false\n") != std::string::npos && r.text.find("MULTI=\"line\none\"") != std::string::npos &&
+          r.text.find("\nAPP_KEY=base64:") != std::string::npos && r.generated == std::vector<std::string>{"APP_KEY"} && r.kept == std::vector<std::string>{"APP_NAME"});
+    appenv::Change multi;
+    multi.set.push_back({"MULTI", "x"});
+    CHECK(dotenv::apply(text, multi).error.find("MULTI") != std::string::npos);  // a value over several lines is not rewritten
+    const json::Value d = dotenv::describe(r.text, "k", {"APP_DEBUG"});
+    std::string names;
+    for (const auto& x : d["variables"].items()) names += std::string(x.get("name")) + (x["value"].is_string() ? "=" + std::string(x["value"].str()) : "") + " ";
+    CHECK(names.find("DB_PASSWORD ") != std::string::npos && names.find("APP_DEBUG=false ") != std::string::npos && names.find("n3w") == std::string::npos);
+    // The file: below the project, never through a symlink, written 0640 with the given group.
+    const fs::path dir = fs::temp_directory_path() / ("agensio-dotenv-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir / "proj" / "shared");
+    fs::create_directories(dir / "elsewhere");
+    std::ofstream(dir / "proj" / "shared" / ".env") << text;
+    const json::Value w = dotenv::write_file((dir / "proj").string(), "shared/.env", ::geteuid(), ::getegid(), ch, ::geteuid());
+    struct stat st {};
+    CHECK(w["ok"].boolean() && ::stat((dir / "proj" / "shared" / ".env").c_str(), &st) == 0 && (st.st_mode & 0777) == 0640 && w.dump().find("n3w") == std::string::npos);
+    const json::Value rd = dotenv::read_file((dir / "proj").string(), "shared/.env", "k", {}, ::geteuid());
+    CHECK(rd["ok"].boolean() && rd["exists"].boolean() && rd.dump().find("n3w") == std::string::npos && rd.dump().find("DB_PASSWORD") != std::string::npos);
+    fs::remove_all(dir / "proj" / "shared");
+    fs::create_directory_symlink(dir / "elsewhere", dir / "proj" / "shared");
+    CHECK(!dotenv::write_file((dir / "proj").string(), "shared/.env", ::geteuid(), ::getegid(), ch, ::geteuid())["ok"].boolean() && !fs::exists(dir / "elsewhere" / ".env"));
+    fs::remove_all(dir);
+    // The site key: a plain relative file, outside the served directory; laravel's own .env by default.
+    CHECK(check_env_file(".env").empty() && check_env_file("shared/.env").empty() && !check_env_file("../x/.env").empty() && !check_env_file("/etc/x").empty() &&
+          !check_env_file(".git/config").empty() && !check_env_file("a//b").empty());
 }
 
 // The server's addresses (docs/configuration.md 1c, 2026-11-03): a site without listen takes [server]
@@ -3284,6 +3344,68 @@ static void test_served_dir() {
         CHECK(mc.sites[0].root == project + "/public" && mc.sites[0].project_root == project);
         CHECK(apply(R"({"served_dir":""})").empty() && spec.served_dir.empty() && control::render_site(spec, "x").find("served_dir") == npos);
     }
+    // Laravel's tasks (the grabloop.app report): offered to app = "laravel" and to app = "php", never to
+    // WordPress; a fixed argv of artisan; run in the directory that holds artisan, the nearest one from
+    // served_dir up to the project (a release below it), with the site's own PHP command-line binary.
+    {
+        for (const char* t : {"migrate_force", "optimize", "optimize_clear", "storage_link", "queue_restart", "schedule_run", "queue_work_once"})
+            CHECK(tasks::find("laravel", t) && tasks::find("php", t) && !tasks::find("wordpress", t) && !tasks::find("rails", t));
+        tasks::Context tc;
+        tc.root = "/x";
+        tc.home = "/h";
+        const tasks::Plan mig = tasks::build(*tasks::find("php", "migrate_force"), json::Value::object(), tc, "/usr/bin/php9.9");
+        CHECK(mig.argv == (std::vector<std::string>{"/usr/bin/php9.9", "artisan", "migrate", "--force", "--no-interaction"}));
+        const tasks::Plan q = tasks::build(*tasks::find("laravel", "queue_work_once"), json::Value::object(), tc, "/usr/bin/php9.9");
+        CHECK(q.argv == (std::vector<std::string>{"/usr/bin/php9.9", "artisan", "queue:work", "--stop-when-empty", "--max-time=50", "--no-interaction"}));
+        fs::create_directories(dir / "lara" / "releases" / "r1" / "public");
+        fs::create_directories(dir / "lara" / "shared");
+        std::ofstream(dir / "lara" / "releases" / "r1" / "artisan") << "<?php\n";
+        std::ofstream(dir / "php99") << "#!/bin/sh\n";
+        write("t.toml", "[server]\nworkers = 1\ngroup = \"www\"\npools_run = \"" + d + "/run\"\nstate_dir = \"" + d + "/state\"\n"
+                        "[php.runtimes.\"9.9\"]\nfpm = \"" + d + "/fpm99\"\nconf = \"" + d + "/fpm99.conf\"\npools = \"" + d + "/pool.d\"\ncli = \"" + d + "/php99\"\n" +
+                        site("lara.test", "lara", "php", "served_dir = \"releases/r1/public\"\n") + site("app.test", "proj", "php", "served_dir = \"public\"\n"));
+        const Config tcfg = load_config(dir / "t.toml");
+        const std::string lara = fs::canonical(dir / "lara").string();
+        const control::TaskSetup in_release = control::task_setup(tcfg, tcfg.sites[0], *tasks::find("php", "migrate_force"));
+        CHECK(in_release.error.empty() && in_release.dir == lara + "/releases/r1" && in_release.program == d + "/php99");
+        // No artisan anywhere on the way: the project itself, where the task's need refuses it.
+        const control::TaskSetup none_found = control::task_setup(tcfg, tcfg.sites[1], *tasks::find("php", "optimize"));
+        CHECK(none_found.error.empty() && none_found.dir == project);
+        // A release reached through a symlink is never chosen.
+        fs::create_symlink("r1", dir / "lara" / "releases" / "live");
+        std::ofstream(dir / "lara" / "artisan") << "<?php\n";
+        SiteConfig linked = tcfg.sites[0];
+        linked.served_dir = "releases/live/public";
+        CHECK(control::task_setup(tcfg, linked, *tasks::find("php", "optimize")).dir == lara);
+        // The site's version without a command-line binary: refused with what root installs.
+        Config nocli = tcfg;
+        nocli.php_runtimes.front().cli.clear();
+        const control::TaskSetup missing = control::task_setup(nocli, nocli.sites[0], *tasks::find("php", "optimize"));
+        CHECK(missing.error.find("PHP 9.9 has no command-line binary") != npos);
+        // Other presets' rows keep the project directory and their [control] runtimes interpreter.
+        const control::TaskSetup other = control::task_setup(tcfg, tcfg.sites[1], *tasks::find("rails", "db_migrate"));
+        CHECK(other.dir == project && other.program.empty());
+        // The scheduler (2026-11-04): two units, the service asking agensio for schedule_run as the server's
+        // account, the timer every minute; nothing names a release. Refused for a site without artisan, and
+        // for a server without a control socket.
+        Config sc = tcfg;
+        sc.control.enabled = true;
+        sc.control.socket = d + "/run/control.sock";
+        sc.user = "agensio";
+        const json::Value su = control::service_unit(sc.sites[0], sc);
+        CHECK(su["ok"].boolean() && su.get("kind") == "scheduler" && su["units"].items().size() == 2 && su["run_as_root"].items().size() == 4);
+        const std::string svc_text(su["units"].items()[0].get("unit")), timer_text(su["units"].items()[1].get("unit"));
+        CHECK(std::string(su["units"].items()[0].get("name")) == "agensio-schedule-lara.test.service" && std::string(su["units"].items()[1].get("name")) == "agensio-schedule-lara.test.timer");
+        CHECK(svc_text.find("\nType=oneshot\n") != npos && svc_text.find("\nUser=agensio\n") != npos &&
+              svc_text.find(" ctl site-task lara.test schedule_run --scheduled --yes --reason scheduler --socket " + d + "/run/control.sock\n") != npos &&
+              svc_text.find("releases/r1") == npos && svc_text.find("\nReadWritePaths=" + d + "/run\n") != npos);
+        CHECK(timer_text.find("\nOnCalendar=*-*-* *:*:00\n") != npos && timer_text.find("\nUnit=agensio-schedule-lara.test.service\n") != npos &&
+              timer_text.find("\nWantedBy=timers.target\n") != npos);
+        CHECK(control::service_unit(sc.sites[1], sc).get("error").find("no artisan file") != std::string_view::npos);
+        Config nosock = sc;
+        nosock.control.enabled = false;
+        CHECK(control::service_unit(nosock.sites[0], nosock).get("error").find("control socket") != std::string_view::npos);
+    }
     fs::remove_all(dir);
 }
 
@@ -3303,7 +3425,8 @@ static void test_tasks() {
         // A program row runs an interpreter by name; a template row writes one fixed file below the site.
         if (r.writes) CHECK(!*r.runtime && !*r.program && r.args.empty() && r.content && std::string_view(r.writes).find("..") == std::string_view::npos && r.writes[0] != '/');
         else CHECK(((std::string_view(r.runtime) == "ruby" && r.timeout >= 600) || (std::string_view(r.runtime) == "python3" && r.timeout >= 300) ||
-                    (std::string_view(r.runtime) == "node" && std::string_view(r.program) == "npm" && r.timeout >= 600)) &&
+                    (std::string_view(r.runtime) == "node" && std::string_view(r.program) == "npm" && r.timeout >= 600) ||
+                    (std::string_view(r.runtime) == "php" && std::string_view(r.program) == "php" && r.timeout >= 120 && std::string_view(r.args.front().text) == "artisan")) &&
                    std::string_view(r.program).find('/') == std::string_view::npos);
         // A row that runs under another name runs root's interpreter as the site's virtualenv's python.
         if (r.argv0) CHECK(std::string_view(r.argv0) == "{venv}/bin/python" && std::string_view(r.runtime) == "python3" && std::string_view(r.program) == "python3");
@@ -3311,7 +3434,8 @@ static void test_tasks() {
     }
     CHECK(tasks::names("rails").size() == 7 && tasks::names("proxy").empty() && !tasks::has_tasks("wordpress") && tasks::has_tasks("rails"));
     CHECK(tasks::find("rails", "rails_new") && !tasks::find("proxy", "rails_new") && !tasks::find("rails", "sh"));
-    CHECK(tasks::all_names().size() == 21 && tasks::all_params().size() == 7);
+    CHECK(tasks::all_names().size() == 28 && tasks::all_params().size() == 7);
+    CHECK(tasks::names("laravel").size() == 7 && tasks::names("php") == tasks::names("laravel") && !tasks::has_tasks("drupal"));
     // Redmine: the Rails rows for an existing application and its own; never the new-application ones.
     const auto redmine = tasks::names("redmine");
     CHECK(redmine.size() == 8 && !tasks::find("redmine", "rails_new") && !tasks::find("redmine", "gem_install_rails") && tasks::find("redmine", "bundle_install") &&
@@ -4248,6 +4372,23 @@ static void test_appenv() {
         for (const auto& f : sf)
             if (f.site == "c") CHECK(f.fix.find("site_service_logs c") != std::string::npos && f.fix.find("systemctl restart agensio-app-c.service") != std::string::npos);
         CHECK(control::service_findings(json::Value::object().set("ok", false).set("busy", true)).empty());
+        // The Laravel schedulers (2026-11-04): agensio's timer and a cron line both, or two cron lines, run every
+        // scheduled command twice; an installed unit that is not the render is noted; one scheduler says nothing.
+        auto sched = [](const char* site, bool installed, bool enabled, int crons, bool matches) {
+            json::Value cron = json::Value::array();
+            for (int i = 0; i < crons; ++i) cron.push(json::Value::object().set("file", "/etc/cron.d/app").set("line", static_cast<double>(i + 3)));
+            return json::Value::object().set("site", site).set("timer_unit", std::string("agensio-schedule-") + site + ".timer").set("installed", installed)
+                .set("enabled", enabled).set("active", enabled).set("cron", std::move(cron)).set("matches_render", matches);
+        };
+        const auto sch = control::service_findings(json::Value::object().set("ok", true).set("services", json::Value::array()).set("schedules", json::Value::array()
+            .push(sched("both.test", true, true, 1, true)).push(sched("crons.test", false, false, 2, true)).push(sched("one.test", true, true, 0, true))
+            .push(sched("cron.test", false, false, 1, true)).push(sched("old.test", true, true, 0, false))));
+        std::string got;
+        for (const auto& f : sch) got += f.site + ":" + f.code + " ";
+        CHECK(got == "both.test:site_schedule_duplicate crons.test:site_schedule_duplicate old.test:site_schedule_unit_stale ");
+        for (const auto& f : sch)
+            if (f.site == "both.test") CHECK(f.message.find("runs 2 times every minute") != std::string::npos && f.message.find("/etc/cron.d/app line 3") != std::string::npos &&
+                                             f.message.find("schedule:run") == std::string::npos && f.fix.find("systemctl disable --now agensio-schedule-both.test.timer") != std::string::npos);
     }
     CHECK(inspect(envdir + "-none", me, {"ok.test"})["sites"].items().empty());
     // Which sites have a file (site_delete names the file only then).
@@ -8334,6 +8475,14 @@ static void test_site_files() {
                           "var/app.db", "config/credentials/production.key", "config/credentials/x"})
         CHECK(files::secret_path(s, secrets));
     for (const char* s : {"index.html", "wp-config.php.txt", "envelope.txt", "keyboard.css", "db.sql.txt", ".gitignore", "credentials.html"}) CHECK(!files::secret_path(s, secrets));
+    // SSH keys (2026-11-04, the grabloop.app report: a deploy key named shared/deploy_key was read with no
+    // approval): below .ssh/, the private keys' own names; a public key is no secret; a file whose first
+    // line is a private key's header is one whatever its name.
+    for (const char* s : {".ssh/id_ed25519", "shared/.ssh/config", "shared/id_rsa", "id_ecdsa", "keys/id_ed25519_sk", "id_dsa"}) CHECK(files::secret_path(s, secrets));
+    for (const char* s : {"shared/id_ed25519.pub", "docs/ssh.md", "id_rsa_notes.txt"}) CHECK(!files::secret_path(s, secrets));
+    CHECK(files::private_key_head("-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blbg==\n") && files::private_key_head("-----BEGIN RSA PRIVATE KEY-----\n") &&
+          files::private_key_head("-----BEGIN PRIVATE KEY-----") && files::private_key_head("PuTTY-User-Key-File-3: ssh-ed25519\n") &&
+          !files::private_key_head("-----BEGIN PUBLIC KEY-----\n") && !files::private_key_head("-----BEGIN CERTIFICATE-----\n") && !files::private_key_head("hello"));
     // base64 round trip, every length.
     for (std::size_t n = 0; n < 8; ++n) {
         const std::string bytes = std::string("\x00\xff\x10 abc", 7).substr(0, n);
@@ -8344,6 +8493,23 @@ static void test_site_files() {
     CHECK(control::unified_diff("a\nb\nc\n", "a\nB\nc\n", 0) == "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n");
     CHECK(control::unified_diff("", "x\ny\n", 0) == "@@ -0,0 +1,2 @@\n+x\n+y\n");
     CHECK(control::unified_diff("same\n", "same\n", 0) == "no change\n");
+    // A credential file's diff shows no value, context lines included (the grabloop.app report: an edit
+    // of shared/.env showed DB_PASSWORD three lines above the change). An env-like file keeps its names
+    // and each value's length; any other credential file (a key, wp-config.php) only the lengths.
+    {
+        const std::string before = "APP_NAME=grab\n# DB_OLD=oldpass\nDB_PASSWORD=s3cr3t-pass\nexport MAIL_KEY=\"k\"\nAPP_DEBUG=false\n\n";
+        const std::string after = "APP_NAME=grab\n# DB_OLD=oldpass\nDB_PASSWORD=s3cr3t-pass\nexport MAIL_KEY=\"k\"\nAPP_DEBUG=true\n\n";
+        CHECK(control::env_like_text(before) && control::env_like_text(after) && !control::env_like_text("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk=\n"));
+        const std::string masked = control::mask_credential_diff(control::unified_diff(before, after, 0), true);
+        CHECK(masked.find("s3cr3t") == std::string::npos && masked.find("oldpass") == std::string::npos && masked.find("false") == std::string::npos &&
+              masked.find("true") == std::string::npos);
+        CHECK(masked.find(" DB_PASSWORD=<11 bytes>\n") != std::string::npos && masked.find(" # DB_OLD=<7 bytes>\n") != std::string::npos &&
+              masked.find(" export MAIL_KEY=<3 bytes>\n") != std::string::npos && masked.find("-APP_DEBUG=<5 bytes>\n+APP_DEBUG=<4 bytes>\n") != std::string::npos &&
+              masked.find("@@ -") == 0);
+        const std::string key = control::mask_credential_diff(control::unified_diff("", "-----BEGIN OPENSSH PRIVATE KEY-----\nAbCdEf0123==\n", 0), false);
+        CHECK(key == "@@ -0,0 +1,2 @@\n+<35 bytes>\n+<12 bytes>\n");
+        CHECK(control::mask_credential_diff("no change\n", true) == "no change\n");
+    }
     {
         std::string a, b;
         for (int i = 0; i < 40; ++i) a += "line " + std::to_string(i) + "\n";
@@ -14216,6 +14382,7 @@ int main() {
     test_fcgi_codec();
     test_pools();
     test_served_dir();
+    test_dotenv();
     test_build_protocols();
     test_h3_bind_problem();
     test_tasks();

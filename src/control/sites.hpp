@@ -14,6 +14,10 @@
 #include "config.hpp"
 #include "services/json.hpp"
 
+namespace agensio::tasks {
+struct Row;
+}
+
 namespace agensio::control {
 
 struct SiteSpec {
@@ -54,6 +58,7 @@ struct SiteSpec {
     std::string project;     // app = django | wagtail: the project's Python package
     std::string entry;       // app = node: the file node runs, relative to root
     std::string served_dir;  // app = php: the project's directory served (public), relative to root; "" the root itself
+    std::string env_file;    // app = laravel | php: the application's .env, relative to root (shared/.env); "" laravel's own .env, or none
     std::string php_socket;  // php without a user: an existing pool
     int php_children = 0;    // generated pool sizing (with a user); the same as settings.children
     std::string php_version;
@@ -219,6 +224,20 @@ std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg);
 // Debian's Ruby on a bundle built by /opt's). Text for root to put in place; every value in
 // it is checked to be a plain path or name, so nothing can add a line to the unit.
 // {"ok", "site", "unit_name", "path", "unit", "run_as_root": [...], "hint"} or {"ok": false, "error"}.
+// Where a site's task runs and with what (the grabloop.app report, 2026-11-04). A row of the "php"
+// runtime (Laravel's) runs in the directory that holds artisan: the nearest from served_dir up to the
+// project, reached without a symlink (a release below the project), else the project; its interpreter
+// is the command-line binary of the site's own PHP version from the runtimes discovered (the pool's,
+// else [server] php_version, else the newest), never the host's default php. Every other row runs in
+// the project directory with its [control] runtimes interpreter (program ""). error, with
+// run_as_root, when the site's version has no command-line binary.
+struct TaskSetup {
+    std::string dir;
+    std::string program;
+    std::string error;
+    std::string run_as_root;
+};
+TaskSetup task_setup(const Config& cfg, const SiteConfig& site, const tasks::Row& row);
 json::Value service_unit(const SiteConfig& site, const Config& cfg);
 // How a PHP version's master rereads its pools ("systemctl reload php8.4-fpm" on Debian); "" = the
 // server's default version. A version not installed gets the Debian line with a note.

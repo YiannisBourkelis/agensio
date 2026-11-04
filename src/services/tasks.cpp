@@ -309,11 +309,16 @@ const std::vector<Family>& families() {
         {"django", kDjangoEnv, kDjangoSecrets},
         {"wagtail", kDjangoEnv, kDjangoSecrets},
         {"node", kNodeEnv, kNodeSecrets},
+        // Laravel (2026-11-04, the grabloop.app report): the application reads its own .env, so the
+        // tasks need no variables of agensio's; what artisan may write that is a credential.
+        {"laravel", {}, {".env", ".env.*", "storage/*.key", "database/*.sqlite"}},
     };
     return f;
 }
 
 constexpr const char* kNoGemfile = "the site's directory holds no application yet: make one with rails_new, or install one with site_install";
+constexpr const char* kNoArtisan = "no artisan file in the task's directory, so this is no Laravel application: the task runs where artisan is, the nearest "
+                                   "directory from the site's served_dir up to the project (releases/<id>/ for served_dir releases/<id>/public)";
 
 }  // namespace
 
@@ -484,6 +489,24 @@ const std::vector<Row>& rows() {
          "python3", "python3", {{"{venv}/bin/wagtail"}, {"start"}, {"{project}"}, {"."}}, {}, {}, false, true, 300,
          {{"{venv}/bin/wagtail", "install Wagtail into the site's virtualenv first: pip_install with packages \"wagtail\""}},
          {{"manage.py", "wagtail start wrote no manage.py; the output says why"}}, nullptr, nullptr, 0640, {}, true, "{venv}/bin/python"},
+        // Laravel (2026-11-04, the grabloop.app report): artisan's own commands, fixed, as the site's
+        // account in the directory that holds artisan (a release below the project, found from
+        // served_dir), with the site's own PHP version; never a command the release declares.
+        {"laravel", "migrate_force", "Runs the pending database migrations (php artisan migrate --force): after a release with new migrations.",
+         "php", "php", {{"artisan"}, {"migrate"}, {"--force"}, {"--no-interaction"}}, {}, {}, false, false, 1800, {{"artisan", kNoArtisan}}},
+        {"laravel", "optimize", "Caches the configuration, routes, views and events (php artisan optimize): after a release, and after .env changed.",
+         "php", "php", {{"artisan"}, {"optimize"}, {"--no-interaction"}}, {}, {}, false, false, 600, {{"artisan", kNoArtisan}}},
+        {"laravel", "optimize_clear", "Drops those caches (php artisan optimize:clear): when a cached configuration hides a change.",
+         "php", "php", {{"artisan"}, {"optimize:clear"}, {"--no-interaction"}}, {}, {}, false, false, 600, {{"artisan", kNoArtisan}}},
+        {"laravel", "storage_link", "Links public/storage to storage/app/public (php artisan storage:link): once per release that serves uploads.",
+         "php", "php", {{"artisan"}, {"storage:link"}, {"--no-interaction"}}, {}, {}, false, false, 120, {{"artisan", kNoArtisan}}},
+        {"laravel", "queue_restart", "Tells the queue workers to restart after their current job (php artisan queue:restart): after a release.",
+         "php", "php", {{"artisan"}, {"queue:restart"}, {"--no-interaction"}}, {}, {}, false, false, 120, {{"artisan", kNoArtisan}}},
+        {"laravel", "schedule_run", "Runs the scheduled commands that are due (php artisan schedule:run): what the site's scheduler timer runs every minute.",
+         "php", "php", {{"artisan"}, {"schedule:run"}, {"--no-interaction"}}, {}, {}, false, false, 900, {{"artisan", kNoArtisan}}},
+        {"laravel", "queue_work_once", "Works the queue until it is empty, at most 50 s (php artisan queue:work --stop-when-empty --max-time=50): a manual drain.",
+         "php", "php", {{"artisan"}, {"queue:work"}, {"--stop-when-empty"}, {"--max-time=50"}, {"--no-interaction"}}, {}, {}, false, false, 300,
+         {{"artisan", kNoArtisan}}},
     };
     return r;
 }
@@ -515,6 +538,10 @@ std::string confirmation_warning(std::string_view site, std::string_view package
 std::string_view base_of(std::string_view app) noexcept {
     if (app == "redmine") return "rails";
     if (app == "wagtail") return "django";
+    // A Laravel application served as app = "php" (served_dir on a release, shared/ beside the
+    // releases; the grabloop.app report) has Laravel's rows: each needs an artisan file, so a site
+    // that is no Laravel application is refused by the row's need, never run.
+    if (app == "php") return "laravel";
     return {};
 }
 
@@ -583,8 +610,13 @@ json::Value catalog(std::string_view app, const CatalogContext* ctx) {
             json::Value env = json::Value::array();
             for (const auto& n : r.needs_env) env.push(n.path);
             if (!env.items().empty()) item.set("needs_env", std::move(env));
+        } else if (ctx && std::string_view(r.runtime) == "php" && ctx->php_program.empty()) {
+            // The site's PHP version has no command-line binary: what root installs (the grabloop.app report).
+            json::Value in = json::Value::object().set("ok", false).set("error", ctx->php_problem);
+            if (!ctx->php_run_as_root.empty()) in.set("run_as_root", ctx->php_run_as_root);
+            item.set("interpreter", std::move(in));
         } else if (ctx && ctx->runtime_dir) {
-            const std::string path = ctx->runtime_dir(r.runtime) + "/" + r.program;
+            const std::string path = std::string_view(r.runtime) == "php" ? ctx->php_program : ctx->runtime_dir(r.runtime) + "/" + r.program;
             std::string canonical;
             bool missing = false;
             const std::string why = trusted_program(path, ctx->sites_root, canonical, missing);
@@ -1547,7 +1579,7 @@ json::Value execute(const Request& req) {
     // The interpreter: root's alone, or nothing runs.
     std::string program;
     bool missing = false;
-    const std::string configured = req.ctx.runtime_dir + "/" + row.program;
+    const std::string configured = req.ctx.program.empty() ? req.ctx.runtime_dir + "/" + row.program : req.ctx.program;
     if (std::string bad = trusted_program(configured, req.sites_root, program, missing); !bad.empty()) {
         ::close(root_fd);
         json::Value f = refusal("the " + std::string(row.runtime) + " runtime: " + bad);

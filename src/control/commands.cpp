@@ -2622,6 +2622,26 @@ std::vector<Finding> service_findings(const json::Value& check) {
                                   "site_service_logs " + site + " shows why"});
         }
     }
+    // The Laravel schedulers (2026-11-04, the grabloop.app answer): two of them run every scheduled
+    // command twice, and an installed unit that is no longer the render asks the wrong socket or binary.
+    for (const auto& r : check["schedules"].items()) {
+        const std::string site(r.get("site")), timer(r.get("timer_unit"));
+        const bool timer_on = r["installed"].boolean() && (r["enabled"].boolean() || r["active"].boolean());
+        const std::size_t crons = r["cron"].items().size();
+        if ((timer_on && crons) || crons > 1) {
+            std::string where;
+            for (const auto& c : r["cron"].items()) where += (where.empty() ? "" : ", ") + std::string(c.get("file")) + " line " + std::to_string(static_cast<long>(c["line"].num()));
+            out.push_back(Finding{"warn", "site_schedule_duplicate", site,
+                                  "the Laravel scheduler of " + site + " runs " + std::to_string(crons + (timer_on ? 1 : 0)) + " times every minute: " +
+                                      (timer_on ? "agensio's " + timer + " and " : std::string()) + "cron (" + where + "), so every scheduled command runs that often",
+                                  "keep one: " + std::string(timer_on ? "the cron line out (root's: crontab -u ACCOUNT -e, or the file in /etc/cron.d), or, as root, systemctl disable --now " + timer
+                                                                      : "remove all but one of the cron lines (root's), or replace them with agensio's timer (site_service_unit " + site + ")")});
+        }
+        if (r["installed"].boolean() && r["matches_render"].type() == json::Value::Type::boolean && !r["matches_render"].boolean())
+            out.push_back(Finding{"info", "site_schedule_unit_stale", site,
+                                  timer + " or its service is not what site_service_unit renders now (another agensio binary, control socket or account): it may ask the wrong one",
+                                  "root installs the render again: site_service_unit " + site + " gives the lines (--out for both units, then systemctl daemon-reload)"});
+    }
     return out;
 }
 

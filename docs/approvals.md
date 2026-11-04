@@ -18,7 +18,7 @@ after it was queued.
 | change | since |
 |---|---|
 | `site_task` `pip_install` (`agensio ctl site-task NAME pip_install --param packages=...`): installs Python packages the caller names into a site's virtualenv, so their code runs as the site's account | 0.1.0-alpha.120 |
-| every change to a site's files: `site_file_write`, `site_file_edit`, `site_dir_create`, `site_path_move`, `site_path_delete`, `site_file_restore` (`agensio ctl site-file-write`, ...); what waits shows the diff and what the site does with the path (served as a file, or RUNS as a script) | 0.1.0-alpha.120 |
+| every change to a site's files: `site_file_write`, `site_file_edit`, `site_dir_create`, `site_path_move`, `site_path_delete`, `site_file_restore` (`agensio ctl site-file-write`, ...); what waits shows the diff and what the site does with the path (served as a file, or RUNS as a script); a credential file's diff shows its names and each value's length, never a value, context lines included | 0.1.0-alpha.120 |
 | reading a credential or database file of a site (`site_file_read` of `.env`, `wp-config.php`, `*.key`, `*.pem`, `.git/`, a SQLite file): its content would leave the server for whoever asked; once approved, it is handed out once (`approvals_list` with the id) | 0.1.0-alpha.120 |
 | `site_install` from any source, and `site_copy`: files the site then serves or runs; the preview names the source, the target and what the install creates | 0.1.0-alpha.120 |
 | the site's environment: `site_env_set` (the preview names the variables, never a value) and `site_env` with `reveal` (the values are handed out once, by id) | 0.1.0-alpha.120 |
@@ -72,7 +72,12 @@ agensio ctl approve
 It lists every change waiting, each as the server describes it: what makes it dangerous first (lines
 marked `!!`), then the change itself, then the words of whoever asked for it, marked as theirs and not
 checked. It asks for the code on the terminal; one code approves exactly the list shown, and each change
-then runs in the order it was asked for, with its result printed.
+then runs in the order it was asked for, with its result printed. The changes approved together stop at
+the first that fails: the ones after it are `skipped`, not run, each saying which change failed, so a
+deploy queued as an install, the switch to it and the deletes of older releases never switches to a
+release that did not install (since 0.1.0-alpha.124; before, every change ran whatever the one before
+it did). Over SSH, `ssh -t HOST agensio ctl approve ID ...` works: the code is read from the terminal
+`-t` gives.
 
 - `agensio ctl approve ID ...` approves only those; `--list` shows without asking; `--show ID` prints one
   change whole; `--reject ID` drops one, nothing of it runs.

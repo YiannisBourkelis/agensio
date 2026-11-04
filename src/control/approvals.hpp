@@ -25,7 +25,8 @@ std::string escape_for_terminal(std::string_view text);
 std::string new_approval_id();
 
 struct PendingChange {
-    enum class State { waiting, running, done, failed, rejected };
+    // skipped: approved in a batch, not run because a change before it in the same batch failed.
+    enum class State { waiting, running, done, failed, rejected, skipped };
     std::string id;
     std::string path;    // the control API path, /v1/sites/NAME/task
     std::string body;    // the request's JSON as it came
@@ -106,5 +107,12 @@ std::string url_host(std::string_view url);
 // @@ -l,s +l,s @@), at most `max_lines` lines of it with the count of the rest; a file replaced
 // beyond a few thousand edits is shown as its new text instead.
 std::string unified_diff(std::string_view before, std::string_view after, std::size_t max_lines);
+// A credential file's diff as anyone may see it (the grabloop.app report, 2026-11-03: the context
+// lines of a .env edit carried DB_PASSWORD to the agent): every line of the file, context included,
+// shows no value. env_like: the names and the '=' stay, each value becomes "<N bytes>"; otherwise each
+// line becomes "<N bytes>". The diff's own lines (@@ headers, "no change") are kept.
+std::string mask_credential_diff(std::string_view diff, bool env_like);
+// Every line blank, a comment, or NAME=value (optionally "export "): the syntax of .env files.
+bool env_like_text(std::string_view text);
 
 }  // namespace agensio::control

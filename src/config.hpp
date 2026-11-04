@@ -385,6 +385,10 @@ struct SiteConfig {
     // app = "php": the project's directory served ("public", "web/public"), relative to the root as given;
     // "" serves the root itself (2026-10-22). PHP's open_basedir and the install stay on the project.
     std::string served_dir;
+    // app = "laravel" | "php": the application's .env, relative to the project (2026-11-04, the
+    // grabloop.app answer: "shared/.env" beside the releases); "" none. site_env and site_env_set
+    // read and write it (services/dotenv.*), root's, group the site's account, 0640. laravel: ".env".
+    std::string env_file;
     // app = "django" | "wagtail": the project's Python package (NAME/settings, NAME/wsgi.py),
     // which the tasks and the rendered unit load (2026-09-28, the owner's decision: a site
     // field given at site_create, not a parameter of every task).
@@ -896,9 +900,17 @@ bool node_app(std::string_view app) noexcept;
 std::string check_entry(std::string_view entry);
 // served_dir: a plain directory path relative to the project (public, web/public); "" when it is one.
 std::string check_served_dir(std::string_view dir);
+// env_file: a plain file path relative to the project (.env, shared/.env): letters, digits, '.', '_',
+// '-' and '/', no '..' or '.' segment, only its last segment may start with '.'; "" when it is one.
+std::string check_env_file(std::string_view path);
 // A preset whose application service agensio renders and watches (site_service_unit,
 // site_service_status, health): the Rails and the Django presets.
 bool service_app(std::string_view app) noexcept;
+// A preset whose Laravel scheduler agensio renders and watches (2026-11-04, the grabloop.app report):
+// "laravel", and "php" for a Laravel application on it (an artisan file where its tasks run).
+bool schedule_app(std::string_view app) noexcept;
+// The scheduler units of a site: agensio-schedule-<site>.timer starts agensio-schedule-<site>.service.
+std::string schedule_unit_name(std::string_view site, bool timer);
 // A project name `project = "..."` takes: ^[a-z_][a-z0-9_]{0,63}$ and not a module the
 // project would shadow (django, wagtail, site, test, ...). "" or why.
 std::string check_project_name(std::string_view name);

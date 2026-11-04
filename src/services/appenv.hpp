@@ -105,6 +105,10 @@ bool read(const std::string& dir, std::string_view site, unsigned owner, std::ve
 // or {"ok": false, "error", "run_as_root"?}. The fingerprint key is made on first use,
 // `<dir>/.fingerprint.key`, `owner`'s, 0600.
 json::Value describe(const std::string& dir, std::string_view site, unsigned owner, const std::vector<std::string>& reveal);
+// The key of the fingerprints, `<dir>/.fingerprint.key`, made on first use (the directory too, 0700,
+// when this process is `owner`); "" when it cannot be had. A Laravel site's .env (services/dotenv.*)
+// is fingerprinted with the same key, so one value has one fingerprint wherever it is kept.
+std::string fingerprint_key_of(const std::string& dir, unsigned owner);
 
 // Health's view, read-only (nothing tightened, nothing created): what a task of each of
 // `sites` would meet in its file, and the `.env` files no site names any more.

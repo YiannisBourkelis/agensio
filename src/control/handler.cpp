@@ -398,6 +398,14 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         cc.timeout_cap = cfg.control.task_timeout;
         cc.runtime_dir = [&cfg](std::string_view runtime) { return runtime_dir(cfg.control, runtime); };
         cc.sites_root = cfg.control.sites_root.empty() ? std::string("/var/www") : cfg.control.sites_root;
+        std::string directory = site->project_root.empty() ? site->root : site->project_root;
+        if (const tasks::Row* php_row = tasks::find(app, "optimize")) {  // the site's PHP binary and artisan's directory, for Laravel's rows
+            const control::TaskSetup ts = control::task_setup(cfg, *site, *php_row);
+            cc.php_program = ts.program;
+            cc.php_problem = ts.error;
+            cc.php_run_as_root = ts.run_as_root;
+            directory = ts.dir;
+        }
         json::Value list = tasks::catalog(app, &cc);
         // Every package a task's interpreter is missing, once: root installs them before the
         // first task instead of on the third (2026-09-27 report).
@@ -415,7 +423,7 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
             body.set("running", it == running_tasks_.end() ? json::Value(nullptr) : json::Value(it->second))
                 .set("downloads", cfg.control.task_network).set("timeout_cap", static_cast<double>(cfg.control.task_timeout))
                 .set("runs_as", site->user.empty() ? json::Value("the owner of the site's directory") : json::Value(site->user))
-                .set("directory", site->project_root.empty() ? site->root : site->project_root);
+                .set("directory", directory);
             if (node_app(app)) body.set("entry", site->entry.empty() ? json::Value(nullptr) : json::Value(site->entry));
             if (python_app(app))
                 body.set("project", site->project)
@@ -2220,7 +2228,7 @@ bool ControlHandler::secret_file(std::string_view name, std::string_view rel) {
     std::vector<std::string> secrets;
     const json::Value listed = site_secrets(*site, site_root);
     for (const auto& sec : listed.items()) secrets.push_back(sec.str());
-    return files::secret_path(clean, secrets);
+    return files::secret_path(clean, secrets) || key_files_.count(site->server_names.front() + "\n" + clean) > 0;
 }
 
 std::string ControlHandler::file_preview(const SiteConfig& site, const std::string& site_root, const json::Value& body, const json::Value& checked,
@@ -2337,8 +2345,9 @@ void ControlHandler::site_files(Stream& s, std::string_view name, const json::Va
         }
     }
     const std::vector<std::string> before = change && !dry_run ? validation_errors(*backend_) : std::vector<std::string>{};
+    const bool approved = approving_ != nullptr;  // set only while this request is dispatched, not when the helper answers
     backend_->install_async(req, [this, &s, what = std::string(what), op, change, dry_run, before, rel = parsed.path, to = parsed.to, site_root,
-                                  domain = site->server_names.front(), done, new_content, new_is_text](json::Value r) {
+                                  domain = site->server_names.front(), done, new_content, new_is_text, approved](json::Value r) {
         const bool ok = r["ok"].boolean();
         // The answer without the texts whole: current keeps exists, bytes, sha256 and mode.
         auto without_texts = [](const json::Value& in) {
@@ -2372,11 +2381,33 @@ void ControlHandler::site_files(Stream& s, std::string_view name, const json::Va
             else if (cur["exists"].boolean() && cur["text"].is_string()) diff = control::unified_diff(cur["text"].str(), after, 0);
             else if (cur["exists"].boolean()) diff = "the file there is not shown (binary, or larger than " + std::to_string(files::kContentMax / 1024) + " KB); its new text:\n" + control::unified_diff("", after, 0);
             else diff = control::unified_diff("", after, 0);
+            // A credential file's diff shows no value, its context lines included: the preview is kept
+            // with the waiting change, which approvals_list hands to any admin client (the grabloop.app
+            // report: DB_PASSWORD stood in the context of a .env edit).
+            if (r["secured"].boolean() && new_is_text)
+                diff = control::mask_credential_diff(diff, control::env_like_text(cur["text"].is_string() ? cur["text"].str() : std::string_view()) && control::env_like_text(after));
             r = std::move(without_texts(r).set("diff", std::move(diff)));
+        } else if (ok && (op == "write" || op == "edit")) {
+            // The real call answers no text either: the previous file whole came back here, and the answer
+            // is kept as the approval's result, which approvals_list hands out (the same report).
+            r = without_texts(r);
         }
         const SiteConfig* now_site = control::find_site(backend_->running(), domain);
         if (ok && now_site && (op == "write" || op == "edit" || op == "restore")) r.set("site_does", path_verdict(backend_->running(), *now_site, site_root, rel));
         if (ok && now_site && op == "move") r.set("site_does", path_verdict(backend_->running(), *now_site, site_root, to));
+        if (op == "read" && ok && !dry_run && r["credentials"].boolean() && !approved) {
+            // A private key by its first line under a name no rule knew (a deploy key, shared/deploy_key):
+            // nothing of it is answered; the path is remembered, so asking again queues the read for a
+            // person's approval like a .env's.
+            std::string clean, why;
+            if (archive::clean_path(rel.starts_with("/") ? std::string_view(rel).substr(1) : std::string_view(rel), clean, why)) key_files_.insert(domain + "\n" + clean);
+            audit_peer(s, what, "read withheld: " + std::string(r.get("path")) + " is a private key by its first line");
+            reply(s, 409, json::Value::object().set("ok", false).set("credentials", true).set("path", r.get("path"))
+                              .set("error", std::string(r.get("path")) + " is a private key (its first line says so): its content is not answered without a person's approval; "
+                                            "read it again and the read waits for approval, like a .env's"));
+            done();
+            return;
+        }
         if (op == "read" && ok && r["credentials"].boolean()) audit_peer(s, what, "read " + std::string(r.get("path")) + " (a credential file, " + std::to_string(static_cast<long>(r["size"].num())) + " bytes)");
         if (change && !dry_run) {
             std::string line = ok ? op + " " + std::string(r.get("path").empty() ? r.get("from") : r.get("path")) : "failed: " + std::string(r.get("error"));
@@ -2443,8 +2474,63 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
     if (site_root.empty() || !control::safe_path(site_root, why))
         return answer(409, json::Value::object().set("error", "the site has no directory a task can run in" + (why.empty() ? std::string() : ": " + why))
                                .set("hint", "the site's root is the project directory tasks run in; site_update sets it"));
+    // Where and with what it runs: Laravel's rows in the release that holds artisan, with the site's own
+    // PHP version's command-line binary (the grabloop.app report); every other row in the project.
+    const control::TaskSetup setup = control::task_setup(cfg, *site, *row);
+    if (!setup.error.empty()) {
+        json::Value f = json::Value::object().set("error", setup.error).set("task", task);
+        if (!setup.run_as_root.empty()) f.set("run_as_root", json::Value::array().push(setup.run_as_root));
+        return answer(409, f);
+    }
     const bool dry_run = body["dry_run"].boolean();
     const std::string key = site->server_names.front();
+    // The site's scheduler timer (2026-11-04, the grabloop.app answer): schedule_run every minute, quietly.
+    // It holds no task slot, so a deploy's migrate is never refused for it, and is skipped while a task
+    // runs on the site or the previous minute's still runs; its runs are kept apart from the deploy's
+    // output, and the audit log names them only when their outcome changes.
+    if (body["scheduled"].boolean()) {
+        if (task != "schedule_run" || dry_run)
+            return answer(400, json::Value::object().set("error", "scheduled is for schedule_run without dry_run: what the site's scheduler timer runs (site_service_unit)"));
+        ScheduleRecord& rec = schedule_[key];
+        const auto busy = running_tasks_.find(key);
+        if (busy != running_tasks_.end() || scheduling_.count(key)) {
+            ++rec.skipped;
+            rec.last_skipped_at = now_stamp();
+            return answer(409, json::Value::object().set("ok", false).set("skipped", true)
+                                   .set("error", busy != running_tasks_.end() ? "a task runs on the site (" + busy->second + "): this minute's schedule_run is skipped"
+                                                                              : "the previous minute's schedule_run still runs: this one is skipped"));
+        }
+        scheduling_.insert(key);
+        json::Value sreq = json::Value::object().set("op", "task_run").set("site", key).set("task", task).set("params", params).set("dry_run", false)
+                               .set("app", app).set("root", setup.dir).set("secrets", site_secrets(*site, setup.dir));
+        if (!setup.program.empty()) sreq.set("program", setup.program);
+        backend_->task_async(sreq, [this, &s, what = std::string(what), key, done](json::Value r) {
+            scheduling_.erase(key);
+            ScheduleRecord& rec = schedule_[key];
+            const bool ok = r["ok"].boolean();
+            const bool changed = rec.runs == 0 || rec.last_ok != ok;
+            ++rec.runs;
+            if (!ok) ++rec.failures;
+            rec.last_at = now_stamp();
+            rec.last_ok = ok;
+            rec.last_exit = r["exit"].type() == json::Value::Type::number ? r["exit"].num() : -1;
+            rec.last_duration_ms = r["duration_ms"].num();
+            rec.last_error = std::string(r.get("error"));
+            std::string out(r.get("output"));
+            if (out.size() > 2048) {
+                std::size_t at = out.size() - 2048;
+                while (at < out.size() && (static_cast<unsigned char>(out[at]) & 0xc0) == 0x80) ++at;  // never inside a UTF-8 character
+                out = out.substr(at);
+            }
+            rec.last_output = out;
+            if (changed)
+                audit_peer(s, what, std::string("scheduled schedule_run ") + (ok ? "ran" : "failed: " + rec.last_error) + " as " + std::string(r.get("as")) + " in " +
+                                        std::string(r.get("cwd")) + "; later runs are logged only when the outcome changes");
+            reply(s, ok ? 200 : 409, r);
+            done();
+        });
+        return;
+    }
     // A task whose caller names what gets installed (pip_install) runs only once a person approved it
     // with a code from their authenticator app (docs/design-site-operations.md 27, the owner's decision
     // of 2026-11-01): the gate in mutate holds it back, and only the approved change it runs gets here
@@ -2462,7 +2548,8 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
         if (const auto it = running_tasks_.find(key); it != running_tasks_.end())
             return answer(409, json::Value::object().set("error", "a task is already running on this site: " + it->second + "; one task per site at a time").set("running", it->second));
     json::Value req = json::Value::object().set("op", "task_run").set("site", key).set("task", task).set("params", params).set("dry_run", dry_run)
-                          .set("app", app).set("root", site_root).set("secrets", site_secrets(*site, site_root));
+                          .set("app", app).set("root", setup.dir).set("secrets", site_secrets(*site, setup.dir));
+    if (!setup.program.empty()) req.set("program", setup.program);
     if (python_app(app)) {  // what a Django site's tasks are told (the helper derives the same from the file on disk)
         const AppContext ac = app_context(cfg, *site);
         req.set("project", site->project).set("hosts", ac.hosts).set("origins", ac.origins).set("base_url", ac.base_url)
@@ -2472,7 +2559,7 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
         running_tasks_[key] = task + " (since " + now_stamp() + ")";
         std::string given;
         for (const auto& m : params.members()) given += " " + m.first + "=" + m.second.str();
-        audit_peer(s, what, "running task " + task + given + " in " + site_root + (confirmed_how.empty() ? std::string() : ", " + confirmed_how));
+        audit_peer(s, what, "running task " + task + given + " in " + setup.dir + (confirmed_how.empty() ? std::string() : ", " + confirmed_how));
     }
     const std::vector<std::string> before = dry_run ? std::vector<std::string>{} : validation_errors(*backend_);
     // A running Rails application loads its gems, schema and assets at start: after a task
@@ -2572,10 +2659,17 @@ const SiteConfig* env_site(const Config& cfg, std::string_view name, int& status
         refusal = json::Value::object().set("error", "no such site").set("site", std::string(name));
         return nullptr;
     }
-    if (!proxy_app(site->app)) {
+    if (schedule_app(site->app) && site->env_file.empty()) {
+        status = 422;
+        refusal = json::Value::object().set("error", "site " + std::string(name) + " names no env_file, the .env its application reads")
+                      .set("hint", "site_update with env_file (\"shared/.env\" beside the releases, or \".env\"); site_env and site_env_set then read and write it");
+        return nullptr;
+    }
+    if (!proxy_app(site->app) && !schedule_app(site->app)) {
         status = 422;
         refusal = json::Value::object().set("error", "site " + std::string(name) + " has app = \"" + (site->app.empty() ? std::string("static") : site->app) +
-                                                         "\"; a site's environment is for applications agensio runs (app = \"rails\", \"redmine\", \"django\", \"wagtail\", \"node\" or \"proxy\")")
+                                                         "\"; a site's environment is for applications agensio runs (app = \"rails\", \"redmine\", \"django\", \"wagtail\", \"node\" or \"proxy\") "
+                                                         "and Laravel sites (app = \"laravel\", or \"php\" with env_file)")
                       .set("app", site->app);
         return nullptr;
     }
@@ -2607,15 +2701,67 @@ void ControlHandler::site_service(Stream& s, std::string_view name, bool logs, s
         done();
         return;
     }
-    if (!service_app(site->app) || site->user.empty()) {
+    if (!schedule_app(site->app) && (!service_app(site->app) || site->user.empty())) {
         reply(s, 409, json::Value::object()
                           .set("error", "site " + site->server_names.front() + " has no application service")
                           .set("hint", "a Rails or Django site (app = \"rails\", \"redmine\", \"django\" or \"wagtail\") with its own user has one, "
-                                       "agensio-app-<user>.service, rendered by site_service_unit"));
+                                       "agensio-app-<user>.service, rendered by site_service_unit; a Laravel site has its scheduler there"));
         done();
         return;
     }
     const std::string key = site->server_names.front();
+    // A Laravel site (2026-11-04, the grabloop.app answer): its scheduler, so whoever looks knows one
+    // exists before making another: agensio's timer as installed, any cron line that runs schedule:run
+    // for the site, and the runs agensio recorded.
+    if (schedule_app(site->app) && !logs) {
+        backend_->helper_async(json::Value::object().set("op", "app_status").set("site", key), [this, &s, key, done](json::Value r) {
+            if (r["busy"].boolean()) {
+                reply(s, 503, json::Value::object().set("error", "the provisioning helper is busy with a task or an install; ask again when it finishes").set("busy", true));
+                done();
+                return;
+            }
+            if (!r["ok"].boolean()) {
+                reply(s, 409, r);
+                done();
+                return;
+            }
+            json::Value v = r["scheduler"];
+            const json::Value& ts = v["timer"];
+            const bool installed = v["installed"].boolean(), on = installed && (v["enabled"].boolean() || v["active"].boolean());
+            const std::size_t crons = v["cron"].items().size();
+            std::string cron_text;
+            for (const auto& c : v["cron"].items()) cron_text += (cron_text.empty() ? "" : ", ") + std::string(c.get("file")) + " line " + std::to_string(static_cast<long>(c["line"].num()));
+            std::string summary;
+            json::Value steps = json::Value::array();
+            if (on) summary = "agensio's scheduler " + std::string(v.get("timer_unit")) + " is installed and " + std::string(ts.get("ActiveState")) +
+                              (std::string(ts.get("LastTriggerUSec")).empty() ? std::string() : ", last started " + std::string(ts.get("LastTriggerUSec"))) +
+                              (std::string(ts.get("NextElapseUSecRealtime")).empty() ? std::string() : ", next " + std::string(ts.get("NextElapseUSecRealtime")));
+            else if (installed) summary = "agensio's scheduler " + std::string(v.get("timer_unit")) + " is installed but not enabled: it does not run";
+            else summary = "agensio's scheduler timer is not installed";
+            if (crons) summary += "; cron runs schedule:run for this site (" + cron_text + ")";
+            const bool duplicate = (on && crons) || crons > 1;
+            if (duplicate) steps.push("two schedulers run every scheduled command twice: keep one (health site_schedule_duplicate says how); make no other");
+            else if (on || crons) steps.push("a scheduler exists: make no other");
+            else steps.push("no scheduler runs: site_service_unit " + key + " renders agensio's; root installs it once with its run_as_root lines");
+            if (installed && v["enabled"].boolean() == false && !crons) steps.push("as root: systemctl enable --now " + std::string(v.get("timer_unit")));
+            if (v["matches_render"].type() == json::Value::Type::boolean && !v["matches_render"].boolean())
+                steps.push("the installed units are not what site_service_unit renders now: root installs the render again");
+            json::Value out = json::Value::object().set("ok", true).set("site", key).set("kind", "scheduler").set("summary", summary).set("scheduler", v)
+                                  .set("duplicate", duplicate).set("next_steps", std::move(steps));
+            if (const auto it = schedule_.find(key); it != schedule_.end()) {
+                const ScheduleRecord& rec = it->second;
+                out.set("runs", json::Value::object().set("since_start", static_cast<double>(rec.runs)).set("failed", static_cast<double>(rec.failures))
+                                    .set("skipped", static_cast<double>(rec.skipped)).set("last_at", rec.last_at).set("last_ok", rec.last_ok)
+                                    .set("last_exit", rec.last_exit).set("last_duration_ms", rec.last_duration_ms).set("last_error", rec.last_error)
+                                    .set("last_output_end", rec.last_output).set("last_skipped_at", rec.last_skipped_at));
+            } else {
+                out.set("runs", json::Value::object().set("since_start", 0.0).set("note", "no scheduled run reached agensio since it started"));
+            }
+            reply(s, 200, out);
+            done();
+        });
+        return;
+    }
     json::Value req = json::Value::object().set("op", logs ? "app_logs" : "app_status").set("site", key);
     if (logs) {
         const std::string lines = control::query_value(s.request.target, "lines");
@@ -2723,8 +2869,10 @@ void ControlHandler::site_env_show(Stream& s, std::string_view name, std::functi
         reveal.push(n);
     }
     const std::string key = site->server_names.front();
-    const bool rails = rails_app(site->app), django = python_app(site->app), node = node_app(site->app);
-    backend_->env_async(json::Value::object().set("op", "env_read").set("site", key).set("reveal", reveal), [this, &s, key, rails, django, node, done](json::Value r) {
+    const bool rails = rails_app(site->app), django = python_app(site->app), node = node_app(site->app), laravel = schedule_app(site->app);
+    json::Value ereq = json::Value::object().set("op", "env_read").set("site", key).set("reveal", reveal);
+    if (laravel) ereq.set("dotenv", true).set("project", site->project_root.empty() ? site->root : site->project_root).set("env_file", site->env_file);
+    backend_->env_async(ereq, [this, &s, key, rails, django, node, laravel, done](json::Value r) {
         const std::string what = "sites/" + key + "/env";
         if (!r["ok"].boolean()) {
             audit_peer(s, what, "read refused: " + std::string(r.get("error")));
@@ -2740,7 +2888,11 @@ void ControlHandler::site_env_show(Stream& s, std::string_view name, std::functi
             // The hint follows the preset (Django report against alpha.33: a proxy site was told
             // about SECRET_KEY_BASE and tasks it does not have).
             std::string hint;
-            if (r["exists"].boolean())
+            if (laravel)
+                hint = std::string("the application's own .env (") + std::string(r.get("file")) + "): names, lengths and fingerprints only; a value only for a name in reveal, "
+                       "only when the user asked to see it. site_env_set changes it (generate: [\"APP_KEY\"] writes Laravel's key); a release that cached its "
+                       "configuration (the optimize task) reads it again only after optimize";
+            else if (r["exists"].boolean())
                 hint = std::string("names, lengths and fingerprints only (the same fingerprint means the same value); a value is returned only when its "
                                    "name is in reveal, and only when the user asked to see it. site_env_set changes them; ") +
                        (rails || django || node ? "the tasks read the file on their next run, the application when its service restarts"
@@ -2792,6 +2944,8 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
     json::Value req = json::Value::object().set("op", "env_write").set("site", key);
     for (const char* k : {"set", "unset", "generate"})
         if (!body[k].is_null()) req.set(k, body[k]);
+    const bool laravel = schedule_app(site->app);
+    if (laravel) req.set("dotenv", true).set("project", site->project_root.empty() ? site->root : site->project_root).set("env_file", site->env_file);
     std::string plan;
     auto list = [&](const char* verb, const std::vector<std::string>& names) {
         if (names.empty()) return;
@@ -2812,7 +2966,7 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
         ? "the application reads it when its service restarts: the unit site_service_unit renders loads the file (EnvironmentFile=); as root, systemctl restart agensio-app-" + site->user + ".service"
         : std::string("the application reads it when its service restarts: the unit that runs it must load the file (EnvironmentFile=, the file named above); root restarts that unit");
     const bool django = python_app(site->app);
-    backend_->env_async(req, [this, &s, what = std::string(what), restart, django, done](json::Value r) {
+    backend_->env_async(req, [this, &s, what = std::string(what), restart, django, laravel, key, done](json::Value r) {
         if (!r["ok"].boolean()) {
             audit_peer(s, what, "refused: " + std::string(r.get("error")));
             reply(s, 409, r);
@@ -2832,6 +2986,13 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
                                                          " others could read: give " + (r["still_exposed"].items().size() == 1 ? "it" : "them") +
                                                          " a new value (generate for a generated secret; change a password where it is used too), and health warns until then"));
         json::Value steps = json::Value::array();
+        if (laravel) {  // the application reads its .env at each request, unless its configuration is cached
+            steps.push("a release that ran the optimize task keeps the old values in its cached configuration until optimize runs again: site_task " + key + " optimize");
+            r.set("next_steps", steps);
+            reply(s, 200, r);
+            done();
+            return;
+        }
         // The first admin's DJANGO_SUPERUSER_* names are createsuperuser's alone: the unit unsets
         // them, so no restart hands them to the application (alpha.35 report, P4 c).
         std::size_t superuser = 0, changed = 0;
@@ -3264,6 +3425,13 @@ bool ControlHandler::approvals_post(Stream& s, WorkerState& ws, std::string_view
             }
             ids->push_back(c->id);
         }
+        // In the order they were queued, whatever order the ids came in: a deploy queues the install
+        // before the switch to it, and a batch stops at its first failure.
+        std::vector<std::string> queued;
+        for (const control::PendingChange* c : approvals_.all(now)) queued.push_back(c->id);
+        std::stable_sort(ids->begin(), ids->end(), [&](const std::string& a, const std::string& b) {
+            return std::find(queued.begin(), queued.end(), a) < std::find(queued.begin(), queued.end(), b);
+        });
     }
     std::string list;
     for (const auto& id : *ids) list += (list.empty() ? "" : ", ") + id;
@@ -3345,6 +3513,18 @@ void ControlHandler::run_approved(std::shared_ptr<std::vector<std::string>> ids,
                 p->result = std::move(v);
                 p->state = p->status >= 200 && p->status < 300 ? control::PendingChange::State::done : control::PendingChange::State::failed;
                 p->finished = at;
+                // A batch stops at its first failure: the changes approved after it in the same code are
+                // not run (the grabloop.app answer: a deploy queues the install, the switch to it and the
+                // deletes of older releases together, and a switch after a failed install serves a release
+                // that is not there).
+                if (p->state == control::PendingChange::State::failed)
+                    for (std::size_t k = next + 1; k < ids->size(); ++k)
+                        if (control::PendingChange* later = approvals_.find((*ids)[k], at); later && later->state == control::PendingChange::State::running) {
+                            later->state = control::PendingChange::State::skipped;
+                            later->status = 0;
+                            later->finished = at;
+                            later->result = json::Value::object().set("ok", false).set("error", "not run: " + id + " (" + p->path.substr(3) + "), approved with it and before it, failed; queue it again when that is fixed");
+                        }
             }
             run_approved(ids, next + 1, ws, finished);
         };

@@ -187,6 +187,7 @@ set(AGENSIO_CORE_SOURCES
   src/services/install.cpp
   src/services/tasks.cpp
   src/services/appenv.cpp
+  src/services/dotenv.cpp
   src/services/totp.cpp
   src/services/files.cpp
   src/services/history.cpp

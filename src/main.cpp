@@ -72,7 +72,7 @@ void usage(std::ostream& out = std::cout) {
                  "                      Change (need --yes, take --reason TEXT): reload | logs-reopen |\n"
                  "                      site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F]\n"
                  "                           [--user U|--no-user] [--group G] [--app static|php|laravel|drupal|wordpress|grav|proxy|rails|redmine|django|wagtail|node]\n"
-                 "                           [--root DIR] [--served-dir DIR] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S] [--php-children N]\n"
+                 "                           [--root DIR] [--served-dir DIR] [--env-file F] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S] [--php-children N]\n"
                  "                           [--php-version V] [--cut-requests] [--ignore-requirements]\n"
                  "                           [--no-redirect] [--hsts LIFETIME [--hsts-subdomains]|--no-hsts] [--canonical NAME] [--listen-plain A] [--listen-tls A|--listen-default]\n"
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
@@ -598,7 +598,7 @@ int main(int argc, char** argv) {
                              "                    for [control] trash_keep days; the account is kept\n"
                              "        site-restore ENTRY | trash-delete ENTRY | trash-expire (the trash's entries: `trash` lists them)\n"
                              "        site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F] [--user U|--no-user]\n"
-                             "                    [--group G] [--app NAME] [--root DIR] [--served-dir DIR] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S]\n"
+                             "                    [--group G] [--app NAME] [--root DIR] [--served-dir DIR] [--env-file F] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S]\n"
                              "                    [--php-children N] [--php-version V] [--no-redirect] [--canonical NAME] [--listen-plain A] [--listen-tls A]\n"
                              "                    [--listen-default] (the server's addresses, [server] listen_tls / listen_plain, which a site takes unless\n"
                              "                    given its own; --listen-default hands one with its own back to them)\n"
@@ -834,6 +834,7 @@ int main(int argc, char** argv) {
                 } else if (b == "--user") field("user");
                 else if (b == "--no-user") body.set("no_user", true);
                 else if (b == "--dry-run") body.set("dry_run", true);
+                else if (b == "--scheduled") body.set("scheduled", true);  // site-task schedule_run from the site's scheduler timer
                 else if (b == "--cut-requests") body.set("cut_requests", true);
                 else if (b == "--ignore-requirements") body.set("ignore_requirements", true);
                 else if (b == "--group") field("group");
@@ -843,6 +844,7 @@ int main(int argc, char** argv) {
                 else if (b == "--project") field("project");
                 else if (b == "--entry") field("entry");
                 else if (b == "--served-dir") field("served_dir");
+                else if (b == "--env-file") field("env_file");
                 else if (b == "--files") body.set("files", true);
                 else if (b == "--private" || b == "--entry-point") {
                     std::string v; value(v);
@@ -1513,7 +1515,20 @@ int main(int argc, char** argv) {
                 agensio::json::Value u;
                 std::string perr;
                 if (reply.status == 200 && agensio::json::parse(reply.body, u, perr)) {
-                    if (command == "site-unit") text = u.get("unit");
+                    if (command == "site-unit" && u["units"].is_array()) {
+                        // Several units (a Laravel site's scheduler: its .service and its .timer): the one
+                        // the file's name names.
+                        const std::string base = std::filesystem::path(out_file).filename().string();
+                        std::string names;
+                        for (const auto& one : u["units"].items()) {
+                            if (std::string(one.get("name")) == base) text = one.get("unit");
+                            names += (names.empty() ? "" : ", ") + std::string(one.get("name"));
+                        }
+                        if (text.empty()) {
+                            std::cerr << "ctl: the site has " << names << ": --out names one of them by its file name; " << out_file << " is unchanged\n";
+                            return 2;
+                        }
+                    } else if (command == "site-unit") text = u.get("unit");
                     else if (raw_part == "nft") text = u["firewall"].get("ruleset");
                     else if (raw_part == "unit") text = u["firewall"].get("unit_text");
                     else if (raw_part == "jail") text = u["fail2ban"].get("jail");
@@ -1542,6 +1557,10 @@ int main(int argc, char** argv) {
                 agensio::json::Value u;
                 std::string perr;
                 if (agensio::json::parse(reply.body, u, perr)) {
+                    if (command == "site-unit" && u["units"].is_array()) {  // a Laravel site's scheduler: each unit under its name
+                        for (const auto& one : u["units"].items()) std::cout << "### " << std::string(one.get("path")) << "\n" << std::string(one.get("unit")) << "\n";
+                        return 0;
+                    }
                     std::cout << u.get(command == "site-unit" ? "unit" : "output");
                     return 0;
                 }

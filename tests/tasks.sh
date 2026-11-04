@@ -17,7 +17,7 @@ PYRT_TOP=/opt/agensio-tasks-py; PYRT=$PYRT_TOP/bin   # a Python laid out as a di
 NODERT=/opt/agensio-tasks-node                           # a node and an npm that report what they were given
 pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
-cleanup() { for b in systemctl journalctl; do [ -e /usr/bin/$b.agensio-orig ] && mv -f /usr/bin/$b.agensio-orig /usr/bin/$b; done; [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; sleep 0.3; for u in r1 r2 r3 r4 r5 r6; do pkill -9 -u $u 2>/dev/null; userdel $u 2>/dev/null; done; rm -rf "$T" "$RT" "$PYRT_TOP" "$NODERT"; }
+cleanup() { for b in systemctl journalctl; do [ -e /usr/bin/$b.agensio-orig ] && mv -f /usr/bin/$b.agensio-orig /usr/bin/$b; done; [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; sleep 0.3; for u in r1 r2 r3 r4 r5 r6 r9; do pkill -9 -u $u 2>/dev/null; userdel $u 2>/dev/null; done; rm -rf "$T" "$RT" "$PYRT_TOP" "$NODERT"; }
 trap cleanup EXIT
 id -u agensio >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin agensio
 mkdir -p $T/sites.d $T/logs $T/run $T/state $T/www $T/default $RT; chown agensio:agensio $T/sites.d $T/logs $T/state; chmod 751 $T/state; chmod 755 $RT
@@ -63,6 +63,15 @@ case "$*" in
 esac
 SH
 chmod 755 $RT/ruby $RT/gem $RT/bundle
+# The fake PHP 9.9 (2026-11-04, the grabloop.app report): a root-configured runtime whose command-line
+# binary reports what Laravel's tasks gave it; an FPM side that is never started.
+cat > $RT/php9.9 <<'SH'
+#!/bin/sh
+echo "prog=php9.9 args=$*"; echo "uid=$(id -un) cwd=$(pwd)"
+if [ -e slow ]; then sleep 3; fi
+SH
+printf '#!/bin/sh\necho "PHP 9.9.0 (fpm-fcgi)"\n' > $RT/php-fpm9.9; : > $RT/php-fpm9.9.conf; mkdir -p $RT/pool.d
+chmod 755 $RT/php9.9 $RT/php-fpm9.9
 
 # The fake Python (2026-09-28, Django and Wagtail): what venv, pip, wagtail start and manage.py
 # would leave, and the environment each run got. A shebang script cannot see the argv[0] it was
@@ -144,6 +153,11 @@ sites_root = "$T/www"
 runtimes = { ruby = "$RT", python3 = "$PYRT", node = "$NODERT" }
 task_limits = { timeout = 5, processes = 256 }
 $1
+[php.runtimes."9.9"]
+fpm = "$RT/php-fpm9.9"
+conf = "$RT/php-fpm9.9.conf"
+pools = "$RT/pool.d"
+cli = "$RT/php9.9"
 [[site]]
 server_name = ["*"]
 listen = ["127.0.0.1:18397"]
@@ -417,6 +431,80 @@ rm -f $T/env/r2.test.env; ctl health > /dev/null
 check "a ledger entry with neither a site nor a file is pruned" "no" "$(grep -q '^r2.test ' $T/env/.exposed 2>/dev/null && echo yes || echo no)"
 check "unsetting every variable removes the file and the answer says so" "yes no" "$(ctl site-env-set r1.test --unset DATABASE_URL --unset SECRET_KEY_BASE --yes --reason empty > $T/out; j '"yes" if d["removed"].endswith("r1.test.env") and "no variables left" in d["done"][0] else d') $([ -e $T/env/r1.test.env ] && echo yes || echo no)"
 check "health: no PHP finding and no unreadable-files finding for the rails sites (nothing is served from their root); the site file names app = rails" "no yes" "$(ctl health | grep -q 'php_tmp_missing\|pools_stale\|files_unreadable' && echo yes || echo no) $(grep -q '^app = "rails"' $T/sites.d/r1.test.toml && echo yes)"
+
+# Laravel's tasks on a php site (2026-11-04, the grabloop.app report): in the release that holds artisan,
+# the nearest from served_dir up, with the site's own PHP version's command-line binary, as its account.
+LV=$T/www/lv.test
+out=$(ctl site-create --domain lv.test --app php --root $LV --served-dir releases/r1/public --user r9 --php-socket unix:$T/run/lv.sock --https none --listen-plain 127.0.0.1:18399 --yes --reason laravel)
+# A php root runs files, so its creation waits for a person's approval (docs/approvals.md).
+echo "$out" | grep -q '"pending":true' && out=$(approve)
+mkdir -p $LV/releases/r1/public $LV/releases/r2/public $LV/shared; echo '<?php' > $LV/releases/r1/artisan; chown -R r9:r9 $LV/releases $LV/shared
+check "a php site with served_dir on a release lists Laravel's seven tasks, in the release that holds artisan, with the site's PHP binary" "yes 7 $LV/releases/r1 $RT/php9.9 True" \
+  "$(echo "$out" | grep -q '"ok":true' && echo yes) $(ctl site-tasks lv.test > $T/out; j 'len(d["tasks"]), d["directory"], [t for t in d["tasks"] if t["task"] == "optimize"][0]["interpreter"]["program"], all(t["interpreter"]["ok"] for t in d["tasks"])' | tr -d '(),' | tr -d "'")"
+ctl site-task lv.test migrate_force --yes --reason deploy > $T/out
+check "migrate_force runs php9.9 artisan migrate --force as r9 in the release" "True yes yes" \
+  "$(j 'd["ok"]') $(grep -q 'prog=php9.9 args=artisan migrate --force --no-interaction' $T/out && echo yes) $(grep -q "uid=r9 cwd=$LV/releases/r1" $T/out && echo yes)"
+ctl site-update lv.test --served-dir releases/r2/public --yes --reason switch > /dev/null; approve > /dev/null
+ctl site-task lv.test optimize --yes --reason deploy > $T/out
+check "after a switch to a release without artisan, the task is refused before it runs, naming artisan" "False yes" "$(j 'd["ok"]') $(grep -q 'no artisan file' $T/out && echo yes)"
+echo '<?php' > $LV/releases/r2/artisan; chown r9:r9 $LV/releases/r2/artisan
+
+# A Laravel site's own .env (2026-11-04, the grabloop.app answer): env_file names it; site_env_set writes it
+# root's with the site's group, 0640, every other line kept; site_env shows names and lengths, no value.
+printf '# mine\nAPP_NAME=Grab\nDB_PASSWORD=old\n' > $LV/shared/.env; chown r9:r9 $LV/shared/.env; chmod 600 $LV/shared/.env
+check "site-env on a php site without env_file is refused with the way" "yes" "$(ctl site-env lv.test > $T/out 2>&1; grep -q 'names no env_file' $T/out && echo yes)"
+ctl site-update lv.test --env-file shared/.env --yes --reason env > /dev/null
+ctl site-env-set lv.test --set APP_DEBUG=false --generate APP_KEY --yes --reason env > $T/out
+check "site-env-set writes the site's .env: root's, the site's group, 0640; the other lines kept; APP_KEY in Laravel's form; no value in the answer; optimize named" \
+  "True root $(id -gn r9) 640 yes APP_KEY 51 no yes" \
+  "$(j 'd["ok"]') $(stat -c '%U %G %a' $LV/shared/.env) $(grep -q '^# mine$' $LV/shared/.env && grep -q '^APP_NAME=Grab$' $LV/shared/.env && grep -q '^DB_PASSWORD=old$' $LV/shared/.env && grep -q '^APP_DEBUG=false$' $LV/shared/.env && echo yes) $(j '",".join(d["generated"])') $(sed -n 's/^APP_KEY=//p' $LV/shared/.env | tr -d '\n' | wc -c) $(grep -q 'base64:\|=old' $T/out && echo yes || echo no) $(j '"yes" if "optimize" in d["next_steps"][0] else d.get("next_steps")')"
+ctl site-env lv.test > $T/out
+check "site-env lists the .env's names with their lengths, no value, and names optimize" "APP_NAME,DB_PASSWORD,APP_DEBUG,APP_KEY 51 no yes" \
+  "$(j '",".join(v["name"] for v in d["variables"]) + " " + str(int([v for v in d["variables"] if v["name"] == "APP_KEY"][0]["length"]))') $(grep -q 'base64:\|"old"\|Grab' $T/out && echo yes || echo no) $(j '"yes" if "optimize" in d["hint"] else d["hint"]')"
+check "the site's account reads its .env and cannot write it in place" "yes no" "$(su -s /bin/sh r9 -c "cat $LV/shared/.env" > /dev/null 2>&1 && echo yes) $(su -s /bin/sh r9 -c "echo x >> $LV/shared/.env" 2>/dev/null && echo yes || echo no)"
+
+# The scheduler (2026-11-04, the grabloop.app answer): the timer asks for schedule_run with --scheduled;
+# it holds no task slot, is skipped while a task runs, keeps the deploy's output, and the audit log
+# names it only when its outcome changes.
+for i in 1 2; do ctl site-task lv.test schedule_run --scheduled --yes --reason scheduler > $T/out; done
+check "a scheduled schedule_run runs php9.9 artisan schedule:run in the live release; twice, one audit line; the deploy's output kept" "True yes 1 yes" \
+  "$(j 'd["ok"]') $(grep -q 'args=artisan schedule:run --no-interaction' $T/out && echo yes) $(grep -c 'scheduled schedule_run ran' $T/logs/audit.log) $(ctl site-task-output lv.test > $T/out2; grep -q 'migrate --force' $T/out2 && ! grep -q 'schedule:run' $T/out2 && echo yes)"
+check "--scheduled is for schedule_run alone" "400" "$(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS -X POST -H 'Content-Type: application/json' -d '{"task":"optimize","scheduled":true,"confirm":true}' http://control/v1/sites/lv.test/task)"
+touch $LV/releases/r2/slow; chown r9:r9 $LV/releases/r2/slow
+ctl site-task lv.test optimize --yes --reason deploy > $T/out.bg & BG=$!; sleep 1
+ctl site-task lv.test schedule_run --scheduled --yes --reason scheduler > $T/out
+wait $BG
+check "while a deploy task runs, the minute's scheduled run is skipped, and the deploy task is not refused for it" "True yes True" \
+  "$(j 'd["skipped"]') $(grep -q 'a task runs on the site' $T/out && echo yes) $(python3 -c "import json; print(json.load(open('$T/out.bg'))['ok'])")"
+rm -f $LV/releases/r2/slow
+ctl site-unit lv.test > $T/out
+check "site-unit renders the scheduler: two units, the service asking agensio as the server's account, nothing naming a release; --out writes the one it names" "scheduler 2 yes yes 0 2" \
+  "$(j 'd["kind"], len(d["units"])' | tr -d '(),' | tr -d "'") $(j '"yes" if "User=agensio" in d["units"][0]["unit"] and "ctl site-task lv.test schedule_run --scheduled" in d["units"][0]["unit"] and "releases" not in d["units"][0]["unit"] else d["units"][0]["unit"]') $(j '"yes" if "OnCalendar=*-*-* *:*:00" in d["units"][1]["unit"] else d["units"][1]["unit"]') $(mkdir -p $T/units; ctl site-unit lv.test --out $T/units/agensio-schedule-lv.test.timer > /dev/null; echo $?) $(ctl site-unit lv.test --out $T/units/other.timer > /dev/null 2>&1; echo $?)"
+if [ -f /.dockerenv ] && [ "$(cat /proc/1/comm)" != systemd ]; then
+  [ -e /usr/bin/systemctl ] && [ ! -e /usr/bin/systemctl.agensio-orig ] && mv /usr/bin/systemctl /usr/bin/systemctl.agensio-orig
+  cat > /usr/bin/systemctl <<SH
+#!/bin/sh
+state=\$(cat $T/sched-state 2>/dev/null || echo missing)
+for u in "\$@"; do
+  case "\$u" in agensio-schedule-*) ;; *) continue ;; esac
+  if [ "\$state" = missing ]; then printf 'Id=%s\nLoadState=not-found\nActiveState=inactive\n\n' "\$u"
+  else printf 'Id=%s\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\nFragmentPath=/etc/systemd/system/%s\nLastTriggerUSec=Wed 2026-11-04 10:00:00 UTC\n\n' "\$u" "\$u"; fi
+done
+SH
+  chmod 755 /usr/bin/systemctl
+  ctl site-service lv.test > $T/out
+  check "site-service on a Laravel site: no scheduler installed, nothing in cron, the two runs recorded, the way to render one" "False 0 2 yes" \
+    "$(j 'd["scheduler"]["installed"], len(d["scheduler"]["cron"]), d["runs"]["since_start"]' | tr -d '(),') $(j '"yes" if "site_service_unit lv.test" in d["next_steps"][0] else d["next_steps"]')"
+  mkdir -p /var/spool/cron/crontabs; printf '# m h dom mon dow command\n* * * * * cd %s/releases/r2 && php artisan schedule:run >> /dev/null 2>&1\n' "$LV" > /var/spool/cron/crontabs/r9
+  ctl site-service lv.test > $T/out
+  check "a cron line of the site's account that runs schedule:run is named by file and line, never by its text; make no other" "/var/spool/cron/crontabs/r9 2 no yes" \
+    "$(j 'd["scheduler"]["cron"][0]["file"], int(d["scheduler"]["cron"][0]["line"])' | tr -d '(),' | tr -d "'") $(grep -q 'php artisan' $T/out && echo yes || echo no) $(j '"yes" if "make no other" in d["next_steps"][0] else d["next_steps"]')"
+  echo installed > $T/sched-state
+  check "agensio's timer installed beside the cron line: site-service says duplicate, health warns site_schedule_duplicate" "True warn" \
+    "$(ctl site-service lv.test > $T/out; j 'd["duplicate"]') $(ctl health > $T/out; j '[f["severity"] for f in d["findings"] if f["code"] == "site_schedule_duplicate" and f.get("site") == "lv.test"][0]')"
+  rm -f /var/spool/cron/crontabs/r9 /usr/bin/systemctl
+  [ -e /usr/bin/systemctl.agensio-orig ] && mv /usr/bin/systemctl.agensio-orig /usr/bin/systemctl
+fi
 
 stop
 write_config 'task_network = false'

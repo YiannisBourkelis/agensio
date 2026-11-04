@@ -7,6 +7,7 @@
 #include <ctime>
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -231,6 +232,9 @@ private:
                              std::vector<std::string>& reasons);
     // Whether a read of `rel` on the site reveals a credential or database file.
     bool secret_file(std::string_view site, std::string_view rel);
+    // Files found to be private keys by their first line on a read that was not approved (2026-11-04): the
+    // content was withheld, and the next read of the path waits for approval like a .env's. "site\npath".
+    std::set<std::string> key_files_;
     void approvals_get(Stream& s, std::string_view id);
     bool approvals_post(Stream& s, WorkerState& ws, std::string_view rest, const json::Value& body, std::function<void()>& done);
     void run_approved(std::shared_ptr<std::vector<std::string>> ids, std::size_t next, WorkerState& ws, std::function<void()> finished);
@@ -254,6 +258,22 @@ private:
         bool cut = false;  // the task kept less than it printed
     };
     std::map<std::string, TaskOutput> last_output_;
+    // The Laravel scheduler's runs (2026-11-04, the grabloop.app answer): schedule_run asked every
+    // minute by the site's timer (--scheduled). Kept apart from last_output_ so a deploy's task output
+    // survives; worker 0, gone at a restart.
+public:
+    struct ScheduleRecord {
+        std::size_t runs = 0, failures = 0, skipped = 0;  // since the start
+        std::string last_at, last_skipped_at, last_error, last_output;  // the last run's end of output, 2 KB at most
+        bool last_ok = false;
+        double last_exit = -1, last_duration_ms = 0;
+    };
+    // Health's view (site_schedule_failing) and site_service_status's.
+    const std::map<std::string, ScheduleRecord>& schedule_records() const noexcept { return schedule_; }
+
+private:
+    std::map<std::string, ScheduleRecord> schedule_;
+    std::set<std::string> scheduling_;  // a scheduled run in flight for the site: the next minute's is skipped
     // The changes waiting for a person's approval and what became of them (worker 0; gone at a
     // restart, nothing of a waiting change applied).
     control::ApprovalStore approvals_;

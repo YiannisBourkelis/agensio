@@ -74,6 +74,32 @@ check "an edit's dry run: the diff (the line gone, the one in its place), the ve
 ctl site-file-write a.test index.html $T/page.html --overwrite --yes --reason "same" > $T/out
 check "a write of the file's own text: unchanged, no diff, not pending, nothing queued, the file untouched" "True no change yes 0 hello" \
   "$(j 'd["unchanged"]') $(j 'd["diff"].strip()') $(j '"yes" if not d.get("pending") and not d.get("needs_approval") else d') $(curl -sS --unix-socket $CS http://control/v1/approvals | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["waiting"]))') $(grep -o 'hello' $A/index.html)"
+# A private key under a name no rule knows (2026-11-04, the grabloop.app report: shared/deploy_key was
+# read with no approval): written 0600 with a preview of lengths only; its first read answers nothing of
+# it and remembers it, the next waits for approval and is handed out once.
+printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAkeymaterial\n-----END OPENSSH PRIVATE KEY-----\n' > $T/key
+ctl site-file-write a.test deploy_key $T/key --yes --reason "deploy key" > $T/out
+check "a key's write waits with a preview of lengths only, no line of the key" "True no" "$(j 'd["pending"]') $(grep -q 'keymaterial\|BEGIN OPENSSH' $T/out && echo yes || echo no)"
+approve > $T/ap
+check "approved: the key is t1's and 0600, and the approval's answer carries none of it" "t1 600 no" "$(stat -c '%U %a' $A/deploy_key) $(grep -q 'keymaterial' $T/ap && echo yes || echo no)"
+check "its first read answers nothing of it: 409, a private key by its first line" "409 no yes" \
+  "$(curl -sS -o $T/out -w '%{http_code}' --unix-socket $CS 'http://control/v1/sites/a.test/files?path=deploy_key&read=1') $(grep -q 'keymaterial' $T/out && echo yes || echo no) $(grep -q 'private key' $T/out && echo yes)"
+ctl site-file-read a.test deploy_key > $T/out
+KID=$(j 'd["id"]')
+check "the next read waits for approval; approved, the list never carries it and GET by id hands it out once" "True yes no yes no" \
+  "$(j 'd["pending"]') $(j '"yes" if d.get("needs_approval") else d') $(approve $KID > $T/ap; grep -q keymaterial $T/ap && echo yes || echo no) $(curl -sS --unix-socket $CS http://control/v1/approvals/$KID | grep -q keymaterial && echo yes) $(curl -sS --unix-socket $CS http://control/v1/approvals/$KID | grep -q keymaterial && echo yes || echo no)"
+# An approved batch stops at its first failure (the grabloop.app answer: a deploy queues the install, the
+# switch and the deletes together, and a failed install must not be followed by the switch). The write
+# is bound to its file being absent; the file appears before the approval, so the write fails, and the
+# directory queued after it is not made.
+printf 'late\n' > $T/late.txt
+ctl site-file-write a.test late.txt $T/late.txt --yes --reason "first" > $T/out; W1=$(j 'd["id"]')
+ctl site-dir-create a.test after-the-failure --yes --reason "second" > $T/out; W2=$(j 'd["id"]')
+su -s /bin/sh t1 -c "echo meanwhile > $A/late.txt"
+approve $W1 $W2 > $T/ap
+check "a batch stops at its first failure: the first failed, the second not run and said so, nothing of it made" "failed skipped yes no" \
+  "$(python3 -c "import json; r={x['id']:x for x in json.load(open('$T/ap'))['results']}; print(r['$W1']['state'], r['$W2']['state'], 'yes' if '$W1' in json.dumps(r['$W2'].get('result', {})) else r['$W2'])") $([ -d $A/after-the-failure ] && echo yes || echo no)"
+rm -f $A/late.txt
 # A change to the page: the history keeps the one before, root's alone; the link keeps t1's ownership.
 printf '<html><head><title>A2</title></head>\n<body>hello</body></html>\n' > $T/page2.html
 ctl site-file-write a.test index.html $T/page2.html --overwrite --yes --reason "v2" > /dev/null; approve > /dev/null
@@ -95,6 +121,22 @@ check "a path that climbs out, and a listing that shows the symlink without foll
 printf 'API_TOKEN=t0ps3cret\n' > $T/env
 ctl site-file-write a.test .env $T/env --yes --reason "token" > /dev/null; approve > /dev/null
 check "a credential file is t1's, 0600" "t1 600" "$(stat -c '%U %a' $A/.env)"
+# No value of a credential file leaves the server through a preview, a dry run or a result (the
+# grabloop.app report: an edit's diff showed DB_PASSWORD from its context lines, and an approved write
+# answered the previous file whole, which approvals_list hands to any admin client).
+printf 'APP_DEBUG=false\nDB_PASSWORD=dbs3cr3t\n' > $T/env2
+ctl site-file-write a.test .env.app $T/env2 --yes --reason "app env" > $T/out
+check "a credential file's write waits with a preview of names and lengths, no value" "True yes no" \
+  "$(j 'd["pending"]') $(j '"yes" if "DB_PASSWORD=<8 bytes>" in d["preview"] else d["preview"]') $(grep -q 'dbs3cr3t\|false' $T/out && echo yes || echo no)"
+approve > $T/ap
+check "approved: written, and neither the approval's answer nor the list carries a value" "dbs3cr3t no no" \
+  "$(grep -o dbs3cr3t $A/.env.app) $(grep -q dbs3cr3t $T/ap && echo yes || echo no) $(curl -sS --unix-socket $CS http://control/v1/approvals | grep -q dbs3cr3t && echo yes || echo no)"
+ctl site-file-edit a.test .env.app --old 'APP_DEBUG=false' --new 'APP_DEBUG=true' --dry-run > $T/out
+check "an edit's dry run of a credential file: the changed line by name and length, the context masked, no value, no text whole" "yes no no" \
+  "$(j '"yes" if "-APP_DEBUG=<5 bytes>" in d["diff"] and "+APP_DEBUG=<4 bytes>" in d["diff"] and " DB_PASSWORD=<8 bytes>" in d["diff"] else d["diff"]') $(grep -q 'dbs3cr3t' $T/out && echo yes || echo no) $(j '"yes" if "new_text" in d or "text" in d["current"] else "no"')"
+ctl site-file-edit a.test .env.app --old 'APP_DEBUG=false' --new 'APP_DEBUG=true' --yes --reason "debug" > /dev/null; approve > $T/ap
+check "the edit approved: made, and its result carries neither the old file nor a value" "true no no" \
+  "$(grep -o 'APP_DEBUG=true' $A/.env.app | cut -d= -f2) $(grep -q 'dbs3cr3t\|APP_DEBUG=false' $T/ap && echo yes || echo no) $(curl -sS --unix-socket $CS http://control/v1/approvals | grep -q 'dbs3cr3t' && echo yes || echo no)"
 ctl site-file-read a.test .env > $T/out
 SID=$(j 'd["id"]')
 check "its read waits, naming it; approved, the list never carries the content and GET by id hands it out once" "True yes no yes no" \

@@ -245,6 +245,8 @@ std::vector<std::string> secret_paths(const SiteConfig& site) {
             for (const char* rel : {"/.env", "/.git"}) out.push_back(project + rel);
     }
     for (const auto& rel : preset_secrets(site.app)) out.push_back(site.root + rel);
+    // The application's .env wherever it lives (shared/.env beside the releases, 2026-11-04).
+    if (!site.env_file.empty() && std::find(out.begin(), out.end(), project + "/" + site.env_file) == out.end()) out.push_back(project + "/" + site.env_file);
     return out;
 }
 

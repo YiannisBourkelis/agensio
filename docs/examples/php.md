@@ -507,6 +507,100 @@ run.
 [Locations](../configuration.md#6-locations-the-reference),
 [Hosting: one user per site](../configuration.md#11-hosting-one-user-per-site).
 
+## Laravel from release directories
+
+**When:** a Laravel application deployed as releases: each version unpacked into its own
+`releases/<id>/`, `shared/` beside them for what outlives a release (`.env`, `storage/`), the switch
+to a new release one field, and artisan's commands run in the live release without a shell on the
+server. A deploy script on the developer's machine drives it over SSH with `agensio ctl`, and the
+owner types one approval code per deploy.
+
+```toml
+# /etc/agensio/agensio.toml: the main file, root's (once per host)
+include = ["sites.d/*.toml"]
+
+[server]
+acme = { email = "admin@example.com" }
+```
+
+```toml
+# /etc/agensio/sites.d/app.example.com.toml
+[[site]]
+server_name = ["app.example.com"]
+root = "/var/www/app.example.com"           # the site's folder: releases/ and shared/ live here
+served_dir = "releases/20261104-1/public"   # the live release's public/
+env_file = "shared/.env"                    # the application's .env: site-env-set writes it, root's, 0640
+app = "php"
+user = "app"
+tls = "auto"
+try_files = ["$uri", "$uri/", "/index.php?$query_string"]
+
+[[site.location]]            # Laravel's one entry point
+path = "/index.php"
+match = "exact"
+handler = "fastcgi"
+
+[[site.location]]            # every other .php is 404
+path = ".php"
+match = "suffix"
+handler = "deny"
+```
+
+**What it does.** `root` stays the site's folder, so PHP's `open_basedir` covers `shared/` as well
+as every release, and only the live release's `public/` is served: no URL reaches `shared/`,
+another release or a release's `.env`. The application finds `shared/` by its place, from its own
+`bootstrap/app.php` (`useEnvironmentPath`, `useStoragePath`); agensio does not link anything.
+Laravel's tasks run as the site's account in the release that holds `artisan`, the nearest
+directory from `served_dir` up (`releases/20261104-1/`), with the command-line binary of the site's
+own PHP version, never the host's default `php`. They run in the live release, so a deploy switches
+first and migrates after.
+
+**On a managed site.** A deploy is an upload, then three changes that wait for one approval, then
+the tasks:
+
+```sh
+agensio ctl upload app.example.com-20261104-1.tar.gz build/app-20261104-1.tar.gz
+agensio ctl site-install app.example.com --file app.example.com-20261104-1.tar.gz --path releases/20261104-1 --create-path --yes --reason "release 20261104-1"
+agensio ctl site-update app.example.com --served-dir releases/20261104-1/public --yes --reason "switch to 20261104-1"
+agensio ctl site-path-delete app.example.com releases/20261101-1 --recursive --yes --reason "older than the last three"
+agensio ctl approve
+agensio ctl site-task app.example.com migrate_force --yes --reason "release 20261104-1"
+agensio ctl site-task app.example.com optimize --yes --reason "release 20261104-1"
+```
+
+`agensio ctl approve` shows the three changes and asks one code for them; they run in the order they
+were queued, and the first that fails stops the rest, so a release that did not install is never
+switched to. Over SSH it needs a terminal: `ssh -t host agensio ctl approve`. A deleted release goes
+into the site's history (`[control] file_history`) and leaves the disk when that is pruned. The
+`.env` is written by `site-env-set`, never through a file write, so a secret never passes through an
+agent: once at setup, and again whenever a setting changes, followed by `optimize`:
+
+```sh
+agensio ctl site-env-set app.example.com --generate APP_KEY --set APP_ENV=production --set APP_DEBUG=false --yes --reason "setup"
+agensio ctl site-env app.example.com                  # names, lengths and fingerprints, no value
+agensio ctl site-task app.example.com optimize --yes --reason "new .env"
+```
+
+The scheduler, once, by root: agensio renders it, and it runs `schedule:run` in whichever release is
+live, so a deploy needs nothing more of root.
+
+```sh
+agensio ctl site-service app.example.com      # is a scheduler there already? (a timer, or a cron line)
+agensio ctl site-unit app.example.com --out /etc/systemd/system/agensio-schedule-app.example.com.service
+agensio ctl site-unit app.example.com --out /etc/systemd/system/agensio-schedule-app.example.com.timer
+systemctl daemon-reload && systemctl enable --now agensio-schedule-app.example.com.timer
+```
+
+**MCP:** `site_install` with `path` and `create_path`, `site_update` with `served_dir`,
+`site_path_delete` with `recursive`, then `approvals_ask` once for the three; `site_env_set` for
+every secret of the `.env`; `site_task` with
+`migrate_force` and `optimize` after it; `site_tasks_list` names the release and the PHP binary the
+tasks use; `site_service_status` before `site_service_unit`, so a scheduler is never made twice.
+
+**Reference:** [Laravel](../configuration.md#3-laravel-app--laravel),
+[Plain PHP](../configuration.md#2-plain-php-app--php),
+[Control socket](../configuration.md#15-control-socket).
+
 ## Use a php-fpm pool you already run
 
 **When:** a single-tenant server whose php-fpm pool exists already (the distribution's `www`

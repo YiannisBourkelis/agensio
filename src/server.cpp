@@ -16,6 +16,7 @@
 #include "services/pools.hpp"
 #include "services/provision.hpp"
 #include "services/appenv.hpp"
+#include "services/dotenv.hpp"
 #include "services/approvers.hpp"
 #include "services/files.hpp"
 #include "services/history.hpp"
@@ -1164,6 +1165,14 @@ json::Value Server::health_with(const std::vector<control::Finding>& more) {
         }
     }
     for (const auto& w : h3_waiting_) extra.push_back(control::h3_bind_finding(w));  // h3 a reload could not open (the alpha.110 and .112 reports)
+    // The Laravel schedulers' last runs (2026-11-04): the control handler's record, here on worker 0.
+    for (const auto& [site, rec] : control_handler_.schedule_records())
+        if (rec.runs && !rec.last_ok)
+            extra.push_back(control::Finding{"warn", "site_schedule_failing", site,
+                                             "the last scheduled schedule_run of " + site + " failed at " + rec.last_at + " (" + std::to_string(rec.failures) + " of " +
+                                                 std::to_string(rec.runs) + " runs since the start failed): " + rec.last_error,
+                                             "site_service_status " + site + " shows the end of its output; site_task " + site +
+                                                 " schedule_run runs it by hand with the whole output (site_task_output)"});
     const control::TlsFacts tls = tls_facts();
     return control::health(cfg, cfg_, as_root, std::time(nullptr), extra, &tls);
 }
@@ -1902,6 +1911,7 @@ void Server::task_async(const json::Value& req, std::function<void(json::Value)>
                 tr.row = row;
                 tr.params = req["params"];
                 tr.ctx.runtime_dir = runtime_dir(ctl, row->runtime);
+                tr.ctx.program = std::string(req.get("program"));  // the site's PHP binary for Laravel's rows (control::task_setup)
                 tr.ctx.root = std::string(req.get("root"));
                 tr.ctx.home = cfg_.state_dir + "/" + pw->pw_name;
                 tr.ctx.app = std::string(req.get("app"));
@@ -1938,13 +1948,35 @@ void Server::env_async(const json::Value& req, std::function<void(json::Value)> 
     std::thread([this, req, done = std::move(done)] {
         json::Value r;
         if (provisioner_.available()) {
-            r = provisioner_.request(req);
+            // The helper is told names only: a Laravel site's project and file are its to find on disk.
+            json::Value named = json::Value::object();
+            for (const auto& [k, v] : req.members())
+                if (k != "dotenv" && k != "project" && k != "env_file") named.set(k, v);
+            r = provisioner_.request(named);
         } else {
 #ifndef _WIN32
             // Without the helper the files are this account's own, in the same directory: a
             // server that runs every site as itself (a developer's machine, the suites).
             const std::string dir = appenv::dir_of(cfg_.config_path);
             const std::string site(req.get("site"));
+            // A Laravel site's own .env (2026-11-04), as this account: the project and the file the handler
+            // read from the running configuration on worker 0 (the helper derives both from disk instead).
+            if (req["dotenv"].boolean()) {
+                const std::string project(req.get("project")), file(req.get("env_file"));
+                const std::string fkey = appenv::fingerprint_key_of(dir, ::geteuid());
+                if (req.get("op") == "env_read") {
+                    std::vector<std::string> reveal;
+                    for (const auto& n : req["reveal"].items()) reveal.emplace_back(n.str());
+                    r = dotenv::read_file(project, file, fkey, reveal, ::geteuid()).set("site", site).set("dotenv", true);
+                } else {
+                    appenv::Change change;
+                    const std::string bad = appenv::parse_change(req, change);
+                    r = bad.empty() ? dotenv::write_file(project, file, ::geteuid(), ::getegid(), change, ::geteuid()).set("site", site).set("dotenv", true)
+                                    : json::Value::object().set("ok", false).set("error", bad);
+                }
+                asio::post(workers_[0]->ctx, [done, r] { done(r); });
+                return;
+            }
             if (req.get("op") == "env_read") {
                 std::vector<std::string> reveal;
                 for (const auto& n : req["reveal"].items()) reveal.emplace_back(n.str());

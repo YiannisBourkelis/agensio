@@ -2,6 +2,54 @@
 
 ## 0.1.0-alpha.124 (unreleased)
 
+- **Fix: no value of a credential file leaves the server through a preview, a dry run or a result**
+  (the grabloop.app report). An edit of `shared/.env` answered a diff whose three context lines
+  carried `DB_PASSWORD`, and the same diff was the approval's preview, which `approvals_list` hands to
+  any admin client, so even a `.env` the owner wrote from the server's terminal reached an agent that
+  listed the approvals; and every approved write or edit answered the previous file whole, kept as
+  the approval's result for the list. A credential file's diff (the file tools' credentials: `.env*`,
+  `.git/`, `*.key`, `*.pem`, SQLite files, the preset's) now keeps the names of an env-like file with
+  each value's length (`DB_PASSWORD=<16 bytes>`) and only the lengths of any other, context lines
+  included, and no write or edit answers a file's text. Rotate a secret that was in a `.env` edited
+  or written through the tools since 0.1.0-alpha.120.
+- **Changes approved together stop at the first that fails** (the grabloop.app answer). A deploy
+  queues the install of a release, the switch to it and the deletes of older releases, and one code
+  approves them; if the install failed, the switch ran anyway and the site served a release that was
+  not there. The changes after a failed one are now `skipped`, not run, each naming the change that
+  failed, and the server runs the changes of one code in the order they were queued, whatever order
+  the client sends their ids in.
+- **Laravel's tasks** (the grabloop.app report): `site_task` has artisan's own commands for
+  `app = "laravel"` and for a Laravel application on `app = "php"`: `migrate_force`, `optimize`,
+  `optimize_clear`, `storage_link`, `queue_restart`, `schedule_run` and `queue_work_once`, each a fixed
+  argv. They run as the site's account in the directory that holds `artisan`, the nearest from
+  `served_dir` up to the project (a release below it, never reached through a symlink), with the
+  command-line binary of the site's own PHP version, never the host's default `php`; a version without
+  one answers with root's package line. The cookbook's "Laravel from release directories" is the
+  deploy: an upload, one approval for the install, the switch and the deletes, then the tasks.
+- **Laravel's scheduler, installed once by root, visible to the agent.** `site_service_unit` on a
+  Laravel site renders `agensio-schedule-SITE.timer` (every minute) and its oneshot service, which asks
+  agensio over the control socket, as the server's own account, to run `schedule_run`: agensio runs it
+  as the site's account in the live release with the site's PHP version, so nothing names a release and
+  a switch needs nothing of root. A scheduled run (`--scheduled`) holds no task slot, is skipped while a
+  task runs on the site, keeps its record apart from the deploy's output and reaches the audit log only
+  when its outcome changes. `site_service_status` says whether a scheduler exists, agensio's timer as
+  installed and any cron line that runs `schedule:run` for the site (named by file and line, never by
+  text), with the recorded runs; health warns `site_schedule_duplicate` (two schedulers) and
+  `site_schedule_failing`, and notes `site_schedule_unit_stale`.
+- **A Laravel site's .env through `site_env_set`, so a secret never passes through an agent.** The new
+  site key `env_file` names the application's `.env` relative to the project (`.env` by default for
+  `app = "laravel"`; `shared/.env` beside the releases on `app = "php"`), outside the served directory.
+  `site_env` lists its names, lengths and fingerprints; `site_env_set` changes it through the root
+  helper, every other line kept, the file root's with the group PHP runs the site as, `0640`, so the
+  application reads it and cannot change it in place; `generate: ["APP_KEY"]` writes Laravel's key.
+  Managed field `env_file`, `agensio ctl site-update --env-file`.
+- **SSH private keys are credentials of the file tools** (the grabloop.app report: a deploy key named
+  `shared/deploy_key` was listed and read with no approval). Anything below `.ssh/` and the private
+  keys' own names (`id_rsa`, `id_ecdsa`, `id_ed25519` and their kin, never the `.pub`) count as
+  credentials like a `.env`; a file whose first line is a private key's (PEM or PuTTY) does too,
+  whatever its name: an unapproved read answers nothing of it and remembers it, so the next read waits
+  for approval, and a write of one is made `0600` with a preview of lengths only.
+
 - **Fix: a listen address must be an IP address, refused at load and in the request.** The loader
   kept a host name as written (`listen = ["nonsense:80"]`, or a list written as one value,
   `"[::]:443,203.0.113.5:443"`), so `-t` said OK to a file the start then refused when it bound, and

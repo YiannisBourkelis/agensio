@@ -2800,6 +2800,23 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     } else if (t.contains("served_dir")) {
         fail(where + ".served_dir must be a string");
     }
+    // The Laravel application's .env (2026-11-04, the grabloop.app answer): what site_env reads and
+    // site_env_set writes, so a secret never passes through an agent. Outside the served directory.
+    if (auto ef = t["env_file"].value<std::string>()) {
+        if (!schedule_app(site.app)) fail(where + ".env_file names a Laravel application's .env: it goes with app = \"laravel\" or app = \"php\"");
+        if (const std::string why = check_env_file(*ef); !why.empty()) fail(where + ".env_file: " + why);
+        site.env_file = *ef;
+    } else if (t.contains("env_file")) {
+        fail(where + ".env_file must be a string");
+    } else if (site.app == "laravel") {
+        site.env_file = ".env";
+    }
+    if (!site.env_file.empty()) {
+        const std::string target = (fs::path(root_given) / site.env_file).lexically_normal().string();
+        if (site.root == root_given || target.starts_with(site.root + "/"))
+            fail(where + ".env_file '" + site.env_file + "' lies in the directory the site serves (" + site.root + "): the application's secrets must be outside it" +
+                 (site.app == "php" ? std::string(" (give the site a served_dir, the directory of the project that is served)") : std::string()));
+    }
 
     if (t.contains("index")) site.index = index_list(t["index"], where);
     if (t.contains("try_files")) site.try_files = try_files_of(t["try_files"], where);
@@ -3112,6 +3129,8 @@ std::string body_refused_text(const SiteConfig* site, std::string_view remote, s
 }
 
 bool proxy_app(std::string_view app) noexcept { return app == "proxy" || rails_app(app) || python_app(app) || node_app(app); }
+bool schedule_app(std::string_view app) noexcept { return app == "laravel" || app == "php"; }
+std::string schedule_unit_name(std::string_view site, bool timer) { return "agensio-schedule-" + std::string(site) + (timer ? ".timer" : ".service"); }
 bool rails_app(std::string_view app) noexcept { return app == "rails" || app == "redmine"; }
 bool python_app(std::string_view app) noexcept { return app == "django" || app == "wagtail"; }
 bool service_app(std::string_view app) noexcept { return rails_app(app) || python_app(app) || node_app(app); }
@@ -3137,6 +3156,24 @@ std::string check_served_dir(std::string_view p) {
         return "served_dir '" + q + "' holds a character that is not a letter, digit, '.', '_', '-' or '/'";
     if (p.find("//") != std::string_view::npos || p.find("/.") != std::string_view::npos || p.back() == '/')
         return "served_dir '" + q + "' must be a plain path: no '//', no segment starting with '.', no '/' at the end";
+    return "";
+}
+
+std::string check_env_file(std::string_view p) {
+    const std::string q(p);
+    if (p.empty() || p.size() > 255) return "env_file is 1 to 255 characters";
+    if (p.front() == '/' || p.back() == '/') return "env_file '" + q + "' must be a file relative to the project directory (.env, shared/.env)";
+    if (p.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/") != std::string_view::npos)
+        return "env_file '" + q + "' holds a character that is not a letter, digit, '.', '_', '-' or '/'";
+    std::size_t at = 0;
+    while (at <= p.size()) {
+        const std::size_t end = std::min(p.find('/', at), p.size());
+        const std::string_view seg = p.substr(at, end - at);
+        const bool last = end == p.size();
+        if (seg.empty() || seg == "." || seg == ".." || (!last && seg.front() == '.') || seg.front() == '-')
+            return "env_file '" + q + "' must be a plain path: no empty, '.' or '..' segment, no directory starting with '.' or '-'";
+        at = end + 1;
+    }
     return "";
 }
 

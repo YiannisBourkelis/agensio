@@ -20,7 +20,9 @@
 #include <sstream>
 
 #include "services/appenv.hpp"
+#include "services/php_runtimes.hpp"
 #include "services/pools.hpp"
+#include "services/tasks.hpp"
 
 namespace agensio::control {
 
@@ -87,6 +89,7 @@ json::Value SiteSpec::to_json() const {
     if (!project.empty()) v.set("project", project);
     if (!entry.empty()) v.set("entry", entry);
     if (!served_dir.empty()) v.set("served_dir", served_dir);
+    if (!env_file.empty()) v.set("env_file", env_file);
     if (!php_socket.empty()) v.set("php_socket", php_socket);
     if (php_children) v.set("php_children", php_children);
     if (!php_version.empty()) v.set("php_version", php_version);
@@ -145,6 +148,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.project = v.get("project");
     out.entry = v.get("entry");
     out.served_dir = v.get("served_dir");
+    out.env_file = v.get("env_file");
     out.php_socket = v.get("php_socket");
     out.php_children = static_cast<int>(v["php_children"].num());
     out.php_version = v.get("php_version");
@@ -759,7 +763,7 @@ std::vector<AccessNotice> access_notices_for(const SiteSpec& spec, const Config&
 
 const std::vector<std::string_view>& site_request_fields() {
     static const std::vector<std::string_view> fields = {
-        "domain", "aliases", "canonical", "https", "redirect_http", "hsts", "encoded_slashes", "app", "root", "served_dir", "upstream", "project", "entry", "user",
+        "domain", "aliases", "canonical", "https", "redirect_http", "hsts", "encoded_slashes", "app", "root", "served_dir", "env_file", "upstream", "project", "entry", "user",
         "no_user", "group", "php_socket", "php_children", "php_version", "settings", "rules", "redirects", "response_headers",
         "response_headers_baseline", "response_headers_offer_declined", "response_compression", "login_paths", "public_archives", "mime_types", "trusted_proxies", "access_log",
         "listen_plain", "listen_tls", "confirm", "reason", "dry_run", "cut_requests", "ignore_requirements"};
@@ -992,6 +996,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (has_key(body, "project")) spec.project = body.get("project");
     if (has_key(body, "entry")) spec.entry = body.get("entry");
     if (has_key(body, "served_dir")) spec.served_dir = body.get("served_dir");
+    if (has_key(body, "env_file")) spec.env_file = body.get("env_file");
     if (has_key(body, "group")) spec.group = body.get("group");
     if (has_key(body, "php_socket")) spec.php_socket = body.get("php_socket");
     if (has_key(body, "php_children")) spec.php_children = static_cast<int>(body["php_children"].num());
@@ -1326,6 +1331,16 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             return needs;
         }
     }
+    if (!spec.env_file.empty()) {  // the loader judges where it lies against the served directory
+        if (!schedule_app(spec.app) && !spec.app.empty()) {
+            error = "env_file names a Laravel application's .env: it goes with app = \"laravel\" or app = \"php\"; send env_file: \"\" with the change of app";
+            return needs;
+        }
+        if (const std::string bad = check_env_file(spec.env_file); !bad.empty()) {
+            error = bad;
+            return needs;
+        }
+    }
     for (const auto& f : {spec.cert, spec.key})
         if (!f.empty() && !safe_path(f, why)) {
             error = "https cert/key: " + why;
@@ -1424,6 +1439,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         } else {
             s += "root = " + toml_string(spec.root) + "\n";
             if (spec.app == "php" && !spec.served_dir.empty()) s += "served_dir = " + toml_string(spec.served_dir) + "   # served; root is the project directory\n";
+            if (schedule_app(spec.app) && !spec.env_file.empty()) s += "env_file = " + toml_string(spec.env_file) + "   # the application's .env, root's: site_env_set writes it\n";
             // Named for a static site too (alpha.94): a site with app gets its preset's security
             // baseline (docs/headers.md 4), which a file without the line would not.
             s += "app = " + toml_string(spec.app.empty() ? std::string("static") : spec.app) + "\n";
@@ -1820,7 +1836,131 @@ std::string php_fpm_reload_command(const Config& cfg, const std::string& version
            " is not installed: php_versions lists what is)";
 }
 
+TaskSetup task_setup(const Config& cfg, const SiteConfig& site, const tasks::Row& row) {
+    TaskSetup out;
+    const std::string project = site.project_root.empty() ? site.root : site.project_root;
+    out.dir = project;
+    if (std::string_view(row.runtime) != "php") return out;
+    // The directory: from served_dir up to the project, the first that holds artisan, each level a real
+    // directory (never a symlink) and artisan a regular file. The task opens it again without following
+    // a symlink, as the site's account, so this only chooses.
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!site.served_dir.empty()) {
+        fs::path at = fs::path(project) / site.served_dir;
+        while (true) {
+            const std::string text = at.lexically_normal().string();
+            if (text.size() < project.size()) break;
+            bool real = true;  // every level from the project down to here a directory, no symlink
+            for (fs::path p = at; real && p.lexically_normal().string().size() >= project.size(); p = p.parent_path()) {
+                real = fs::symlink_status(p, ec).type() == fs::file_type::directory;
+                if (p.lexically_normal().string() == project) break;
+            }
+            if (real && fs::symlink_status(at / "artisan", ec).type() == fs::file_type::regular) {
+                out.dir = text;
+                break;
+            }
+            if (text == project) break;
+            at = at.parent_path();
+        }
+    }
+    // The interpreter: the site's own PHP version's command-line binary.
+    const std::string version = !site.pool.version.empty() ? site.pool.version : !cfg.php_version.empty() ? cfg.php_version : cfg.php_newest;
+    if (version.empty()) {
+        out.error = "no PHP version is installed or named for this site (php.version, [server] php_version), so its tasks have no interpreter";
+        return out;
+    }
+    const std::vector<php::Runtime> runtimes = php::discover(cfg, php::system_fs());
+    const php::Runtime* r = php::find(runtimes, version);
+    if (!r || r->cli.empty()) {
+        out.error = "PHP " + version + " has no command-line binary on this host, so its tasks cannot run" +
+                    (r ? std::string() : std::string(" (and no php-fpm of that version is installed)"));
+        if (::access("/usr/bin/apt-get", X_OK) == 0) out.run_as_root = "apt-get install -y php" + version + "-cli";
+        else if (::access("/usr/bin/dnf", X_OK) == 0) out.run_as_root = "dnf install -y php-cli";
+        return out;
+    }
+    out.program = r->cli;
+    return out;
+}
+
+namespace {
+
+// The path of the agensio binary that runs now, for the scheduler unit's ExecStart.
+std::string agensio_binary() {
+    char buf[4096];
+    const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n <= 0) return "/usr/sbin/agensio";
+    std::string path(buf, static_cast<std::size_t>(n));
+    if (path.ends_with(" (deleted)")) path.erase(path.size() - 10);  // replaced by an upgrade while running: the new file is at the same path
+    return path;
+}
+
+// The Laravel scheduler (2026-11-04, the grabloop.app report): a timer that every minute starts a
+// oneshot service, which asks agensio over its control socket to run the site task schedule_run. The
+// task runner resolves the live release and the site's PHP version at each run, so nothing in the
+// units names a release and a switch needs nothing of root; root installs them once. The service
+// runs as the server's own account (an admin of the control socket), never as the site's: it holds
+// no right of the site, and the site's account cannot change what it asks.
+json::Value schedule_units(const SiteConfig& site, const Config& cfg) {
+    json::Value fail = json::Value::object().set("ok", false);
+    const std::string name = site.server_names.empty() ? std::string() : site.server_names.front();
+    const tasks::Row* row = tasks::find(site.app.empty() ? "static" : site.app, "schedule_run");
+    if (!row) return fail.set("error", "a scheduler is rendered for a Laravel site (app = \"laravel\", or a Laravel application on app = \"php\")");
+    const TaskSetup ts = task_setup(cfg, site, *row);
+    std::error_code ec;
+    if (std::filesystem::symlink_status(std::filesystem::path(ts.dir) / "artisan", ec).type() != std::filesystem::file_type::regular)
+        return fail.set("error", "no artisan file in " + ts.dir + " (the directory Laravel's tasks run in, from served_dir up): this is no Laravel application, "
+                                 "so no scheduler is rendered");
+    if (!cfg.control.enabled || cfg.control.socket.empty())
+        return fail.set("error", "the scheduler asks agensio over its control socket, and this server has none: [control] socket in the main file");
+    const std::string service = schedule_unit_name(name, false), timer = schedule_unit_name(name, true);
+    const std::string account = cfg.user.empty() ? std::string("root") : cfg.user;
+    const std::string bin = agensio_binary();
+    const std::string socket = cfg.control.socket;
+    const std::string socket_dir = std::filesystem::path(socket).parent_path().string();
+    const unsigned timeout = std::min(row->timeout, cfg.control.task_timeout) + 120;
+    for (const std::string* v : {&name, &account, &bin, &socket, &socket_dir}) {
+        if (v->empty() || v->find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/@:+-") != std::string::npos)
+            return fail.set("error", "'" + v->substr(0, 80) + "' is not a plain path or name (letters, digits, . _ / @ : + -); the scheduler is not rendered");
+    }
+    std::string head;
+    head += "# agensio: the Laravel scheduler of " + name + ", rendered by `agensio ctl site-unit " + name + "`. As root, once:\n";
+    head += "#   agensio ctl site-unit " + name + " --out /etc/systemd/system/" + service + "\n";
+    head += "#   agensio ctl site-unit " + name + " --out /etc/systemd/system/" + timer + "\n";
+    head += "#   systemctl daemon-reload && systemctl enable --now " + timer + "\n";
+    head += "# Every minute agensio runs the site task schedule_run (php artisan schedule:run) as the site's account, in the live release\n";
+    head += "# (the site's served_dir), with the site's PHP version: nothing here names a release, so a release switch needs nothing of root.\n";
+    std::string s = head;
+    s += "[Unit]\nDescription=Laravel scheduler of " + name + ", run by agensio's task runner\nAfter=agensio.service\n\n";
+    s += "[Service]\nType=oneshot\n";
+    s += "# The server's own account, an admin of the control socket: it only asks agensio, which runs the task as the site's account.\n";
+    s += "User=" + account + "\n";
+    s += "ExecStart=" + bin + " ctl site-task " + name + " schedule_run --scheduled --yes --reason scheduler --socket " + socket + "\n";
+    s += "TimeoutStartSec=" + std::to_string(timeout) + "\n";
+    s += "NoNewPrivileges=yes\nPrivateTmp=yes\nProtectSystem=strict\nReadWritePaths=" + socket_dir + "\nProtectHome=yes\nRestrictSUIDSGID=yes\n";
+    s += "ProtectKernelTunables=yes\nProtectControlGroups=yes\nRestrictRealtime=yes\nLockPersonality=yes\nCapabilityBoundingSet=\n";
+    std::string t = head;
+    t += "[Unit]\nDescription=Every minute: the Laravel scheduler of " + name + "\n\n";
+    t += "[Timer]\nOnCalendar=*-*-* *:*:00\nAccuracySec=1s\nUnit=" + service + "\n\n";
+    t += "[Install]\nWantedBy=timers.target\n";
+    json::Value units = json::Value::array()
+                            .push(json::Value::object().set("name", service).set("path", "/etc/systemd/system/" + service).set("unit", s))
+                            .push(json::Value::object().set("name", timer).set("path", "/etc/systemd/system/" + timer).set("unit", t));
+    json::Value cmds = json::Value::array()
+                           .push("agensio ctl site-unit " + name + " --out /etc/systemd/system/" + service)
+                           .push("agensio ctl site-unit " + name + " --out /etc/systemd/system/" + timer)
+                           .push("systemctl daemon-reload")
+                           .push("systemctl enable --now " + timer);
+    return json::Value::object().set("ok", true).set("site", name).set("kind", "scheduler").set("unit_name", timer).set("units", std::move(units))
+        .set("run_as_root", std::move(cmds))
+        .set("hint", "root installs both once with run_as_root; site_service_status " + name + " says whether a scheduler is installed (this timer, or a cron line "
+                     "that runs schedule:run) before anyone makes another, since two would run every scheduled command twice");
+}
+
+}  // namespace
+
 json::Value service_unit(const SiteConfig& site, const Config& cfg) {
+    if (schedule_app(site.app)) return schedule_units(site, cfg);  // a Laravel site: its scheduler
     json::Value fail = json::Value::object().set("ok", false);
     const std::string name = site.server_names.empty() ? std::string() : site.server_names.front();
     const bool python = python_app(site.app), node = node_app(site.app);

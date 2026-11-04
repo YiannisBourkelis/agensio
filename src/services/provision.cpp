@@ -41,6 +41,7 @@
 #include "services/history.hpp"
 #include "services/install.hpp"
 #include "services/pools.hpp"
+#include "services/dotenv.hpp"
 #include "services/tasks.hpp"
 
 namespace agensio {
@@ -834,9 +835,36 @@ json::Value env_op(const json::Value& req, const Config& cfg) {
     const std::string name(req.get("site"));
     const SiteConfig* site = control::find_site(fresh, name);
     if (!site) return fail("no site " + name + " in the configuration on disk");
-    if (!proxy_app(site->app)) return fail("site " + name + " has app = \"" + site->app + "\"; a site's environment is for applications agensio runs (rails, redmine, django, wagtail, node, proxy)");
-    const std::string key = site->server_names.front();
     const std::string dir = appenv::dir_of(cfg.config_path);
+    // A Laravel site (2026-11-04, the grabloop.app answer): its own .env where env_file says, root's with
+    // the group PHP runs the site's pool as, 0640; the account and the group from the system, the path
+    // from the site on disk, nothing of either from the server.
+    if (schedule_app(site->app)) {
+        if (site->env_file.empty())
+            return fail("site " + name + " names no env_file: site_update with env_file (shared/.env beside the releases, or .env), the file the application reads");
+        const std::string project = site->project_root.empty() ? site->root : site->project_root;
+        uid_t uid = 0;
+        gid_t gid = 0;
+        std::string why;
+        if (!install_account(cfg, project, site->user, uid, gid, why)) return fail(why);
+        if (uid == 0) return fail("the site runs as root; its .env is not written for it");
+        if (!site->group.empty()) {
+            const struct group* g = ::getgrnam(site->group.c_str());
+            if (!g) return fail("the site's group " + site->group + " does not exist");
+            gid = g->gr_gid;
+        }
+        const std::string fkey = appenv::fingerprint_key_of(dir, 0);
+        if (req.get("op") == "env_read") {
+            std::vector<std::string> reveal;
+            for (const auto& r : req["reveal"].items()) reveal.emplace_back(r.str());
+            return dotenv::read_file(project, site->env_file, fkey, reveal, uid).set("site", site->server_names.front()).set("dotenv", true);
+        }
+        appenv::Change change;
+        if (std::string bad = appenv::parse_change(req, change); !bad.empty()) return fail(bad);
+        return dotenv::write_file(project, site->env_file, 0, gid, change, uid).set("site", site->server_names.front()).set("dotenv", true);
+    }
+    if (!proxy_app(site->app)) return fail("site " + name + " has app = \"" + site->app + "\"; a site's environment is for applications agensio runs (rails, redmine, django, wagtail, node, proxy) and Laravel sites");
+    const std::string key = site->server_names.front();
     if (req.get("op") == "env_read") {
         // Names, lengths and fingerprints; a value only when named in reveal (the owner's
         // decision of 2026-09-27: a secret leaves the helper only when asked for).
@@ -908,7 +936,8 @@ json::Value unit_states(const std::vector<std::string>& units, std::string& why)
     std::vector<std::string> args{"show"};
     args.insert(args.end(), units.begin(), units.end());
     for (const char* a : {"--no-pager", "-p",
-                          "Id,LoadState,ActiveState,SubState,Result,MainPID,ExecMainStatus,ExecMainCode,ActiveEnterTimestamp,InactiveEnterTimestamp,MemoryCurrent,NRestarts,UnitFileState"})
+                          "Id,LoadState,ActiveState,SubState,Result,MainPID,ExecMainStatus,ExecMainCode,ActiveEnterTimestamp,InactiveEnterTimestamp,MemoryCurrent,NRestarts,UnitFileState,"
+                          "FragmentPath,LastTriggerUSec,NextElapseUSecRealtime"})
         args.emplace_back(a);
     std::string out;
     run(systemctl, args, out, 16384 * (units.size() + 1));
@@ -942,6 +971,100 @@ json::Value unit_states(const std::vector<std::string>& units, std::string& why)
     return states;
 }
 
+// A small regular file read as root without following a symlink: its text, or "" (missing, too big,
+// not a regular file).
+std::string read_small_file(const std::string& path, std::size_t max) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) return "";
+    struct stat st {};
+    std::string text;
+    if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && static_cast<std::uint64_t>(st.st_size) <= max) {
+        text.resize(static_cast<std::size_t>(st.st_size));
+        std::size_t got = 0;
+        while (got < text.size()) {
+            const ssize_t n = ::read(fd, text.data() + got, text.size() - got);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            got += static_cast<std::size_t>(n);
+        }
+        text.resize(got);
+    }
+    ::close(fd);
+    return text;
+}
+
+// The cron lines that run a Laravel site's scheduler (2026-11-04, the grabloop.app answer: the agent
+// must know one exists before it makes another): the account's own crontab, /etc/crontab and
+// /etc/cron.d, a line not a comment that runs schedule:run and names the site's project directory (in
+// the account's own crontab, any such line when the account has no other Laravel site). Named by file
+// and line number only, never by text: a cron line may carry a secret.
+json::Value cron_lines(const std::string& project, const std::string& account, bool account_alone) {
+    json::Value out = json::Value::array();
+    auto scan = [&](const std::string& file, bool own) {
+        const std::string text = read_small_file(file, 64 * 1024);
+        std::size_t at = 0, no = 0;
+        while (at < text.size()) {
+            const std::size_t end = std::min(text.find('\n', at), text.size());
+            const std::string_view line = std::string_view(text).substr(at, end - at);
+            at = end + 1;
+            ++no;
+            const std::size_t first = line.find_first_not_of(" \t");
+            if (first == std::string_view::npos || line[first] == '#') continue;
+            if (line.find("schedule:run") == std::string_view::npos) continue;
+            const bool names_project = line.find(project + "/") != std::string_view::npos || line.find(project + " ") != std::string_view::npos ||
+                                       line.ends_with(project);
+            if (names_project || (own && account_alone)) out.push(json::Value::object().set("file", file).set("line", static_cast<double>(no)));
+            if (out.items().size() >= 16) return;
+        }
+    };
+    std::string why;
+    if (control::valid_account(account, why)) {
+        scan("/var/spool/cron/crontabs/" + account, true);  // Debian, Ubuntu
+        scan("/var/spool/cron/" + account, true);           // RHEL, Fedora
+    }
+    scan("/etc/crontab", false);
+    if (DIR* d = ::opendir("/etc/cron.d")) {
+        std::vector<std::string> names;
+        while (const struct dirent* e = ::readdir(d))
+            if (e->d_name[0] != '.' && names.size() < 64) names.emplace_back(e->d_name);
+        ::closedir(d);
+        std::sort(names.begin(), names.end());
+        for (const auto& n : names) scan("/etc/cron.d/" + n, false);
+    }
+    return out;
+}
+
+// A Laravel site's scheduler as root sees it: agensio's two units (from one systemctl show the caller
+// made), whether their installed text is still what site_service_unit renders now, and the cron lines
+// that run schedule:run for the site.
+json::Value schedule_view(const Config& fresh, const SiteConfig& site, const json::Value& states) {
+    const std::string name = site.server_names.front();
+    const std::string timer = schedule_unit_name(name, true), service = schedule_unit_name(name, false);
+    const json::Value& ts = states[timer];
+    const json::Value& ss = states[service];
+    json::Value v = json::Value::object().set("timer_unit", timer).set("service_unit", service).set("timer", ts).set("service", ss);
+    const bool installed = std::string(ts.get("LoadState")) == "loaded";
+    v.set("installed", installed).set("enabled", std::string(ts.get("UnitFileState")) == "enabled").set("active", std::string(ts.get("ActiveState")) == "active");
+    if (installed) {
+        // The text installed against the render: a moved binary or control socket, a renamed account.
+        const json::Value render = control::service_unit(site, fresh);
+        bool matches = render["ok"].boolean();
+        for (const auto& u : render["units"].items()) {
+            const json::Value& st = states[std::string(u.get("name"))];
+            const std::string frag(st.get("FragmentPath"));
+            const bool system_dir = frag.starts_with("/etc/systemd/system/") || frag.starts_with("/usr/lib/systemd/system/") || frag.starts_with("/lib/systemd/system/");
+            matches = matches && system_dir && read_small_file(frag, 16 * 1024) == u.get("unit");
+        }
+        v.set("matches_render", matches);
+    }
+    const std::string project = site.project_root.empty() ? site.root : site.project_root;
+    std::size_t laravel_of_account = 0;
+    for (const auto& o : fresh.sites)
+        if (schedule_app(o.app) && o.user == site.user) ++laravel_of_account;
+    v.set("cron", site.user.empty() ? json::Value::array() : cron_lines(project, site.user, laravel_of_account <= 1));
+    return v;
+}
+
 // app_check: health's pass, every Rails site with its own account in the configuration on
 // disk and its unit's state. {"ok", "services": [{"site", "unit", "state"}]}.
 json::Value app_check(const Config& cfg) {
@@ -954,22 +1077,37 @@ json::Value app_check(const Config& cfg) {
     }
     std::vector<std::pair<std::string, std::string>> sites;  // site, unit
     std::vector<std::string> units;
+    std::vector<const SiteConfig*> laravel;  // the Laravel sites, whose scheduler is looked at too (the grabloop.app answer)
     for (const auto& s : fresh.sites) {
         std::string why;
-        if (!service_app(s.app) || s.user.empty() || s.server_names.empty() || !control::valid_account(s.user, why)) continue;
+        if (s.server_names.empty()) continue;
+        if (schedule_app(s.app) && control::valid_domain(s.server_names.front())) {
+            if (const tasks::Row* row = tasks::find(s.app, "schedule_run")) {
+                std::error_code ec;
+                const control::TaskSetup ts = control::task_setup(fresh, s, *row);
+                if (std::filesystem::symlink_status(std::filesystem::path(ts.dir) / "artisan", ec).type() == std::filesystem::file_type::regular) {
+                    laravel.push_back(&s);
+                    units.push_back(schedule_unit_name(s.server_names.front(), true));
+                    units.push_back(schedule_unit_name(s.server_names.front(), false));
+                }
+            }
+            continue;
+        }
+        if (!service_app(s.app) || s.user.empty() || !control::valid_account(s.user, why)) continue;
         const std::string unit = "agensio-app-" + s.user + ".service";
         sites.emplace_back(s.server_names.front(), unit);
         if (std::find(units.begin(), units.end(), unit) == units.end()) units.push_back(unit);
     }
-    json::Value services = json::Value::array();
+    json::Value services = json::Value::array(), schedules = json::Value::array();
     if (!units.empty()) {
         std::string why;
         const json::Value states = unit_states(units, why);
         if (states.is_null()) return reply.set("ok", false).set("error", why);
         for (const auto& [site, unit] : sites)
             if (!states[unit].is_null()) services.push(json::Value::object().set("site", site).set("unit", unit).set("state", states[unit]));
+        for (const SiteConfig* s : laravel) schedules.push(schedule_view(fresh, *s, states).set("site", s->server_names.front()));
     }
-    return reply.set("ok", true).set("services", std::move(services));
+    return reply.set("ok", true).set("services", std::move(services)).set("schedules", std::move(schedules));
 }
 
 // host_protection (2026-10-02, docs/configuration.md 18): health's read-only look at what the
@@ -1114,9 +1252,19 @@ json::Value app_op(const json::Value& req, const Config& cfg) {
     const SiteConfig* site = control::find_site(fresh, name);
     if (!site) return fail("no site " + name + " in the configuration on disk");
     std::string why;
-    if (!service_app(site->app) || site->user.empty() || !control::valid_account(site->user, why))
+    if (schedule_app(site->app)) {
+        // A Laravel site: its scheduler (2026-11-04), the units' state and the cron lines; its journal for app_logs.
+        const std::string timer = schedule_unit_name(site->server_names.front(), true), service = schedule_unit_name(site->server_names.front(), false);
+        reply.set("site", site->server_names.front()).set("kind", "scheduler").set("unit", service);
+        if (req.get("op") == "app_status") {
+            json::Value states = unit_states({timer, service}, why);
+            if (states.is_null()) return fail(why);
+            return reply.set("ok", true).set("scheduler", schedule_view(fresh, *site, states));
+        }
+    } else if (!service_app(site->app) || site->user.empty() || !control::valid_account(site->user, why)) {
         return fail("site " + name + " has no application service: a Rails or Django site with its own account has one (agensio-app-<user>.service)");
-    const std::string unit = "agensio-app-" + site->user + ".service";
+    }
+    const std::string unit = schedule_app(site->app) ? schedule_unit_name(site->server_names.front(), false) : "agensio-app-" + site->user + ".service";
     reply.set("site", site->server_names.front()).set("unit", unit);
     if (req.get("op") == "app_status") {
         json::Value states = unit_states({unit}, why);
@@ -1228,11 +1376,21 @@ json::Value task_run(const json::Value& req, const Config& cfg, int helper_fd) {
         if (!est.fix.empty()) reply.set("run_as_root", json::Value::array().push(est.fix));
         return reply;
     }
+    // Where and with what, from the file on disk as everything else here: Laravel's rows in the release
+    // that holds artisan (inside the site's directory by construction), with the site's PHP binary.
+    const control::TaskSetup setup = control::task_setup(fresh, *site, *row);
+    if (!setup.error.empty()) {
+        reply = fail(setup.error);
+        if (!setup.run_as_root.empty()) reply.set("run_as_root", json::Value::array().push(setup.run_as_root));
+        return reply;
+    }
+    if (setup.dir != site_root && !provision::under_root(setup.dir, site_root)) return fail("the task's directory " + setup.dir + " is not inside " + site_root);
     tasks::Request tr;
     tr.row = row;
     tr.params = req["params"];
     tr.ctx.runtime_dir = runtime_dir(fresh.control, row->runtime);
-    tr.ctx.root = site_root;
+    tr.ctx.program = setup.program;
+    tr.ctx.root = setup.dir;
     tr.ctx.home = cfg.state_dir + "/" + account;
     // What the preset's family and a Django site's settings are told, from the site on disk.
     tr.ctx.app = app;
@@ -1249,7 +1407,7 @@ json::Value task_run(const json::Value& req, const Config& cfg, int helper_fd) {
     for (auto& v : vars) tr.ctx.app_env.emplace_back(std::move(v.name), std::move(v.value));
     tr.sites_root = provision::sites_root(cfg);
     for (const auto& abs : secret_paths(*site))
-        if (provision::under_root(abs, site_root) && abs != site_root) tr.secrets.push_back(abs.substr(site_root.size() + 1));
+        if (provision::under_root(abs, setup.dir) && abs != setup.dir) tr.secrets.push_back(abs.substr(setup.dir.size() + 1));
     tr.network_allowed = fresh.control.task_network;
     tr.dry_run = dry_run;
     json::Value out = run_as_account(uid, gid, helper_fd, -1, [&] { return tasks::execute(tr); }, std::chrono::seconds(tr.ctx.timeout + 120));

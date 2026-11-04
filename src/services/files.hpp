@@ -52,6 +52,9 @@ std::string parse(const json::Value& req, Op& out);
 // credential files or below one, anything below .git/, a name starting with .env, a name ending in
 // .key or .pem, a database file (.sqlite, .sqlite3, .db). Reading it waits for approval.
 bool secret_path(std::string_view rel, const std::vector<std::string>& secrets) noexcept;
+// A private key by its first line (2026-11-04, the grabloop.app report): a PEM "-----BEGIN ... PRIVATE
+// KEY-----" header (OpenSSH, RSA, EC, PKCS#8) or a PuTTY key file, whatever the file's name.
+bool private_key_head(std::string_view head) noexcept;
 
 // As the executing account: list, read, write, edit, mkdir, move, delete (the delete without a
 // history), each a JSON answer {"ok", "error"?, "as", "path", ...}; a dry run checks everything and

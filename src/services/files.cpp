@@ -113,7 +113,23 @@ bool secret_path(std::string_view rel, const std::vector<std::string>& secrets) 
     const std::string_view name = slash == std::string_view::npos ? rel : rel.substr(slash + 1);
     for (const std::string_view end : {".key", ".pem", ".sqlite", ".sqlite3", ".db"})
         if (name.size() > end.size() && name.ends_with(end)) return true;
+    // SSH (2026-11-04, the grabloop.app report): anything below .ssh/, and the private keys' own names
+    // (their .pub is public).
+    for (std::size_t s = 0; s <= rel.size();) {
+        const std::size_t e = std::min(rel.find('/', s), rel.size());
+        if (rel.substr(s, e - s) == ".ssh") return true;
+        s = e + 1;
+    }
+    for (const std::string_view key : {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk", "id_ed25519_sk"})
+        if (name == key) return true;
     return false;
+}
+
+bool private_key_head(std::string_view head) noexcept {
+    if (head.starts_with("PuTTY-User-Key-File-")) return true;
+    if (!head.starts_with("-----BEGIN ")) return false;
+    const std::string_view first = head.substr(0, head.find('\n'));
+    return first.find("PRIVATE KEY-----") != std::string_view::npos;
 }
 
 std::string parse(const json::Value& req, Op& out) {
@@ -336,13 +352,16 @@ json::Value do_read(const Op& op) {
     part.resize(got);
     std::string whole, digest;
     if (size <= kDigestMax && read_all(fd, kDigestMax, whole, why)) digest = sha256_hex(whole);
+    char head[64];  // the first line says whether the file is a private key, whatever its name and the offset read
+    const ssize_t head_n = ::pread(fd, head, sizeof head, 0);
+    const bool key_file = head_n > 0 && private_key_head(std::string_view(head, static_cast<std::size_t>(head_n)));
     ::close(fd);
     const bool text = !op.as_base64 && utf8_text(part);
     return json::Value::object().set("ok", true).set("as", install::executing_account()).set("path", abs).set("size", static_cast<double>(size))
         .set("mode", install::mode_string(st.st_mode & 07777)).set("mtime", iso(st.st_mtime)).set("sha256", digest)
         .set("offset", static_cast<double>(start)).set("length", static_cast<double>(got)).set("more", static_cast<double>(size - start - got))
         .set("encoding", text ? "text" : "base64").set("content", text ? part : base64_encode(part))
-        .set("credentials", secret_path(op.path, op.secrets))
+        .set("credentials", secret_path(op.path, op.secrets) || key_file)
         .set("untrusted", true);
 }
 
@@ -459,7 +478,9 @@ json::Value do_write(const Op& op, bool edit) {
     } else if (cur.exists && !op.overwrite) {
         return done(fail(abs + " exists; overwrite: true replaces it (the one there is kept in the history)"));
     }
-    const bool secret = secret_path(op.path, op.secrets);
+    // A credential by its path, or a private key by its first line, the new text's or the one there
+    // (2026-11-04: a deploy key under any name is made 0600 and its previews show no line of it).
+    const bool secret = secret_path(op.path, op.secrets) || private_key_head(content) || (cur.content_known && private_key_head(cur.content));
     if (cur.exists && cur.content_known && content == cur.content) {
         // The file holds this text already: nothing written, nothing kept in the history, and the
         // handler queues nothing for approval (the alpha.121 report).

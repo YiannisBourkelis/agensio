@@ -50,6 +50,7 @@ const char* state_name(PendingChange::State s) noexcept {
         case PendingChange::State::running: return "running";
         case PendingChange::State::done: return "done";
         case PendingChange::State::failed: return "failed";
+        case PendingChange::State::skipped: return "skipped";
         case PendingChange::State::rejected: return "rejected";
     }
     return "?";
@@ -116,7 +117,7 @@ json::Value pending_json(const PendingChange& c, std::time_t now, bool with_resu
                         .set("their_reason", c.reason);
     if (c.state == PendingChange::State::waiting) v.set("expires_in_s", static_cast<double>(ApprovalStore::kTtl - (now - c.created)));
     if (!c.approver.empty()) v.set("approved_by", c.approver);
-    if (with_result && (c.state == PendingChange::State::done || c.state == PendingChange::State::failed)) {
+    if (with_result && (c.state == PendingChange::State::done || c.state == PendingChange::State::failed || c.state == PendingChange::State::skipped)) {
         v.set("status", c.status);
         v.set("result", c.result);
     }
@@ -262,6 +263,77 @@ std::string unified_diff(std::string_view before, std::string_view after, std::s
         i = j;
     }
     if (max_lines && total > written) out += "... " + std::to_string(total - written) + " more lines of the diff\n";
+    return out;
+}
+
+namespace {
+
+// One line of an env-like file as "NAME=" with what follows the '=' masked; the leading blanks, a
+// comment's '#' and "export " kept. False when the line is no assignment.
+bool masked_assignment(std::string_view line, std::string& out) {
+    std::size_t i = 0;
+    auto blanks = [&] {
+        while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    };
+    blanks();
+    if (i < line.size() && line[i] == '#') {
+        ++i;
+        blanks();
+    }
+    if (line.substr(i).starts_with("export ")) {
+        i += 7;
+        blanks();
+    }
+    const std::size_t name = i;
+    if (i >= line.size() || !(std::isalpha(static_cast<unsigned char>(line[i])) || line[i] == '_')) return false;
+    while (i < line.size() && (std::isalnum(static_cast<unsigned char>(line[i])) || line[i] == '_' || line[i] == '.')) ++i;
+    if (i - name > 64) return false;
+    blanks();
+    if (i >= line.size() || line[i] != '=') return false;
+    ++i;
+    const std::size_t value = line.size() - i;
+    out = std::string(line.substr(0, i)) + (value ? "<" + std::to_string(value) + " bytes>" : std::string());
+    return true;
+}
+
+std::string masked_line(std::string_view line, bool env_like) {
+    if (line.find_first_not_of(" \t\r") == std::string_view::npos) return std::string(line);
+    std::string out;
+    if (env_like && masked_assignment(line, out)) return out;
+    if (env_like && line.find_first_not_of(" \t") != std::string_view::npos && line[line.find_first_not_of(" \t")] == '#')
+        return "#<" + std::to_string(line.size()) + " bytes>";
+    return "<" + std::to_string(line.size()) + " bytes>";
+}
+
+}  // namespace
+
+bool env_like_text(std::string_view text) {
+    std::size_t at = 0;
+    while (at < text.size()) {
+        const std::size_t end = std::min(text.find('\n', at), text.size());
+        const std::string_view line = text.substr(at, end - at);
+        at = end + 1;
+        const std::size_t first = line.find_first_not_of(" \t\r");
+        if (first == std::string_view::npos || line[first] == '#') continue;
+        std::string ignored;
+        if (!masked_assignment(line, ignored)) return false;
+    }
+    return true;
+}
+
+std::string mask_credential_diff(std::string_view diff, bool env_like) {
+    std::string out;
+    std::size_t at = 0;
+    while (at < diff.size()) {
+        const std::size_t end = std::min(diff.find('\n', at), diff.size());
+        const std::string_view line = diff.substr(at, end - at);
+        at = end + 1;
+        // The diff writer's content lines carry one prefix (' ', '-', '+'); its own lines do not.
+        if (!line.empty() && (line[0] == ' ' || line[0] == '-' || line[0] == '+'))
+            out += std::string(1, line[0]) + masked_line(line.substr(1), env_like) + "\n";
+        else
+            out += std::string(line) + "\n";
+    }
     return out;
 }
 
