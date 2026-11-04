@@ -35,8 +35,9 @@ beyond undo. Everything else is made at once, as before, with
 the caller's `confirm`: none of it runs code, moves a secret off the host, grants access, or destroys
 beyond undo.
 
-A dry run (`dry_run: true`, `--dry-run`) is never held: it answers as it always did and adds
-`needs_approval` with the reasons the real change would wait. A command that has no dry run (a
+A dry run (`dry_run: true`, `--dry-run`) is never held: it answers as it always did and, when the
+change would go ahead, adds `needs_approval` with the reasons the real change would wait (a refusal
+carries none, since the real change is refused too; until 0.1.0-alpha.128 it carried them). A command that has no dry run (a
 password user, the trash, a reveal, a site's disable, enable or delete, a reload) refuses one with
 400 and does nothing; `agensio ctl` refuses `--dry-run` itself on a command that only reads (a reveal,
 a file's read), whose request carries no body (until 0.1.0-alpha.127 it dropped the flag and sent the

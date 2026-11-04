@@ -1613,9 +1613,19 @@ static void test_listen_defaults() {
               times(holder_fix, "remove the listen line of c.test") == 1);
         // Its text too: handed back alone, a.test would lose IPv4 while c.test keeps the socket (the alpha.126
         // report: it said "Give it the server's addresses").
-        CHECK(holder_text.find("Give every site on 192.0.2.10:8080 the server's addresses in one go (a.test shares it with c.test, and a site handed back alone "
+        CHECK(holder_text.find("Give every site on 192.0.2.10:8080 the server's addresses in one go (a.test shares it with c.test; a site handed back alone "
                                "answers over IPv6 only until the last leaves)") != std::string::npos &&
               holder_text.find("Give it the server's addresses") == std::string::npos);
+        {
+            // With two others, a list that ends before the clause (the alpha.127 report, S4: "c.test, *, and a site
+            // handed back alone" read as one more site).
+            Config three = load("x.toml", head + "[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"192.0.2.10:8080\"]\n" + root);
+            std::string text;
+            for (const auto& n : access_notices(three))
+                if (n.code == "listen_family_split" && n.site == "a.test") text = n.text;
+            if (text.find("(a.test shares it with c.test and b.test; a site handed back alone") == std::string::npos) std::printf("three holders: %s\n", text.c_str());
+            CHECK(text.find("(a.test shares it with c.test and b.test; a site handed back alone answers over IPv6 only until the last leaves)") != std::string::npos);
+        }
         CHECK(managed_text.find("the one IPv4 address of the interface with the default route") != std::string::npos && managed_text.find("or add") == std::string::npos &&
               managed_text.find("cannot be finished") == std::string::npos && managed_fix.find("lists that address too") == std::string::npos &&
               managed_fix.find("remove the listen line of a.test") != std::string::npos && managed_fix.find("remove the listen line of c.test") != std::string::npos);
@@ -13236,11 +13246,13 @@ static void test_mcp_texts() {
     if (texts.instructions.size() > 2048) std::printf("MCP instructions: %zu characters, a host shows 2048\n", texts.instructions.size());
     CHECK(texts.instructions.size() <= 2048);
     std::set<std::string> names;
-    std::string update, php_versions;
+    std::string update, php_versions, ask, approvals;
     for (const auto& [name, description] : texts.tools) {
         names.insert(name);
         if (name == "site_update") update = description;
         if (name == "php_versions") php_versions = description;
+        if (name == "approvals_ask") ask = description;
+        if (name == "approvals_list") approvals = description;
         if (description.size() > 16384) std::printf("MCP tool %s: %zu characters, a host shows 16384\n", name.c_str(), description.size());
         CHECK(description.size() <= 16384 && description.find("server instructions") == std::string::npos);
         CHECK(description.find("(a redirect,") == std::string::npos);
@@ -13249,6 +13261,10 @@ static void test_mcp_texts() {
     // ... is root's" as covering the switch, and handed the user `agensio ctl site-update ... --php-version`
     // to run as root): the instructions name it under site_update, php_versions says the switch is never
     // root's, and so does the answer's own installing field.
+    // A secret is never in approvals_ask's answer, only a note (since 0.1.0-alpha.127): its description says
+    // where the value is, so an agent does not report that nothing came back (the alpha.127 report, S5).
+    CHECK(ask.find("approvals_list with that change's id hands the value out, once") != std::string::npos &&
+          approvals.find("an approved secret (a reveal's values, a generated password, a credential file's content) is handed out there, once") != std::string::npos);
     CHECK(texts.instructions.find("site_update (HTTPS, PHP versions,") != std::string::npos);
     CHECK(php_versions.find("never root's work or a terminal's: call site_update with php_version") != std::string::npos &&
           php_versions.find("Only installing or removing a version is root's") != std::string::npos);

@@ -4066,6 +4066,8 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                 const auto own = on_ports(*site);
                 const bool joined = own.count(p) && own.at(p).any6;
                 const std::string partners = names_of(s.sites, site);  // the others holding the address
+                std::string sharers = partners;  // the same in a sentence: "c.test and *" (the alpha.127 report)
+                if (const std::size_t last = sharers.rfind(", "); last != std::string::npos) sharers.replace(last, 2, " and ");
                 // No site cut off, and this one lists the address beside [::]:P as the sites cut off were told
                 // to: nothing to tell it while another holder has the address alone, which carries the note on
                 // what a site added later meets (the alpha.124 report: each site that took the way was told to
@@ -4113,8 +4115,8 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                                    // while they keep the socket (the alpha.126 report): every site, in one go.
                                    ": " + cut + ". " +
                                    (alone ? "Give it the server's addresses (" + hand_back(*site) + "), "
-                                          : "Give every site on " + s.listen + " the server's addresses in one go (" + name + " shares it with " + partners +
-                                                ", and a site handed back alone answers over " + other + " only until the last leaves), ") +
+                                          : "Give every site on " + s.listen + " the server's addresses in one go (" + name + " shares it with " + sharers +
+                                                "; a site handed back alone answers over " + other + " only until the last leaves), ") +
                                    (whole ? "a specific address of this host, " : "") +
                                    (s.specific && s.joinable && count ? "have the sites cut off list " + s.listen + " too, " : "") + "or keep a family out with an access rule",
                                // With no site cut off, what a site added later does comes first (the alpha.125 report:

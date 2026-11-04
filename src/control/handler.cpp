@@ -43,10 +43,13 @@
 namespace agensio {
 
 void ControlHandler::reply(Stream& s, int status, const json::Value& body) {
-    // A dry run of a change the gate holds back says so in its answer (docs/design-site-operations.md 27.2).
+    // A dry run of a change the gate holds back says so in its answer (docs/design-site-operations.md 27.2),
+    // a dry run that would go ahead only: one refused, or with root's steps first (ok: false), is refused
+    // for real too and waits for no one (the alpha.127 report: a refusal told the agent to have it approved).
     if (const auto it = notes_.find(&s); it != notes_.end()) {
         json::Value merged = body;
-        if (merged.is_object())
+        const bool goes_ahead = status / 100 == 2 && !(body["ok"].type() == json::Value::Type::boolean && !body["ok"].boolean());
+        if (merged.is_object() && goes_ahead)
             merged.set("needs_approval", it->second)
                 .set("approval_note", "done for real, this change waits for a person's approval with a code from their authenticator app (agensio ctl approve)");
         notes_.erase(it);

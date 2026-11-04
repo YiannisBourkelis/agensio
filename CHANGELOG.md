@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0-alpha.128
+
+- **Fix: a refused change told the agent it waited for approval** (the alpha.127 report, S1). A refused
+  call to a gated tool (`site_env_set` with a lower-case name, `site_file_write` of `../x`), with
+  `dry_run` or without, carried `needs_approval` and an `approval_note` saying the change waits for a
+  person's code, though nothing waited and the real change is refused too. Only a dry run that would
+  go ahead carries them now.
+- `ctl --dry-run` on a read says what waits only where something does: a reveal (`site-env --reveal`)
+  and a credential file's read; `site-env` without `--reveal` was told its read would wait (S2).
+- The listen texts name the sites sharing an address as a list ("c.test and *") ended before the
+  clause on a site handed back alone, which read as one more site (S4).
+- `approvals_ask`'s and `approvals_list`'s descriptions say that a secret (a reveal's values, a
+  generated password, a credential file's content) is never in the answer: `approvals_list` with the id
+  hands it out, once (S5).
+
 ## 0.1.0-alpha.127 (2026-11-04)
 
 - **Fix: `ctl --dry-run` on a reveal or a file's read queued the read itself** (the alpha.126 report,

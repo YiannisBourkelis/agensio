@@ -1261,8 +1261,8 @@ PYT
 # site's disable read no dry_run and ran (a password user refused the field): a command without a dry
 # run now refuses one before anything. The environment has its own, and a change it refuses is never
 # stored for a person.
-check "dry runs: a command without one refuses it, the environment's writes nothing, a change its dry run refuses waits for no one" \
-  "env-dry-unwritten 400-reveal 400-user 400-trash 400-disable 400-unstored" \
+check "dry runs: a command without one refuses it, the environment's writes nothing, a change its dry run refuses waits for no one and says no approval" \
+  "env-dry-unwritten 400-dry-unnoted 400-reveal 400-user 400-trash 400-disable 400-unstored" \
   "$(python3 - "$CS" <<'PYT'
 import json, subprocess, sys
 sock = sys.argv[1]
@@ -1276,7 +1276,10 @@ def waiting(suffix):
 out = []
 st, d = api("POST", "/v1/sites/dj.test/env", {"set": {"DRY_ONLY": "x"}, "dry_run": True, "confirm": True, "reason": "dry"})
 env = open("bench/tmp/env/dj.test.env").read()
-out.append("env-dry-unwritten" if st == 200 and d.get("dry_run") and "DRY_ONLY" in d.get("set", []) and "DRY_ONLY" not in env else str(st) + " written:" + str("DRY_ONLY" in env))
+out.append("env-dry-unwritten" if st == 200 and d.get("dry_run") and "DRY_ONLY" in d.get("set", []) and "DRY_ONLY" not in env and d.get("needs_approval") and "approval_note" in d else str(st) + " written:" + str("DRY_ONLY" in env) + str(d)[:200])
+# A dry run the server refuses says nothing of an approval: the real change is refused too (the alpha.127 report, S1).
+st, d = api("POST", "/v1/sites/dj.test/env", {"set": {"e": "1"}, "dry_run": True, "confirm": True, "reason": "dry"})
+out.append("400-dry-unnoted" if st == 400 and "needs_approval" not in d and "approval_note" not in d else str(st) + str(d)[:200])
 st, d = api("POST", "/v1/sites/dj.test/env", {"reveal": ["DATABASE_URL"], "dry_run": True, "confirm": True, "reason": "dry"})
 out.append("400-reveal" if st == 400 and "hunter2" not in json.dumps(d) else str(st) + (" leaked" if "hunter2" in json.dumps(d) else ""))
 st, d = api("POST", "/v1/sites/g3.test/auth-users", {"user": "dryrun", "generate": True, "dry_run": True, "confirm": True, "reason": "dry"})
@@ -1290,7 +1293,7 @@ out.append("400-disable" if st == 400 and s2 == 200 else str(st) + " site:" + st
 if s2 != 200: api("POST", "/v1/sites/g3.test/enable", {"confirm": True, "reason": "dry"})
 st, d = api("POST", "/v1/sites/dj.test/env", {"set": {"PATH": "/tmp"}, "confirm": True, "reason": "dry"})
 left = waiting("/env")
-out.append("400-unstored" if st == 400 and not left else str(st) + " waiting:" + str(len(left)))
+out.append("400-unstored" if st == 400 and not left and "needs_approval" not in d and "approval_note" not in d else str(st) + " waiting:" + str(len(left)) + str(d)[:200])
 for i in left: api("POST", "/v1/approvals/" + i + "/reject", {})
 print(" ".join(out))
 PYT
@@ -1299,8 +1302,8 @@ PYT
 # the real read was queued; ctl approve took a secret the requester was to get by id. On a terminal, as
 # a person types them: approving another's reveal shows no value, the requester gets it; a reveal typed
 # at the terminal is that terminal's, shown there.
-check "ctl: --dry-run on a read refused, nothing queued; ctl approve leaves a secret to whoever asked; a reveal typed at a terminal shows it there" \
-  "2-refused 2-refused 0-waiting approve-shows-none requester-gets-it typed-shown" \
+check "ctl: --dry-run on a read refused, saying what waits only where something does, nothing queued; ctl approve leaves a secret to whoever asked; a reveal typed at a terminal shows it there" \
+  "2-refused 2-refused 2-refused 0-waiting approve-shows-none requester-gets-it typed-shown" \
   "$(python3 - "$BIN" "$CS" <<'PYT'
 import importlib.util, json, os, pty, secrets, select, subprocess, sys, time
 binary, sock = sys.argv[1:3]
@@ -1337,9 +1340,12 @@ def on_tty(argv):  # argv on a pseudo-terminal with a fresh approver whose code 
         subprocess.run([binary, "approver-remove", name, "-c", config], capture_output=True)
     return text.decode(errors="replace")
 out = []
-for argv in (["site-env", "dj.test", "--reveal", "DATABASE_URL"], ["site-file-read", "g3.test", "index.html"]):
+# What waits without the flag is said where something does: a reveal, a credential file's read (the alpha.127 report, S2).
+for argv, says in ((["site-env", "dj.test", "--reveal", "DATABASE_URL"], "without it, a reveal waits for a person's code"),
+                   (["site-file-read", "g3.test", "index.html"], "a credential file's read waits for a person's code; any other file is read at once"), (["site-env", "dj.test"], None)):
     r = subprocess.run([binary, "ctl", *argv, "--dry-run", "--socket", sock], capture_output=True, text=True, stdin=subprocess.DEVNULL)
-    out.append("2-refused" if r.returncode == 2 and "has no dry run" in r.stderr else str(r.returncode) + ":" + (r.stdout + r.stderr)[:120].replace(" ", "_"))
+    said = says in r.stderr if says else "person's code" not in r.stderr
+    out.append("2-refused" if r.returncode == 2 and "has no dry run" in r.stderr and said else str(r.returncode) + ":" + (r.stdout + r.stderr)[:160].replace(" ", "_"))
 left = waiting()
 out.append(str(len(left)) + "-waiting")
 for i in left: api("POST", "/v1/approvals/" + i + "/reject", {})

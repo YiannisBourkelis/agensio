@@ -1339,8 +1339,13 @@ int main(int argc, char** argv) {
             } else if (body["dry_run"].boolean()) {
                 // A read has no dry run, and a GET carries no body: the flag was dropped, so a reveal or a
                 // credential file's read was queued for real (the alpha.126 report).
+                // What waits without the flag, said only where something can (the alpha.127 report: every
+                // site-env and site-file-read was told its read would wait).
                 std::cerr << "ctl: " << command << " has no dry run: nothing was done"
-                          << (command == "site-env" || command == "site-file-read" ? " (a value or a credential file's content waits for a person's code without it)" : "") << "\n";
+                          << (command == "site-env" && !reveal.empty() ? " (without it, a reveal waits for a person's code)"
+                              : command == "site-file-read"            ? " (without it, a credential file's read waits for a person's code; any other file is read at once)"
+                                                                       : "")
+                          << "\n";
                 return 2;
             }
             // --prompt: the password is asked here and hashed here; only the hash goes to the server

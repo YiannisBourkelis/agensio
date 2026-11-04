@@ -517,15 +517,18 @@ std::vector<Tool> tools() {
                  "the person approves it with the code from their authenticator app. Nothing you send can approve it, and no tool takes a "
                  "code. Changes approved together run in the order they were queued, and stop at the first that fails: the rest are skipped, not run. Each entry: id, state (waiting, running, done, failed, rejected, skipped), needs_approval, preview, their_reason (the words of "
                  "whoever queued it), and once it ran, status and result: read result to see what the change did. With id, that change alone; "
-                 "an approved read of a credential file hands its content out there, once, and never in the list. A change waits ten "
+                 "an approved secret (a reveal's values, a generated password, a credential file's content) is handed out there, once, and "
+                 "never in the list. A change waits ten "
                  "minutes. Queue the changes that belong together, then call approvals_ask once, or ask the person to run agensio ctl "
                  "approve on the server; never ask the person for the code.",
                  "GET", "/v1/approvals", true, false, Role::admin,
-                 schema({{"id", prop("string", "One change's id (12 hex digits, from the answer that queued it): that change alone, with its result; an approved read of a credential file hands its content out here, once.")}}, {})});
+                 schema({{"id", prop("string", "One change's id (12 hex digits, from the answer that queued it): that change alone, with its result; an approved secret (a reveal's values, a generated password, a credential file's content) is handed out here, once.")}}, {})});
     t.push_back({"approvals_ask", "Ask the person to approve what waits",
                  "Puts every change waiting for approval into the MCP client's own dialog, as the server describes each one, with a field "
                  "for the code from the person's authenticator app: one code approves them all, and you neither see nor type it. Call it "
                  "once after queuing the changes that belong together, then read the answer (each change's result) or approvals_list. A "
+                 "secret is never in the answer: for a reveal, a generated password or a credential file's read the result is a note, and "
+                 "approvals_list with that change's id hands the value out, once. A "
                  "client that cannot ask (Claude Code's VS Code extension declines every question) gets, instead, the line for the person "
                  "to run on the server: agensio ctl approve. Never ask the person to give you the code, and never offer to type it.",
                  "POST", "", false, false, Role::admin, schema({}, {})});
