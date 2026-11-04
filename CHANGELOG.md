@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.125 (unreleased)
+## 0.1.0-alpha.125 (2026-11-04)
 
 - **Fix: rotating a variable of a Laravel `.env` removed it.** `site_env_set` with `unset` and
   `generate` of the same name, the way the tools advise rotating a secret, removed the name from the
