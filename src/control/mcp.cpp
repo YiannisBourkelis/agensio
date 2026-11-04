@@ -518,7 +518,7 @@ std::vector<Tool> tools() {
                  "code. Changes approved together run in the order they were queued, and stop at the first that fails: the rest are skipped, not run. Each entry: id, state (waiting, running, done, failed, rejected, skipped), needs_approval, preview, their_reason (the words of "
                  "whoever queued it), and once it ran, status and result: read result to see what the change did. With id, that change alone; "
                  "an approved secret (a reveal's values, a generated password, a credential file's content) is handed out there, once, and "
-                 "never in the list. A change waits ten "
+                 "never in the list, to the account that asked for it only. A change waits ten "
                  "minutes. Queue the changes that belong together, then call approvals_ask once, or ask the person to run agensio ctl "
                  "approve on the server; never ask the person for the code.",
                  "GET", "/v1/approvals", true, false, Role::admin,

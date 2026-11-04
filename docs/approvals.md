@@ -82,7 +82,9 @@ then runs in the order it was asked for, with its result printed. A secret is no
 value, a generated password or a credential file's content goes once to whoever asked for it, by
 `approvals_list` with the id (`GET /v1/approvals/ID`), so approving an agent's reveal leaves the value to
 the agent (until 0.1.0-alpha.127 `ctl approve` took it, and the agent was told it was handed out
-already). The changes approved together stop at
+already). Only the account that asked takes it: another admin account that asks by the id, which the
+list shows every admin, gets a note naming the account, and the audit log records the attempt (until
+0.1.0-alpha.128 any admin account that knew the id took it). The changes approved together stop at
 the first that fails: the ones after it are `skipped`, not run, each saying which change failed, so a
 deploy queued as an install, the switch to it and the deletes of older releases never switches to a
 release that did not install (since 0.1.0-alpha.124; before, every change ran whatever the one before

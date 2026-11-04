@@ -88,6 +88,14 @@ ctl site-file-read a.test deploy_key > $T/out
 KID=$(j 'd["id"]')
 check "the next read waits for approval; approved, the list never carries it and GET by id hands it out once" "True yes no yes no" \
   "$(j 'd["pending"]') $(j '"yes" if d.get("needs_approval") else d') $(approve $KID > $T/ap; grep -q keymaterial $T/ap && echo yes || echo no) $(curl -sS --unix-socket $CS http://control/v1/approvals/$KID | grep -q keymaterial && echo yes) $(curl -sS --unix-socket $CS http://control/v1/approvals/$KID | grep -q keymaterial && echo yes || echo no)"
+# A secret goes to the account that asked for it (security page row 56): another admin account that reads
+# the id in the list gets a note and an audit line, and the requester still gets it, once (the alpha.127
+# report's open question: until then any admin account took it).
+ctl site-file-read a.test deploy_key > $T/out
+OID=$(j 'd["id"]')
+approve $OID > /dev/null
+check "a secret is handed out to the account that asked: another admin account (the server's) gets a note and is audited, the requester gets the content" "no yes yes yes" \
+  "$(su -s /bin/sh agensio -c "curl -sS --unix-socket $CS http://control/v1/approvals/$OID" > $T/other; grep -q keymaterial $T/other && echo yes || echo no) $(grep -q 'to the account that asked for it (uid 0)' $T/other && echo yes) $(grep -q "approvals/$OID: secret not handed out: uid 0 asked for it" $T/logs/audit.log && echo yes) $(curl -sS --unix-socket $CS http://control/v1/approvals/$OID | grep -q keymaterial && echo yes)"
 # An approved batch stops at its first failure (the grabloop.app answer: a deploy queues the install, the
 # switch and the deletes together, and a failed install must not be followed by the switch). The write
 # is bound to its file being absent; the file appears before the approval, so the write fails, and the

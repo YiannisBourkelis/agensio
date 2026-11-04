@@ -3541,7 +3541,16 @@ void ControlHandler::approvals_get(Stream& s, std::string_view id) {
         return;
     }
     json::Value v = control::pending_json(*c, now, true).set("text", control::pending_text(*c, now));
-    take_read_once(*c, v);
+    // A secret goes to the account that asked for it (security page row 56), never to another admin
+    // account that read the id in the list (the alpha.127 report's open question: any did).
+    if (c->secret_result && s.conn.peer_uid != c->uid) {
+        if (v["result"].is_object()) {
+            v.set("result", json::Value::object().set("ok", true).set("note", "the secret is handed out once, to the account that asked for it (uid " + std::to_string(c->uid) + ")"));
+            audit_peer(s, "approvals/" + c->id, "secret not handed out: uid " + std::to_string(c->uid) + " asked for it");
+        }
+    } else {
+        take_read_once(*c, v);
+    }
     reply(s, 200, v);
 }
 

@@ -2,6 +2,11 @@
 
 ## 0.1.0-alpha.128
 
+- **Fix: an approved secret went to any admin account that asked by its id** (the alpha.127 report's
+  open question). A revealed value, a generated password or a credential file's content is handed out
+  once by `approvals_list` with the id, which the list shows every admin account; the first to ask took
+  it, though the documents said it goes to whoever asked for it. Now only the account that asked takes
+  it; another gets a note naming that account, and the audit log records the attempt.
 - **Fix: a refused change told the agent it waited for approval** (the alpha.127 report, S1). A refused
   call to a gated tool (`site_env_set` with a lower-case name, `site_file_write` of `../x`), with
   `dry_run` or without, carried `needs_approval` and an `approval_note` saying the change waits for a
