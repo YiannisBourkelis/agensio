@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.0-alpha.127
+
+- **Fix: `ctl --dry-run` on a reveal or a file's read queued the read itself** (the alpha.126 report,
+  problem 1). A read sends no body, so the flag was dropped: `agensio ctl site-env NAME --reveal KEY
+  --dry-run`, or `site-file-read` of a credential file, waited for approval as the real read, and a
+  code approving the changes waiting ran it with them. `ctl` now refuses `--dry-run` on every command
+  that only reads (exit 2, nothing sent), as the socket and MCP already refused it.
+- **Fix: `agensio ctl approve` took a secret meant for whoever asked** (problem 2). Approving an
+  agent's reveal, a generated password or a credential file's read printed the value on the approver's
+  terminal and used up its one hand-out, so the agent was told "the secret was handed out once
+  already". `ctl approve` now prints the server's note in its place and the requester takes the value
+  by id (`approvals_list` with the id, `GET /v1/approvals/ID`), as the documents said; a command typed
+  at a terminal that waits for approval still shows the secret it asked for there.
+- `site_env_set` through MCP has `dry_run`, as `ctl` and the socket have since 0.1.0-alpha.126, so an
+  agent can show the user a rotation's warnings before the change waits.
+- The `run_as_root` line after a generated service password finds an `export` line too (`grep -m1 -E
+  '^(export[[:space:]]+)?DB_PASSWORD='`); it printed nothing for one.
+- An address split's text, with other sites on that address, says to give every one of them the
+  server's addresses in one go: handed back alone, the site answers over the other family only while
+  the others keep the socket. The fix already said so.
+
 ## 0.1.0-alpha.126 (2026-11-04)
 
 - **Security fix: a dry run of a command that has none ran it, the gated ones without approval.** The

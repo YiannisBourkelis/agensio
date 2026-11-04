@@ -495,10 +495,35 @@ post /v1/sites/lv.test/env '{"unset":["DB_PASSWORD","APP_KEY"],"generate":["DB_P
 check "a rotation's preview notes the service's password and the new APP_KEY" "yes yes" \
   "$(j '"yes" if "note: DB_PASSWORD is a new password its service" in d.get("preview", "") else d.get("preview")') $(j '"yes" if "a new APP_KEY signs every user out" in d.get("preview", "") else d.get("preview")')"
 curl -sS -o /dev/null --unix-socket $CS -X POST -d '{}' http://control/v1/approvals/$(j 'd["id"]')/reject
+# The password's line starts with export here, which the rotation keeps: root's line finds it too (the
+# alpha.126 report: grep '^DB_PASSWORD=' printed nothing).
+sed 's/^DB_PASSWORD=/export DB_PASSWORD=/' $T/env.before > $LV/shared/.env
 ctl site-env-set lv.test --unset DB_PASSWORD --generate DB_PASSWORD --unset APP_KEY --generate APP_KEY --yes --reason rotate > $T/out
-check "the rotation answers root's step at the service first, optimize after, the APP_KEY warning; root's line prints the new value, which the answer does not hold" "True True True same no" \
-  "$(j 'd["next_steps"][0].startswith("first, before the application needs it: root sets the new DB_PASSWORD"), "optimize" in d["next_steps"][-1], any("signs every user out" in w for w in d["warnings"])' | tr -d '(),') $([ "$(sh -c "$(j 'd["run_as_root"][0]')")" = "$(grep '^DB_PASSWORD=' $LV/shared/.env)" ] && echo same) $(grep -qF "$(sed -n 's/^DB_PASSWORD=//p' $LV/shared/.env)" $T/out && echo yes || echo no)"
+check "the rotation answers root's step at the service first, optimize after, the APP_KEY warning; root's line prints the new value of an export line, which the answer does not hold" "True True True same no" \
+  "$(j 'd["next_steps"][0].startswith("first, before the application needs it: root sets the new DB_PASSWORD"), "optimize" in d["next_steps"][-1], any("signs every user out" in w for w in d["warnings"])' | tr -d '(),') $(l=$(grep '^export DB_PASSWORD=' $LV/shared/.env); [ -n "$l" ] && [ "$(sh -c "$(j 'd["run_as_root"][0]')")" = "$l" ] && echo same) $(grep -qF "$(sed -n 's/^export DB_PASSWORD=//p' $LV/shared/.env)" $T/out && echo yes || echo no)"
 cp -p $T/env.before $LV/shared/.env
+# The MCP tool has the dry run too, without confirm (the alpha.126 report: only ctl and the socket had
+# it, so an agent could not show the user the warnings before queuing the change).
+check "MCP site_env_set has a dry run that needs no confirm: the rotation's warnings, nothing written, nothing waiting" "True no-confirm True yes same 0" \
+  "$(python3 - "$BIN" "$CS" <<'PYT'
+import json, subprocess, sys
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+def rpc(i, method, params=None):
+    msg = {"jsonrpc": "2.0", "id": i, "method": method}
+    if params is not None: msg["params"] = params
+    p.stdin.write(json.dumps(msg) + "\n"); p.stdin.flush()
+    return json.loads(p.stdout.readline())
+rpc(1, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}})
+schema = {t["name"]: t for t in rpc(2, "tools/list")["result"]["tools"]}["site_env_set"]["inputSchema"]
+out = [str("dry_run" in schema["properties"]), "no-confirm" if "confirm" not in schema.get("required", []) else "confirm-required"]
+r = rpc(3, "tools/call", {"name": "site_env_set", "arguments": {"name": "lv.test", "unset": ["DB_PASSWORD"], "generate": ["DB_PASSWORD"], "dry_run": True, "reason": "preview"}})
+sc = r["result"].get("structuredContent", {})
+out.append(str(bool(sc.get("dry_run")) and not r["result"]["isError"]))
+out.append("yes" if any("DB_PASSWORD is a new password" in w for w in sc.get("warnings", [])) else r["result"]["content"][0]["text"][:200].replace(" ", "_"))
+p.stdin.close(); p.wait()
+print(" ".join(out))
+PYT
+) $(cmp -s $T/env.before $LV/shared/.env && echo same) $(waiting)"
 
 # The scheduler (2026-11-04, the grabloop.app answer): the timer asks for schedule_run with --scheduled;
 # it holds no task slot, is skipped while a task runs, keeps the deploy's output, and the audit log

@@ -1595,10 +1595,10 @@ static void test_listen_defaults() {
                                  "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"192.0.2.10:8080\"]\n" + root +
                                  "[[site]]\nserver_name = [\"c.test\"]\nlisten = [\"[::]:8080\", \"192.0.2.10:8080\"]\n" + root;
         Config mixed = load("x.toml", head);
-        std::string joined_text, joined_fix, managed_text, managed_fix, holder_fix;
+        std::string joined_text, joined_fix, managed_text, managed_fix, holder_text, holder_fix;
         for (const auto& n : access_notices(mixed)) {
             if (n.code == "listen_family_split" && n.site == "c.test") joined_text = n.text, joined_fix = n.fix;
-            if (n.code == "listen_family_split" && n.site == "a.test") holder_fix = n.fix;
+            if (n.code == "listen_family_split" && n.site == "a.test") holder_text = n.text, holder_fix = n.fix;
             if (n.code == "listen_ipv6_only" && n.site == "m.test") managed_text = n.text, managed_fix = n.fix;
         }
         CHECK(joined_text.find("c.test lists 192.0.2.10:8080 beside [::]:8080, sharing the socket of a.test: m.test is reachable over IPv6 only") == 0 &&
@@ -1607,6 +1607,11 @@ static void test_listen_defaults() {
         // One of several holders: every holder's way once, its own included (the alpha.125 report).
         CHECK(holder_fix.find("Hand back every site on 192.0.2.10:8080 one after another") == 0 && times(holder_fix, "remove the listen line of a.test") == 1 &&
               times(holder_fix, "remove the listen line of c.test") == 1);
+        // Its text too: handed back alone, a.test would lose IPv4 while c.test keeps the socket (the alpha.126
+        // report: it said "Give it the server's addresses").
+        CHECK(holder_text.find("Give every site on 192.0.2.10:8080 the server's addresses in one go (a.test shares it with c.test, and a site handed back alone "
+                               "answers over IPv6 only until the last leaves)") != std::string::npos &&
+              holder_text.find("Give it the server's addresses") == std::string::npos);
         CHECK(managed_text.find("the one IPv4 address of the interface with the default route") != std::string::npos && managed_text.find("or add") == std::string::npos &&
               managed_text.find("cannot be finished") == std::string::npos && managed_fix.find("lists that address too") == std::string::npos &&
               managed_fix.find("remove the listen line of a.test") != std::string::npos && managed_fix.find("remove the listen line of c.test") != std::string::npos);

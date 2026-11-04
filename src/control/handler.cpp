@@ -3088,7 +3088,9 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
             if (!appenv::service_password(gen)) continue;
             service_steps.push("first, before the application needs it: root sets the new " + gen + " at its service (the site's database user, Redis's password, the "
                                "mail account), reading it with the run_as_root line, which prints it on root's terminal only; never ask for the value here");
-            root_lines.push("grep -m1 '^" + gen + "=' " + shell_word(std::string(r.get("file"))));
+            // A .env line may start with export, which the write keeps (the alpha.126 report: the line
+            // printed nothing for one).
+            root_lines.push("grep -m1 -E '^(export[[:space:]]+)?" + gen + "=' " + shell_word(std::string(r.get("file"))));
         }
         if (dry_run) {  // checked as the write would be, nothing written (the alpha.125 report: the dry run wrote it)
             if (!warnings.items().empty()) r.set("warnings", warnings);

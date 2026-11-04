@@ -4109,7 +4109,13 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                                     : s.v6       ? one_address6 + ", which takes every IPv6 connection of port " + p + " from outside"
                                     : s.specific ? one_address + ", which takes every IPv4 connection of port " + p + " from outside"
                                                  : "beside which [::]:" + p + " is opened IPv6-only (no SO_REUSEPORT)") +
-                                   ": " + cut + ". Give it the server's addresses (" + hand_back(*site) + "), " + (whole ? "a specific address of this host, " : "") +
+                                   // With other sites on the address, this one handed back alone loses that family
+                                   // while they keep the socket (the alpha.126 report): every site, in one go.
+                                   ": " + cut + ". " +
+                                   (alone ? "Give it the server's addresses (" + hand_back(*site) + "), "
+                                          : "Give every site on " + s.listen + " the server's addresses in one go (" + name + " shares it with " + partners +
+                                                ", and a site handed back alone answers over " + other + " only until the last leaves), ") +
+                                   (whole ? "a specific address of this host, " : "") +
                                    (s.specific && s.joinable && count ? "have the sites cut off list " + s.listen + " too, " : "") + "or keep a family out with an access rule",
                                // With no site cut off, what a site added later does comes first (the alpha.125 report:
                                // the note never said it).

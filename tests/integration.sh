@@ -1295,6 +1295,66 @@ for i in left: api("POST", "/v1/approvals/" + i + "/reject", {})
 print(" ".join(out))
 PYT
 )"
+# ctl and a secret (the alpha.126 report): --dry-run on a read (a reveal, a file's read) was dropped, so
+# the real read was queued; ctl approve took a secret the requester was to get by id. On a terminal, as
+# a person types them: approving another's reveal shows no value, the requester gets it; a reveal typed
+# at the terminal is that terminal's, shown there.
+check "ctl: --dry-run on a read refused, nothing queued; ctl approve leaves a secret to whoever asked; a reveal typed at a terminal shows it there" \
+  "2-refused 2-refused 0-waiting approve-shows-none requester-gets-it typed-shown" \
+  "$(python3 - "$BIN" "$CS" <<'PYT'
+import importlib.util, json, os, pty, secrets, select, subprocess, sys, time
+binary, sock = sys.argv[1:3]
+config = "bench/tmp/agensio-test.toml"
+spec = importlib.util.spec_from_file_location("approve_code", "tests/approve-code.py")
+ac = importlib.util.module_from_spec(spec); spec.loader.exec_module(ac)
+def api(method, path, body=None):
+    args = ["curl", "-sS", "-o", "/dev/stdout", "-w", "\n%{http_code}", "--unix-socket", sock, "-X", method, "http://control" + path]
+    if body is not None: args += ["-H", "Content-Type: application/json", "-d", json.dumps(body)]
+    out = subprocess.run(args, capture_output=True, text=True).stdout.rsplit("\n", 1)
+    return int(out[1]), (json.loads(out[0]) if out[0].strip() else {})
+def waiting():
+    return [a["id"] for a in api("GET", "/v1/approvals")[1]["approvals"] if a["state"] == "waiting"]
+def on_tty(argv):  # argv on a pseudo-terminal with a fresh approver whose code is typed when asked
+    name = "pty-" + secrets.token_hex(3)
+    subprocess.run([binary, "approver-add", name, "-c", config], check=True, capture_output=True)
+    secret = [l.split("=", 1)[1].strip() for l in open(os.path.join(os.path.dirname(os.path.abspath(config)), "approvers", name + ".totp")) if l.startswith("secret")][0]
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execv(argv[0], argv)
+    text, typed = b"", False
+    try:
+        while select.select([fd], [], [], 20)[0]:
+            try: chunk = os.read(fd, 4096)
+            except OSError: break
+            if not chunk: break
+            text += chunk
+            if not typed and b"Code from your authenticator app" in text:
+                os.write(fd, (ac.code_at(secret, int(time.time() // 30)) + "\n").encode()); typed = True
+    finally:
+        try: os.kill(pid, 9)  # gone already, or stuck waiting: never hang the suite
+        except OSError: pass
+        os.waitpid(pid, 0)
+        subprocess.run([binary, "approver-remove", name, "-c", config], capture_output=True)
+    return text.decode(errors="replace")
+out = []
+for argv in (["site-env", "dj.test", "--reveal", "DATABASE_URL"], ["site-file-read", "g3.test", "index.html"]):
+    r = subprocess.run([binary, "ctl", *argv, "--dry-run", "--socket", sock], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    out.append("2-refused" if r.returncode == 2 and "has no dry run" in r.stderr else str(r.returncode) + ":" + (r.stdout + r.stderr)[:120].replace(" ", "_"))
+left = waiting()
+out.append(str(len(left)) + "-waiting")
+for i in left: api("POST", "/v1/approvals/" + i + "/reject", {})
+st, d = api("GET", "/v1/sites/dj.test/env?reveal=DATABASE_URL")
+rid = d.get("id", "")
+shown = on_tty([binary, "ctl", "approve", rid, "--socket", sock])
+out.append("approve-shows-none" if "done (200)" in shown and "hunter2" not in shown and "handed out once" in shown else "approve:" + shown[-160:].replace(" ", "_").replace("\n", "|"))
+_, one = api("GET", "/v1/approvals/" + rid)
+out.append("requester-gets-it" if "hunter2" in json.dumps(one.get("result", {})) else "requester:" + json.dumps(one.get("result", {}))[:120].replace(" ", "_"))
+typed = on_tty([binary, "ctl", "site-env", "dj.test", "--reveal", "DATABASE_URL", "--socket", sock])
+out.append("typed-shown" if "hunter2" in typed else "typed:" + typed[-160:].replace(" ", "_").replace("\n", "|"))
+for i in waiting(): api("POST", "/v1/approvals/" + i + "/reject", {})
+print(" ".join(out))
+PYT
+)"
 check "the audit log: the queued change and the approval, by the approver's name; the run recorded as approved with a code" "yes yes yes" \
   "$(grep -q 'sites/dj.test/task (t): waits for approval [0-9a-f]\{12\}: installs the Python packages' bench/tmp/audit.log && echo yes) $(grep -q 'approvals ([0-9a-f]\{12\}): approved by tester' bench/tmp/audit.log && echo yes) $(grep -q 'running task pip_install packages=wagtail in .*, approved by tester with an authenticator code (approval [0-9a-f]\{12\})' bench/tmp/audit.log && echo yes)"
 # Without the helper, as the server's own account: the template row needs the application's

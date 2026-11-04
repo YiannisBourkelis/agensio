@@ -215,7 +215,8 @@ bool ask_code(std::size_t changes, std::string& code) {
 }
 
 // Approves `ids` (every change waiting when empty) with a code asked on the terminal; prints what ran.
-int approve_with_code(const std::string& socket, const std::vector<std::string>& ids) {
+// `asked_here`: this command asked for the change itself, so a secret it hands out is fetched and shown.
+int approve_with_code(const std::string& socket, const std::vector<std::string>& ids, bool asked_here) {
     std::string code;
     if (!ask_code(ids.size(), code)) return 1;
     if (code.empty()) {
@@ -244,8 +245,10 @@ int approve_with_code(const std::string& socket, const std::vector<std::string>&
         all_done = all_done && state == "done";
         agensio::json::Value shown = r["result"];
         // A secret (a revealed value, a generated password, a credential file) is handed out once, by
-        // id: this is the person's own terminal, so it is fetched and shown here.
-        if (shown.is_object() && std::string(shown.get("note")).find("handed out once") != std::string::npos) {
+        // id, to whoever asked: fetched and shown here only when this command asked for it (typed at a
+        // terminal). agensio ctl approve leaves it to the requester (the alpha.126 report: approving an
+        // agent's reveal printed the value here, and the agent got "handed out once already").
+        if (asked_here && shown.is_object() && std::string(shown.get("note")).find("handed out once") != std::string::npos) {
             agensio::ControlReply one;
             agensio::json::Value o;
             if (agensio::control_request(socket, "GET", "/v1/approvals/" + rid, "", one, error) && one.status == 200 && agensio::json::parse(one.body, o, perr)) shown = o["result"];
@@ -308,7 +311,7 @@ int ctl_approve(const std::string& socket, const std::vector<std::string>& ids, 
     }
     std::cout << chosen.size() << (chosen.size() == 1 ? " change waits" : " changes wait") << " for approval:\n\n" << text;
     if (list_only) return 0;
-    return approve_with_code(socket, chosen);
+    return approve_with_code(socket, chosen, false);
 }
 #endif
 
@@ -756,6 +759,8 @@ int main(int argc, char** argv) {
                              "                    the code from your authenticator app, asked on this terminal; one code approves the list\n"
                              "                    shown; no --yes, the code is the confirmation (admin; root sets an app up with\n"
                              "                    agensio approver-add NAME). A change that waits, typed here at a terminal, asks at once\n"
+                             "                    and shows a secret it asked for; approve shows none (a revealed value, a generated\n"
+                             "                    password, a credential file go once to whoever asked, by id)\n"
                              "upload: upload NAME [FILE]   stores FILE (or stdin) on the server for site-install --file NAME;\n"
                              "                    needs the operator role, no --yes\n"
                              "Answers are the control API's JSON; exit 1 on any refusal. Without --yes a change is\n"
@@ -1331,6 +1336,12 @@ int main(int argc, char** argv) {
             if (mutation) {
                 method = "POST";
                 if (yes || body["dry_run"].boolean()) body.set("confirm", true);  // a dry run changes nothing: no --yes needed (the alpha.122 report)
+            } else if (body["dry_run"].boolean()) {
+                // A read has no dry run, and a GET carries no body: the flag was dropped, so a reveal or a
+                // credential file's read was queued for real (the alpha.126 report).
+                std::cerr << "ctl: " << command << " has no dry run: nothing was done"
+                          << (command == "site-env" || command == "site-file-read" ? " (a value or a credential file's content waits for a person's code without it)" : "") << "\n";
+                return 2;
             }
             // --prompt: the password is asked here and hashed here; only the hash goes to the server
             // (2026-10-09, design section 25), so no server, helper, log or agent ever holds it.
@@ -1498,7 +1509,7 @@ int main(int argc, char** argv) {
                         if (agensio::json::parse(one.body, c, perr)) text = c.get("text");
                     }
                     std::cout << "This change waits for approval:\n\n" << agensio::control::escape_for_terminal(text) << "\n";
-                    return approve_with_code(socket_path, {std::string(pending.get("id"))});
+                    return approve_with_code(socket_path, {std::string(pending.get("id"))}, true);
                 }
             }
 #endif

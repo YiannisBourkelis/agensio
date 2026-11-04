@@ -38,7 +38,9 @@ beyond undo.
 A dry run (`dry_run: true`, `--dry-run`) is never held: it answers as it always did and adds
 `needs_approval` with the reasons the real change would wait. A command that has no dry run (a
 password user, the trash, a reveal, a site's disable, enable or delete, a reload) refuses one with
-400 and does nothing. A change whose dry run fails (an environment change to a `.env` with a quote
+400 and does nothing; `agensio ctl` refuses `--dry-run` itself on a command that only reads (a reveal,
+a file's read), whose request carries no body (until 0.1.0-alpha.127 it dropped the flag and sent the
+read, which then waited for approval). A change whose dry run fails (an environment change to a `.env` with a quote
 never closed, a name that is no variable's) is answered at once with that failure and never waits.
 
 ## 2. Set up an approver
@@ -75,7 +77,11 @@ agensio ctl approve
 It lists every change waiting, each as the server describes it: what makes it dangerous first (lines
 marked `!!`), then the change itself, then the words of whoever asked for it, marked as theirs and not
 checked. It asks for the code on the terminal; one code approves exactly the list shown, and each change
-then runs in the order it was asked for, with its result printed. The changes approved together stop at
+then runs in the order it was asked for, with its result printed. A secret is not printed: a revealed
+value, a generated password or a credential file's content goes once to whoever asked for it, by
+`approvals_list` with the id (`GET /v1/approvals/ID`), so approving an agent's reveal leaves the value to
+the agent (until 0.1.0-alpha.127 `ctl approve` took it, and the agent was told it was handed out
+already). The changes approved together stop at
 the first that fails: the ones after it are `skipped`, not run, each saying which change failed, so a
 deploy queued as an install, the switch to it and the deletes of older releases never switches to a
 release that did not install (since 0.1.0-alpha.124; before, every change ran whatever the one before
@@ -85,7 +91,7 @@ it did). Over SSH, `ssh -t HOST agensio ctl approve ID ...` works: the code is r
 - `agensio ctl approve ID ...` approves only those; `--list` shows without asking; `--show ID` prints one
   change whole; `--reject ID` drops one, nothing of it runs.
 - A command typed by you at a terminal that needs approval asks for the code at once: one command, one
-  code.
+  code. You asked for it, so a secret it reads (`agensio ctl site-env NAME --reveal KEY`) is shown there.
 - An MCP client that can put a question to you (MCP elicitation) shows the same list in its own dialog
   when the agent calls `approvals_ask`; you type the code there, and the agent never sees it. Claude
   Code's VS Code extension declines every such question, so with it you run `agensio ctl approve`.
