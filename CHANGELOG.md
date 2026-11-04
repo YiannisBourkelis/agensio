@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.127
+## 0.1.0-alpha.127 (2026-11-04)
 
 - **Fix: `ctl --dry-run` on a reveal or a file's read queued the read itself** (the alpha.126 report,
   problem 1). A read sends no body, so the flag was dropped: `agensio ctl site-env NAME --reveal KEY
