@@ -137,7 +137,7 @@ section of `docs/configuration.md` that explains the key.
 | `viewers` | string (group) | "" | Members may read: status, sites, logs, health, presets, settings, this reference. | reload | file | 15 |
 | `audit` | path | audit.log next to the error log | One line per mutating command or refusal: time, uid, gid, role, command, outcome. | reload | file | 15 |
 | `sites_root` | path | /var/www | Where site-create lays out sites and the helper may create directories; installs and copies stay below it. | reload | file | 15 |
-| `provision` | bool | true | Fork the root provisioning helper at start (accounts, directories, logs, pools, restart, install, copy on request). false hands root work back as commands. | restart | file | 15 |
+| `provision` | bool | true | Fork the root provisioning helper at start (accounts, directories, logs, pools, install, copy, tasks on request), and beside it its reader, which answers the reads (environment files, services, host protection, the trash, PHP versions) and checks approval codes apart from tasks. false hands root work back as commands. | restart | file | 15 |
 | `install` | bool | true | site-install may download archives from https URLs. false keeps only uploads. | reload | file | 15 |
 | `install_private` | bool | false | Let site-install fetch from loopback, private and link-local addresses (internal mirrors, test beds). | reload | file | 15 |
 | `install_ca` | path | "" (system store) | A PEM bundle site-install trusts instead of the system store. | reload | file | 15 |

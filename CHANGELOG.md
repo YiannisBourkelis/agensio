@@ -23,6 +23,20 @@
 - A skipped scheduled run (a task runs on the site, or the last minute's run still does) exits 0, its
   record still printed: exit 1 had systemd record the scheduler's unit as failed for each minute a
   deploy's task ran, though agensio counts it as skipped (the report's small item, the owner's decision).
+- **The reads and the approval codes no longer wait for a task** (the alpha.126 report, problem 3; the
+  owner's choice of a second helper process). The root helper answered one request at a time, so a
+  task held it for its whole run, 4 to 50 s of every minute for a site whose scheduler runs
+  `schedule:run`: health's checks of the environment files, the services and the host's protection,
+  `protection_show`, `site_service_status` and `site_service_logs` answered busy meanwhile, and an
+  approval code waited behind the task, past the 30 to 90 s an authenticator's code lives. A second
+  root process, the helper's reader, forked beside it before the privilege drop on a socketpair of its
+  own, now serves those reads, the trash listing, the PHP versions and the approval codes, and nothing
+  else; the helper refuses them, so each request has one process and wrong codes are counted in one.
+  It adds no request a compromised server could send (`docs/security-control-plane.md` row 57).
+- **Fix: the root helper kept descriptors above 1023 it inherited.** It closed those below 1024 only,
+  so on a host whose listeners and site logs went past 1023, they stayed open in root's helper and in
+  the programs it runs as root (`systemctl`, `journalctl`, `nft`, `php-fpm`; a site's task closes its
+  own). Both helpers close every descriptor but their own socket now.
 - **A scheduled command with `runInBackground()` is named, and its lock can be cleared** (the
   alpha.126 report, problem 4; the owner's decision to say so rather than keep such commands running).
   agensio ends whatever a task leaves running, the scheduler's runs included, so such a command is cut

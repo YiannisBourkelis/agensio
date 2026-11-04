@@ -7,8 +7,12 @@
 #include <pwd.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -269,6 +273,14 @@ std::string validate(const json::Value& req, const Config& cfg) {
         op == "trash_expire" || op == "host_protection" || op == "php_runtimes" || op == "approvers_list")
         return "";
     return "unknown operation '" + op + "'";
+}
+
+bool reader_op(std::string_view op) noexcept {
+    // Not the expiries (history_expire, trash_expire), which remove files, nor env_read and
+    // auth_users_read, which may tighten a file's mode: they wait for the main helper.
+    for (std::string_view r : {"approval_check", "approvers_list", "env_check", "app_check", "app_status", "app_logs", "host_protection", "php_runtimes", "trash_list"})
+        if (op == r) return true;
+    return false;
 }
 
 }  // namespace provision
@@ -2072,12 +2084,26 @@ json::Value trash_expire(const Config& cfg) {
 
 }  // namespace
 
+// Closes every descriptor from 3 up but `keep`: all of them, however high (until 0.1.0-alpha.127 the
+// helper closed those below 1024 only, so a host whose listeners and site logs went past 1023 left
+// them open in root's helper and in the programs it starts).
+void close_all_but(int keep) {
+#if defined(__linux__) && defined(SYS_close_range)
+    if ((keep <= 3 || ::syscall(SYS_close_range, 3u, static_cast<unsigned>(keep - 1), 0u) == 0) &&
+        ::syscall(SYS_close_range, static_cast<unsigned>(keep + 1), ~0u, 0u) == 0)
+        return;
+#endif
+    struct rlimit rl {};
+    const long top = ::getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY ? static_cast<long>(rl.rlim_cur) : 1L << 20;
+    for (long i = 3; i < top; ++i)
+        if (i != keep) ::close(static_cast<int>(i));
+}
+
 // The helper's loop: one JSON line in, one out, until the server closes its end.
-void helper_loop(int fd, const Config& cfg) {
+[[noreturn]] void helper_loop(int fd, const Config& cfg, provision::Role role, bool reader_apart) {
     // A root process that must not inherit the listeners or anything else: only the socket
     // (stdio points at /dev/null; program output comes back through our own pipe).
-    for (int i = 3; i < 1024; ++i)
-        if (i != fd) ::close(i);
+    close_all_but(fd);
     const int devnull = ::open("/dev/null", O_RDWR | O_CLOEXEC);
     if (devnull >= 0) {
         ::dup2(devnull, 0);
@@ -2105,6 +2131,13 @@ void helper_loop(int fd, const Config& cfg) {
             std::string err;
             if (!json::parse(line, req, err)) {
                 reply.set("ok", false).set("error", "bad request: " + err);
+            } else if (const bool read = provision::reader_op(req.get("op")), ping = req.get("op") == "ping";
+                       role == provision::Role::reader ? !read && !ping : read && reader_apart) {
+                // Each request has one helper (2026-11-04): the reader none but its reads and the
+                // approval codes, the main helper none of those while a reader serves them, so no
+                // request finds a second way in and the wrong codes are counted in one process.
+                reply.set("ok", false).set("error", role == provision::Role::reader ? "the reading helper serves reads and approval codes only"
+                                                                                    : "this request is the reading helper's");
             } else if (const std::string bad = provision::validate(req, cfg); !bad.empty()) {
                 reply.set("ok", false).set("error", bad);
             } else {
@@ -2237,56 +2270,89 @@ void helper_loop(int fd, const Config& cfg) {
     ::_exit(0);
 }
 
+// Forks one helper process on a socketpair of its own: the server's end in `fd`, its pid in `pid`.
+bool spawn(const Config& cfg, provision::Role role, bool reader_apart, int& fd, int& pid, std::string& why) {
+    int pair[2];
+    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) != 0) {
+        why = std::string("socketpair: ") + std::strerror(errno);
+        return false;
+    }
+    const pid_t child = ::fork();
+    if (child < 0) {
+        why = std::string("fork: ") + std::strerror(errno);
+        ::close(pair[0]);
+        ::close(pair[1]);
+        return false;
+    }
+    if (child == 0) {
+        ::close(pair[0]);
+        helper_loop(pair[1], cfg, role, reader_apart);
+    }
+    ::close(pair[1]);
+    fd = pair[0];
+    pid = child;
+    return true;
+}
+
 }  // namespace
+
+namespace provision {
+void serve(int fd, const Config& cfg, Role role, bool reader_apart) { helper_loop(fd, cfg, role, reader_apart); }
+}  // namespace provision
 
 bool Provisioner::start(const Config& cfg, ErrorLog& log) {
     if (::geteuid() != 0) {
         log.info("provisioning helper not started: the server does not start as root");
         return false;
     }
-    int pair[2];
-    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) != 0) {
-        log.error(std::string("provisioning helper: socketpair: ") + std::strerror(errno));
+    // The reader first, so that neither child is forked holding the other's socket (each closes every
+    // descriptor but its own anyway).
+    std::string why;
+    const bool reader = spawn(cfg, provision::Role::reader, false, reader_.fd, reader_.pid, why);
+    if (!reader) log.warn("provisioning helper: its reader did not start (" + why + "): reads and approval codes wait for tasks, as before 0.1.0-alpha.127");
+    if (!spawn(cfg, provision::Role::main, reader, main_.fd, main_.pid, why)) {
+        log.error("provisioning helper: " + why);
+        stop();  // the reader too: the server runs without the helper
         return false;
     }
-    const pid_t pid = ::fork();
-    if (pid < 0) {
-        log.error(std::string("provisioning helper: fork: ") + std::strerror(errno));
-        ::close(pair[0]);
-        ::close(pair[1]);
-        return false;
-    }
-    if (pid == 0) {
-        ::close(pair[0]);
-        helper_loop(pair[1], cfg);
-    }
-    ::close(pair[1]);
-    fd_ = pair[0];
-    pid_ = pid;
-    log.info("provisioning helper started (pid " + std::to_string(pid) + "): accounts, site layout, pools, restart, application install on request");
+    log.info("provisioning helper started (pid " + std::to_string(main_.pid) + "): accounts, site layout, pools, tasks, application install on request" +
+             (reader ? "; its reader (pid " + std::to_string(reader_.pid) + "): the reads and approval codes, apart from tasks" : std::string()));
     return true;
 }
 
+Provisioner::Channel& Provisioner::channel_for(const json::Value& req) noexcept {
+    return reader_.fd >= 0 && provision::reader_op(req.get("op")) ? reader_ : main_;
+}
+
 json::Value Provisioner::try_request(const json::Value& req) {
-    std::unique_lock lock(mutex_, std::try_to_lock);
+    Channel& c = channel_for(req);
+    std::unique_lock lock(c.mutex, std::try_to_lock);
     if (!lock.owns_lock()) return json::Value::object().set("ok", false).set("busy", true);
-    return exchange(req);  // under the lock taken here: nothing can slip in and make this wait
+    return exchange(c, req);  // under the lock taken here: nothing can slip in and make this wait
 }
 
 json::Value Provisioner::request(const json::Value& req) {
-    std::lock_guard lock(mutex_);
-    return exchange(req);
+    Channel& c = channel_for(req);
+    if (&c == &reader_) {  // reads take milliseconds to seconds; one that hangs is not waited for forever
+        std::unique_lock lock(c.mutex, std::chrono::seconds(kReadWait));
+        if (!lock.owns_lock()) return json::Value::object().set("ok", false).set("busy", true);
+        return exchange(c, req);
+    }
+    std::lock_guard lock(c.mutex);
+    return exchange(c, req);
 }
 
-json::Value Provisioner::exchange(const json::Value& req) {
+json::Value Provisioner::read(const json::Value& req) { return &channel_for(req) == &reader_ ? request(req) : try_request(req); }
+
+json::Value Provisioner::exchange(Channel& c, const json::Value& req) {
     json::Value reply = json::Value::object();
-    if (fd_ < 0) return reply.set("ok", false).set("error", "no provisioning helper");
+    if (c.fd < 0) return reply.set("ok", false).set("error", "no provisioning helper");
     const std::string text = req.dump() + "\n";
-    if (::write(fd_, text.data(), text.size()) < 0) return reply.set("ok", false).set("error", "helper gone");
+    if (::write(c.fd, text.data(), text.size()) < 0) return reply.set("ok", false).set("error", "helper gone");
     std::string in;
     char buf[4096];
     while (in.find('\n') == std::string::npos) {
-        const ssize_t n = ::read(fd_, buf, sizeof buf);
+        const ssize_t n = ::read(c.fd, buf, sizeof buf);
         if (n <= 0) return reply.set("ok", false).set("error", "helper gone");
         in.append(buf, static_cast<std::size_t>(n));
     }
@@ -2296,14 +2362,16 @@ json::Value Provisioner::exchange(const json::Value& req) {
 }
 
 void Provisioner::stop() noexcept {
-    if (fd_ >= 0) {
-        ::close(fd_);
-        fd_ = -1;
-    }
-    if (pid_ > 0) {
-        int status = 0;
-        ::waitpid(pid_, &status, WNOHANG);
-        pid_ = -1;
+    for (Channel* c : {&main_, &reader_}) {
+        if (c->fd >= 0) {
+            ::close(c->fd);
+            c->fd = -1;
+        }
+        if (c->pid > 0) {
+            int status = 0;
+            ::waitpid(c->pid, &status, WNOHANG);
+            c->pid = -1;
+        }
     }
 }
 
@@ -2314,6 +2382,7 @@ bool Provisioner::start(const Config&, ErrorLog& log) {
 }
 json::Value Provisioner::request(const json::Value&) { return json::Value::object().set("ok", false).set("error", "not available"); }
 json::Value Provisioner::try_request(const json::Value&) { return json::Value::object().set("ok", false).set("error", "not available"); }
+json::Value Provisioner::read(const json::Value&) { return json::Value::object().set("ok", false).set("error", "not available"); }
 void Provisioner::stop() noexcept {}
 #endif
 

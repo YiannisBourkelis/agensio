@@ -585,6 +585,21 @@ SH
   ctl site-service lv.test > $T/out
   check "a scheduled run that started a command in background: site-service names it, the summary says agensio ends it, a step says what to change and schedule_clear_cache" "yes 1 yes yes" \
     "$(j '"yes" if d["runs"]["background"]["command"] == "\x27artisan\x27 report:send" else d["runs"]') $(j 'int(d["runs"]["background"]["runs"])') $(j '"yes" if "agensio ends it when schedule:run exits" in d["summary"] else d["summary"]') $(j '"yes" if any("runInBackground()" in s and "schedule_clear_cache" in s and "queue" in s for s in d["next_steps"]) else d["next_steps"]')"
+  # The reads and the approval codes have a helper of their own (the alpha.126 report, problem 3): a
+  # task holding the main helper for three seconds (task_limits' 5 s leaves room on a loaded host)
+  # makes site-service answer neither busy nor late, and a code is checked at once (a wrong one here,
+  # for a reveal left waiting), not after the task.
+  touch $LV/releases/r2/slow; chown r9:r9 $LV/releases/r2/slow
+  ctl site-task lv.test optimize --yes --reason deploy > $T/out.bg & BG=$!; sleep 0.5
+  T0=$(date +%s%N); ctl site-service lv.test > $T/out; RC=$?; T1=$(date +%s%N)
+  RID=$(curl -sS --unix-socket $CS "http://control/v1/sites/r1.test/env?reveal=SECRET_KEY_BASE" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("id", ""))')
+  T2=$(date +%s%N)
+  CODE=$(curl -sS -o $T/out.code -w '%{http_code}' --unix-socket $CS -X POST -H 'Content-Type: application/json' -d "{\"code\":\"000000\",\"ids\":[\"$RID\"]}" http://control/v1/approvals)
+  T3=$(date +%s%N)
+  wait $BG
+  rm -f $LV/releases/r2/slow
+  check "while a task holds the helper: site-service answers at once from the reader, not busy; a code is checked at once; the task itself ran" "0 False yes yes 403 yes True" \
+    "$RC $(j 'd.get("busy", False)') $([ $(( (T1 - T0) / 1000000 )) -lt 2000 ] && echo yes || echo $(( (T1 - T0) / 1000000 ))ms) $([ -n "$RID" ] && echo yes) $CODE $([ $(( (T3 - T2) / 1000000 )) -lt 2000 ] && echo yes || echo $(( (T3 - T2) / 1000000 ))ms) $(python3 -c "import json; d = json.load(open('$T/out.bg')); print(d['ok'] or str(d.get('error', d))[:300].replace(' ', '_'))")"
   rm -f /var/spool/cron/crontabs/r9 /usr/bin/systemctl
   [ -e /usr/bin/systemctl.agensio-orig ] && mv /usr/bin/systemctl.agensio-orig /usr/bin/systemctl
 fi

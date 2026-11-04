@@ -935,7 +935,7 @@ std::vector<std::string> fail2ban_install_commands() {
 ProtectionProbe read_probe(const json::Value& reply, const ProtectionInput& in) {
     ProtectionProbe p;
     if (!reply.is_object() || !reply["ok"].boolean()) {
-        p.why = reply["busy"].boolean() ? "the helper is busy with a task or an install; ask again when it finishes"
+        p.why = reply["busy"].boolean() ? "the provisioning helper did not answer in time (other reads before this one, or a task or an install on a server whose reader did not start); ask again"
                 : !reply.get("error").empty() ? std::string(reply.get("error"))
                                                : "the check runs through the provisioning helper (agensio started as root with [control] provision), which is not available";
         return p;

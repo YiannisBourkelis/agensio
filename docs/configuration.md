@@ -2936,7 +2936,7 @@ operators = "agensio-ops"
 viewers = "agensio-view"
 audit = "/var/log/agensio/audit.log"   # default: audit.log next to the error log
 sites_root = "/var/www"                # where site-create suggests document roots
-provision = true                       # the root helper: accounts, layout, pools, restart, installs on request (false: commands are handed back)
+provision = true                       # the root helper and its reader: accounts, layout, pools, installs, tasks; reads and approval codes apart (false: commands are handed back)
 install = true                         # site-install may download from https URLs (false: only uploaded archives are installed)
 install_private = false                # true: site-install may fetch from loopback, private and link-local addresses (internal mirrors, test beds)
 install_ca = "/etc/ssl/mirror-ca.pem"  # PEM bundle site-install trusts instead of the system store (private mirrors); default: the system store
@@ -3465,8 +3465,13 @@ pools and reload php-fpm, restart the service after a change that needs one, run
 opens an upload as root, the child drops to the account before reading a byte), and run a
 `site-task` the same way, after creating the account's home when it is missing. Programs
 run by absolute path with a fixed argument list and no shell; every argument is checked
-again inside the helper with the same rules; every action is audited. `site-create` then
-does the whole job in one call and lists what it did under `done`. With `provision =
+again inside the helper with the same rules; every action is audited. Beside it a second
+root process, its reader, forked the same way on a socketpair of its own, answers the reads
+(health's checks of the environment files, the services and the host's protection,
+`site-service`, `site-service-logs`, `trash`, the PHP versions) and checks approval codes, and
+nothing else; the helper refuses those, so a task that holds the helper for minutes holds none
+of them (before 0.1.0-alpha.127 they answered busy, and a code waited for the task).
+`site-create` then does the whole job in one call and lists what it did under `done`. With `provision =
 false`, or a server not started as root, what needs root comes back as commands, as
 before, and `site-install` runs on a thread of the server as its own account, so it can
 only fill directories that account owns. `docs/security-control-plane.md` states what a

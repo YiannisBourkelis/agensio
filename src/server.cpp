@@ -1020,12 +1020,12 @@ static control::LogQuery log_query(std::string_view target) {
 
 json::Value Server::logs(std::string_view target) { return control::logs(gen_->cfg, log_query(target)); }
 
-// The PHP versions (docs/configuration.md 7b): the helper's answer as root when it is free (its
-// configuration test needs root), else this process's own, without that test.
+// The PHP versions (docs/configuration.md 7b): the helper's answer as root (its configuration test
+// needs root; the reader's, which no task holds), else this process's own, without that test.
 void Server::php_versions_async(std::function<void(json::Value)> done) {
     std::thread([this, gen = gen_, done = std::move(done)] {
         json::Value v;
-        if (provisioner_.available()) v = provisioner_.try_request(json::Value::object().set("op", "php_runtimes"));
+        if (provisioner_.available()) v = provisioner_.read(json::Value::object().set("op", "php_runtimes"));
         if (!v["ok"].boolean()) {
             const std::string why = provisioner_.available() ? std::string(v.get("error")) : std::string();
             v = control::php_versions_json(gen->cfg, control::php_inventory(gen->cfg, php::system_exec(), false), std::time(nullptr));
@@ -2079,7 +2079,7 @@ void Server::arm_trash_expiry() {
 void Server::helper_async(const json::Value& req, std::function<void(json::Value)> done) {
     std::thread([this, req, done = std::move(done)] {
         json::Value r = provisioner_.available()
-                            ? provisioner_.try_request(req)
+                            ? provisioner_.read(req)  // the reader's, waiting for other reads only
                             : json::Value::object().set("ok", false).set("error", "the application service's state and journal are root's: this needs the provisioning helper (agensio started as root)");
         asio::post(workers_[0]->ctx, [done, r] { done(r); });
     }).detach();

@@ -12,10 +12,17 @@
 // compromised server process could obtain through it is bounded to exactly those
 // operations, within the directories named below; docs/security-control-plane.md spells
 // that out.
+//
+// The reads and the approval codes have a helper of their own, the reader (2026-11-04, the
+// alpha.126 report, problem 3): forked beside the main one, the same loop with a fixed list of
+// requests (provision::reader_op) and nothing else, so a task that holds the main helper for
+// minutes no longer makes health, the service's state or an approval code wait or answer busy.
+// Each request is served by one of the two only: the main helper refuses the reader's.
 #pragma once
 
 #include <mutex>
 #include <string>
+#include <string_view>
 
 #include "config.hpp"
 #include "services/json.hpp"
@@ -26,22 +33,33 @@ namespace agensio {
 class Provisioner {
 public:
     ~Provisioner();
-    // Forks the helper (needs euid 0). False, with the reason logged, when it cannot.
+    // Forks the reader, then the helper (needs euid 0). False, with the reason logged, when the
+    // helper cannot start; a reader that cannot leaves the helper serving everything, as before.
     bool start(const Config& cfg, ErrorLog& log);
-    bool available() const noexcept { return fd_ >= 0; }
+    bool available() const noexcept { return main_.fd >= 0; }
     // One request, one reply: {"op": ..., ...} -> {"ok": bool, "error"?: text, "output"?: text}.
-    // Synchronous and serialised; the operations take milliseconds.
+    // Synchronous and serialised per helper: a reader's request waits for the reads before it, at
+    // most kReadWait ({"ok": false, "busy": true} past it); any other waits its turn, behind a task.
     json::Value request(const json::Value& req);
     // The same without waiting: {"ok": false, "busy": true} when another request (a task
-    // that runs for minutes) holds the helper. For the reads a caller must never wait on.
+    // that runs for minutes, or for a read another read) holds the helper that serves it.
+    // For the reads a caller must never wait on (worker 0).
     json::Value try_request(const json::Value& req);
+    // A read off the workers: with the reader, request; without one, try_request, so that nothing
+    // waits behind a task where it did not before.
+    json::Value read(const json::Value& req);
     void stop() noexcept;
+    static constexpr int kReadWait = 30;  // seconds
 
 private:
-    json::Value exchange(const json::Value& req);  // one request and its reply; the caller holds mutex_
-    int fd_ = -1;
-    int pid_ = -1;
-    std::mutex mutex_;
+    struct Channel {
+        int fd = -1;
+        int pid = -1;
+        std::timed_mutex mutex;
+    };
+    Channel& channel_for(const json::Value& req) noexcept;
+    static json::Value exchange(Channel& c, const json::Value& req);  // one request and its reply; the caller holds c.mutex
+    Channel main_, reader_;
 };
 
 namespace provision {
@@ -49,6 +67,16 @@ namespace provision {
 // with: "" when acceptable, else what is wrong. Pure, unit tested; the helper calls it
 // before acting, whatever the server said.
 std::string validate(const json::Value& req, const Config& cfg);
+// The requests the reader serves, and the only ones it serves besides ping: the reads that change
+// nothing a request of the main helper depends on (env_check, app_check, app_status, app_logs,
+// host_protection, php_runtimes, trash_list, approvers_list) and approval_check, whose count of wrong
+// codes and last used steps one process alone may keep. With a reader the main helper refuses them.
+bool reader_op(std::string_view op) noexcept;
+enum class Role { main, reader };
+// The loop of a helper process: one JSON line in, one out, until the other end closes, then
+// _exit(0). `reader_apart`: for the main helper, that a reader serves the reader's requests.
+// Unit tested over a socketpair; the server forks it in Provisioner::start.
+[[noreturn]] void serve(int fd, const Config& cfg, Role role, bool reader_apart);
 // The directory every site directory must live under.
 std::string sites_root(const Config& cfg);
 // The directory every per-site log must live under.

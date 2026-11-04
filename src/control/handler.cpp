@@ -1109,7 +1109,7 @@ std::vector<std::string> ControlHandler::protection_steps() {
 void ControlHandler::trash_list(Stream& s, std::function<void()> done) {
     backend_->helper_async(json::Value::object().set("op", "trash_list"), [this, &s, done](json::Value r) {
         if (r["busy"].boolean()) {
-            reply(s, 503, json::Value::object().set("error", "the provisioning helper is busy with a task or an install; ask again when it finishes").set("busy", true));
+            reply(s, 503, json::Value::object().set("error", "the provisioning helper did not answer in time (other reads before this one, or a task or an install on a server whose reader did not start); ask again").set("busy", true));
         } else if (!r["ok"].boolean()) {
             reply(s, 409, r);
         } else {
@@ -2804,7 +2804,7 @@ void ControlHandler::site_service(Stream& s, std::string_view name, bool logs, s
     if (schedule_app(site->app) && !logs) {
         backend_->helper_async(json::Value::object().set("op", "app_status").set("site", key), [this, &s, key, done](json::Value r) {
             if (r["busy"].boolean()) {
-                reply(s, 503, json::Value::object().set("error", "the provisioning helper is busy with a task or an install; ask again when it finishes").set("busy", true));
+                reply(s, 503, json::Value::object().set("error", "the provisioning helper did not answer in time (other reads before this one, or a task or an install on a server whose reader did not start); ask again").set("busy", true));
                 done();
                 return;
             }
@@ -2892,7 +2892,7 @@ void ControlHandler::site_service(Stream& s, std::string_view name, bool logs, s
     backend_->helper_async(req, [this, &s, key, logs, python, node, done](json::Value r) {
         if (r["busy"].boolean()) {
             reply(s, 503, json::Value::object()
-                              .set("error", "the provisioning helper is busy with a task or an install; ask again when it finishes")
+                              .set("error", "the provisioning helper did not answer in time (other reads before this one, or a task or an install on a server whose reader did not start); ask again")
                               .set("busy", true));
         } else if (!r["ok"].boolean()) {
             if (logs) audit_peer(s, "sites/" + key + "/service/logs", "refused: " + std::string(r.get("error")));
@@ -3625,7 +3625,17 @@ bool ControlHandler::approvals_post(Stream& s, WorkerState& ws, std::string_view
         });
     };
     if (backend_->provision_available()) {
-        backend_->provision_async(json::Value::object().set("op", "approval_check").set("code", code), [proceed](json::Value r) {
+        backend_->provision_async(json::Value::object().set("op", "approval_check").set("code", code), [this, &s, list, proceed, done](json::Value r) {
+            // The reader held by other reads past Provisioner::kReadWait: the code was not checked, so it
+            // is no refused code (health counts those) and nothing is approved; the same code may be sent
+            // again while it lives.
+            if (r["busy"].boolean()) {
+                audit_peer(s, "approvals (" + list + ")", "not checked: the helper's reader was busy");
+                reply(s, 503, json::Value::object().set("ok", false).set("busy", true)
+                                  .set("error", "the code was not checked: the provisioning helper's reader was busy with other reads; send it again"));
+                done();
+                return;
+            }
             proceed(r["ok"].boolean(), std::string(r.get("approver")), std::string(r.get("error")), r["locked_until"].num());
         });
     } else {

@@ -112,7 +112,10 @@ code, and an agent that asks for one is misled.
 - The agent must not run as root, which could read the secrets. Give it a plain account in the
   control plane's admins group (`docs/mcp.md`).
 - Five wrong codes within ten minutes stop approvals for ten minutes: guessing six digits gets nowhere,
-  and the stop is counted by the root helper, which the server cannot reset. The audit log has every
+  and the stop is counted by the root helper's reader (the one process that checks codes, apart from
+  tasks, so a code is never kept waiting by one), which the server cannot reset. A code the reader
+  could not check within 30 s, held by other reads, is answered 503 `busy`: not a wrong code, nothing
+  approved, send it again while it lives. The audit log has every
   waiting change, every approval with the approver's name, and every refused code.
 - A server started without the root helper (`[control] provision = false`, or not started as root)
   checks codes itself, against approver files of its own account: an agent running as the server's

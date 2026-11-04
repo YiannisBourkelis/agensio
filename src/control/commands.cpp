@@ -2567,7 +2567,7 @@ std::vector<Finding> approval_findings(const ApprovalHealth& a) {
 std::vector<Finding> env_findings(const json::Value& inspected) {
     std::vector<Finding> out;
     if (inspected["busy"].boolean()) {
-        out.push_back(Finding{"info", "site_env_unchecked", "", "the sites' environment files were not checked: the provisioning helper is running a task", "run health_check again when it ends"});
+        out.push_back(Finding{"info", "site_env_unchecked", "", "the sites' environment files were not checked: the provisioning helper was answering another read (or, on a server whose reader did not start, running a task)", "run health_check again"});
         return out;
     }
     if (!inspected["ok"].boolean()) {

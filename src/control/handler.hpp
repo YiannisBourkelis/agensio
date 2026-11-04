@@ -119,9 +119,10 @@ struct ControlBackend {
     // with a task; it is never waited for). Milliseconds, on worker 0.
     // `exposed` receives the names in it that others could read and nobody rotated.
     virtual int env_file_state(std::string_view site, std::vector<std::string>& exposed) = 0;
-    // One read-only helper request (app_status, app_logs) off the worker, `done` on worker 0;
-    // never waited for while a task holds the helper ({"busy": true} then). Without the
-    // helper: {"ok": false, "error"}.
+    // One read-only helper request (app_status, app_logs, host_protection, trash_list) off the
+    // worker, `done` on worker 0; served by the helper's reader, which no task holds (waiting for
+    // other reads at most Provisioner::kReadWait), or without a reader never waited for while a task
+    // holds the helper ({"busy": true} then). Without the helper: {"ok": false, "error"}.
     virtual void helper_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
     // One helper request that waits its turn (the trash operations of F12b: a rename, a
     // removal of a tree, a listing), off the worker, `done` on worker 0. Without the helper:

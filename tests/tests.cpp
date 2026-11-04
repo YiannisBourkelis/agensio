@@ -61,6 +61,10 @@
 #endif
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
 #include "handlers/proxy.hpp"
 #include "core/headers.hpp"
 #include "core/result.hpp"
@@ -3976,6 +3980,99 @@ static void test_tasks() {
     // approval_check takes six digits and nothing else (docs/design-site-operations.md 27.5); approvers_list nothing.
     CHECK(provision::validate(js(R"({"op":"approval_check","code":"012345"})"), Config{}).empty());
     CHECK(provision::validate(js(R"({"op":"approvers_list"})"), Config{}).empty());
+    // The reader (2026-11-04, the alpha.126 report, problem 3): its requests, exactly; the expiries,
+    // which remove files, and the reads that may tighten a file's mode stay with the main helper.
+    for (const char* op : {"approval_check", "approvers_list", "env_check", "app_check", "app_status", "app_logs", "host_protection", "php_runtimes", "trash_list"})
+        CHECK(provision::reader_op(op));
+    for (const char* op : {"ping", "task_run", "app_install", "file_op", "file_copy", "env_read", "env_write", "auth_users_read", "auth_users_write", "site_trash",
+                           "site_restore", "trash_delete", "trash_expire", "history_expire", "pools_apply", "credentials_tighten", "account_add", "site_layout",
+                           "log_own", "", "APPROVAL_CHECK", "trash_list "})
+        CHECK(!provision::reader_op(op));
+    // Each helper's loop over a socketpair, as Provisioner::start forks it: the reader refuses every
+    // request but its own and ping, the main helper the reader's while a reader serves them (and serves
+    // them alone, as before); and the loop closes every descriptor it inherited, one above 1023 too.
+    {
+        const auto old_pipe = std::signal(SIGPIPE, SIG_IGN);
+        struct rlimit rl {};
+        if (::getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < 2048 && rl.rlim_max >= 2048) {
+            rl.rlim_cur = 2048;
+            ::setrlimit(RLIMIT_NOFILE, &rl);
+        }
+        const bool high = ::getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur > 1500;
+        auto ask = [](int fd, const char* text) {
+            const std::string line = std::string(text) + "\n";
+            json::Value v;
+            if (::write(fd, line.data(), line.size()) != static_cast<ssize_t>(line.size())) return v;
+            std::string in;
+            char buf[4096];
+            while (in.find('\n') == std::string::npos) {
+                const ssize_t n = ::read(fd, buf, sizeof buf);
+                if (n <= 0) return v;
+                in.append(buf, static_cast<std::size_t>(n));
+            }
+            std::string err;
+            json::parse(in.substr(0, in.find('\n')), v, err);
+            return v;
+        };
+        Config hc;
+        hc.config_path = (dir / "no-such-helper.toml").string();
+        // `watch` reads a pipe whose only write end the child holds, at descriptor 1500: its end of
+        // file says the child closed it.
+        auto run_helper = [&](provision::Role role, bool apart, int& peer, int& watch) -> pid_t {
+            int sp[2], pp[2];
+            if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sp) != 0) return -1;
+            if (::pipe(pp) != 0) return -1;
+            const int high_fd = high ? ::dup2(pp[1], 1500) : -1;
+            ::close(pp[1]);
+            const pid_t pid = ::fork();
+            if (pid == 0) {
+                ::close(sp[0]);
+                ::close(pp[0]);
+                provision::serve(sp[1], hc, role, apart);
+            }
+            ::close(sp[1]);
+            if (high_fd >= 0) ::close(high_fd);
+            peer = sp[0];
+            watch = pp[0];
+            return pid;
+        };
+        int peer = -1, watch = -1, status = 0;
+        pid_t pid = run_helper(provision::Role::reader, false, peer, watch);
+        CHECK(pid > 0);
+        if (high) {
+            struct pollfd p {watch, POLLIN, 0};
+            char c = 0;
+            CHECK(::poll(&p, 1, 5000) == 1 && ::read(watch, &c, 1) == 0);
+        }
+        CHECK(ask(peer, R"({"op":"ping"})")["ok"].boolean());
+        for (const char* req : {R"({"op":"site_trash","site":"a.test"})", R"({"op":"task_run","site":"r.test","task":"db_prepare"})", R"({"op":"trash_expire"})",
+                                R"({"op":"env_read","site":"a.test"})", R"({"op":"pools_apply","phase":"full"})", R"({"op":"no_such"})", R"({"code":"012345"})"})
+            CHECK(std::string(ask(peer, req).get("error")) == "the reading helper serves reads and approval codes only");
+        // Its own go on to the checks every helper makes.
+        CHECK(std::string(ask(peer, R"({"op":"approval_check","code":"12"})").get("error")) == "approval_check: code is six digits");
+        const json::Value listed = ask(peer, R"({"op":"trash_list"})");
+        CHECK(!listed["ok"].boolean() && std::string(listed.get("error")).find("the configuration on disk does not load") != std::string::npos);
+        ::close(peer);
+        ::close(watch);
+        CHECK(::waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        pid = run_helper(provision::Role::main, true, peer, watch);
+        CHECK(pid > 0);
+        CHECK(std::string(ask(peer, R"({"op":"approval_check","code":"012345"})").get("error")) == "this request is the reading helper's");
+        CHECK(std::string(ask(peer, R"({"op":"host_protection"})").get("error")) == "this request is the reading helper's");
+        CHECK(ask(peer, R"({"op":"ping"})")["ok"].boolean());
+        CHECK(std::string(ask(peer, R"({"op":"site_restore","entry":"../x"})").get("error")).find("reading helper") == std::string::npos);
+        ::close(peer);
+        ::close(watch);
+        CHECK(::waitpid(pid, &status, 0) == pid);
+        pid = run_helper(provision::Role::main, false, peer, watch);
+        CHECK(pid > 0);
+        const json::Value alone = ask(peer, R"({"op":"approval_check","code":"012345"})");
+        CHECK(alone.is_object() && !alone["ok"].boolean() && std::string(alone.get("error")).find("reading helper") == std::string::npos);
+        ::close(peer);
+        ::close(watch);
+        CHECK(::waitpid(pid, &status, 0) == pid);
+        std::signal(SIGPIPE, old_pipe);
+    }
     // file_op (F12): the site below sites_root, a clean path, bounded content, the history's bounds.
     {
         Config fc;
@@ -7898,7 +7995,7 @@ static void test_protection() {
           protection_findings(in, absent, files)[0].message.starts_with("nft is not installed (nft is not installed (package nftables)): no per-address limit on TCP 80, 443 and UDP 443 (QUIC) can exist") &&
           protection_findings(in, absent, files)[1].fix.starts_with("install fail2ban, then as root:"));
     const ProtectionProbe busy = read_probe(json::Value::object().set("ok", false).set("busy", true), in);
-    CHECK(!busy.checked && codes(in, busy, files) == "info:protection_unchecked" && protection_findings(in, busy, files)[0].message.find("the helper is busy") != std::string::npos &&
+    CHECK(!busy.checked && codes(in, busy, files) == "info:protection_unchecked" && protection_findings(in, busy, files)[0].message.find("the provisioning helper did not answer in time") != std::string::npos &&
           protection_findings(in, busy, files)[0].message.starts_with("whether the firewall limits TCP 80, 443 and UDP 443 (QUIC) per address"));
     const ProtectionProbe nohelper = read_probe(json::Value(nullptr), in);
     CHECK(!nohelper.checked && nohelper.why.find("provisioning helper") != std::string::npos);
