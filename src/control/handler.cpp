@@ -425,7 +425,7 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         if (tasks::has_tasks(app)) {
             const auto it = running_tasks_.find(site->server_names.front());
             body.set("running", it == running_tasks_.end() ? json::Value(nullptr) : json::Value(it->second))
-                .set("downloads", cfg.control.task_network).set("timeout_cap", static_cast<double>(cfg.control.task_timeout))
+                .set("downloads", cfg.control.task_downloads).set("timeout_cap", static_cast<double>(cfg.control.task_timeout))
                 .set("runs_as", site->user.empty() ? json::Value("the owner of the site's directory") : json::Value(site->user))
                 .set("directory", directory);
             if (!link_note.empty()) body.set("note", link_note);

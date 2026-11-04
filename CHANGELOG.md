@@ -23,8 +23,12 @@
 - A skipped scheduled run (a task runs on the site, or the last minute's run still does) exits 0, its
   record still printed: exit 1 had systemd record the scheduler's unit as failed for each minute a
   deploy's task ran, though agensio counts it as skipped (the report's small item, the owner's decision).
-- `[control] task_network`'s description names the seven tasks it refuses, the Python and Node ones
-  among them, and says it keeps no task off the network.
+- **Renamed: `[control] task_network` is `task_downloads`, and a task's `network` field is
+  `downloads`** (in `site_tasks_list`, a dry run's answer and a run's record). Both names read as a
+  limit on the network, which they never were: they say which tasks download packages (gem, bundle,
+  pip, npm), and `task_downloads = false` refuses those. The key's description names all seven
+  (it named the three Rails ones) and says it keeps no task off the network. The old key is refused at
+  load; a main file that set it takes the new name.
 
 ## 0.1.0-alpha.126 (2026-11-04)
 

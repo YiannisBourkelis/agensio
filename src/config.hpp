@@ -508,7 +508,7 @@ struct ControlConfig {
     } site_limits;
     // Site tasks (F13, services/tasks.*): where the interpreters live ([control] runtimes,
     // one directory per runtime, root's alone), the bounds of every run ([control]
-    // task_limits) and whether tasks that download may run ([control] task_network).
+    // task_limits) and whether tasks that download may run ([control] task_downloads).
     struct Runtimes {
         std::string ruby = "/usr/bin";
         std::string node = "/usr/bin";
@@ -517,7 +517,7 @@ struct ControlConfig {
     } runtimes;
     unsigned task_timeout = 1200;   // seconds before SIGTERM; a task row's own limit is capped by it
     unsigned task_processes = 512;  // RLIMIT_NPROC of the site's account while a task runs
-    bool task_network = true;
+    bool task_downloads = true;
     // How long a site deleted with its files stays in the trash (<sites_root>/.trash, root's
     // alone) before the hourly expiry removes it; 0 keeps entries until trash_delete (F12b,
     // 2026-09-30, the owner's 60 days).

@@ -575,9 +575,9 @@ SH
 fi
 
 stop
-write_config 'task_network = false'
+write_config 'task_downloads = false'
 start
-check "task_network = false: a task that downloads is refused, one that does not still runs" "1 yes 0" "$(ctl site-task r1.test bundle_install --yes --reason net > $T/out; echo -n "$? "; grep -q 'task_network = false' $T/out && echo -n yes; echo -n ' '; ctl site-task r1.test db_migrate --yes --reason net > /dev/null; echo $?)"
+check "task_downloads = false: a task that downloads is refused, one that does not still runs" "1 yes 0" "$(ctl site-task r1.test bundle_install --yes --reason net > $T/out; echo -n "$? "; grep -q 'task_downloads = false' $T/out && echo -n yes; echo -n ' '; ctl site-task r1.test db_migrate --yes --reason net > /dev/null; echo $?)"
 stop
 
 echo "tasks: $pass passed, $fail failed"

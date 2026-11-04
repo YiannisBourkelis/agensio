@@ -79,7 +79,7 @@ const std::vector<KeyDef>& key_defs() {
         {"file_history = {}", "versions", "int", "5", "Versions of one path kept, the oldest going first; 0 keeps nothing, so a delete removes for good (at most 10,000 entries a call). 0 to 100.", "reload", "file", "15"},
         {"file_history = {}", "days", "days", "30", "How long a version stays before the hourly expiry removes it. 1 to 3650.", "reload", "file", "15"},
         {"[control]", "host_protection", "enum: check | external | off", "check", "Whether health looks for the host's protection when a listener is public: per-address limits on the web ports in the kernel's firewall and a fail2ban jail over the access logs (agensio ctl protection and the MCP tool protection_show render both for this host and say what is in place). check warns when either is missing; external says a panel or the administrator manages them, so the findings are informational; off skips the probe.", "reload", "file", "18"},
-        {"[control]", "task_network", "bool", "true", "Site tasks that download packages (gem_install_rails, rails_new, bundle_install, pip_install, pip_install_requirements, npm_ci, npm_run) may run; false refuses them, for a host that installs archives carrying their dependencies (vendor/bundle, node_modules) instead. Other tasks are not limited: what they run may use the network.", "reload", "file", "15"},
+        {"[control]", "task_downloads", "bool", "true", "Site tasks that download packages (gem_install_rails, rails_new, bundle_install, pip_install, pip_install_requirements, npm_ci, npm_run) may run; false refuses them, for a host that installs archives carrying their dependencies (vendor/bundle, node_modules) instead. Other tasks are not limited: what they run may use the network.", "reload", "file", "15"},
         {"task_limits = {}", "timeout", "seconds", "1200", "Wall-clock limit of one site task: SIGTERM to its process group, SIGKILL ten seconds later; a task's own limit is capped by it. 5 to 86400.", "reload", "file", "15"},
         {"task_limits = {}", "processes", "int", "512", "RLIMIT_NPROC of the site's account while a task runs, so a runaway build stops there. 16 to 65536.", "reload", "file", "15"},
         {"[[site]]", "server_name", "list of host names", "[\"*\"]", "The names this site answers; \"*\" makes it the listener's catch-all. A name no site lists answers 421.", "reload", "site-create (domain, aliases)", "1b"},
@@ -355,7 +355,7 @@ json::Value running_value(const Config& c, const std::string& table, const std::
         }
         if (key == "task_limits")
             return V::object().set("timeout", static_cast<double>(c.control.task_timeout)).set("processes", static_cast<double>(c.control.task_processes));
-        if (key == "task_network") return V(c.control.task_network);
+        if (key == "task_downloads") return V(c.control.task_downloads);
         if (key == "trash_keep") return V(static_cast<double>(c.control.trash_keep));
         if (key == "file_history")
             return V::object().set("versions", static_cast<double>(c.control.file_history_versions)).set("days", static_cast<double>(c.control.file_history_days));

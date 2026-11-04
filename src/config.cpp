@@ -5332,7 +5332,7 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
         } else if ((*ct).contains("task_limits")) {
             fail("control.task_limits must be a table: { timeout = 1200, processes = 512 }");
         }
-        cfg.control.task_network = (*ct)["task_network"].value_or(true);
+        cfg.control.task_downloads = (*ct)["task_downloads"].value_or(true);
         if (auto fh = (*ct)["file_history"].as_table()) {
             for (const auto& [k, v] : *fh)
                 if (k.str() != "versions" && k.str() != "days")

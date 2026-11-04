@@ -3677,7 +3677,7 @@ static void test_tasks() {
         nc.site = "n.test";
         const tasks::Row& ci = *tasks::find("node", "npm_ci");
         const tasks::Plan cp = tasks::build(ci, json::Value::object(), nc, "/usr/share/nodejs/npm/bin/npm-cli.js");
-        CHECK(cp.argv == (std::vector<std::string>{"/usr/share/nodejs/npm/bin/npm-cli.js", "ci", "--omit=dev", "--no-audit", "--no-fund"}) && ci.network &&
+        CHECK(cp.argv == (std::vector<std::string>{"/usr/share/nodejs/npm/bin/npm-cli.js", "ci", "--omit=dev", "--no-audit", "--no-fund"}) && ci.downloads &&
               !ci.user_confirm && std::string_view(ci.runtime) == "node");
         auto has = [&](const tasks::Plan& p, const std::string& e) { return std::find(p.env.begin(), p.env.end(), e) != p.env.end(); };
         CHECK(has(cp, "NODE_ENV=production") && has(cp, "NPM_CONFIG_CACHE=/var/lib/agensio/n1/.npm") && has(cp, "NPM_CONFIG_USERCONFIG=/var/lib/agensio/n1/.npmrc") &&
@@ -3966,8 +3966,8 @@ static void test_tasks() {
         CHECK(std::string(tasks::execute(tr).get("error")).find("does not match") != std::string::npos);
         tr.row = &gem;
         tr.params = json::Value();
-        tr.network_allowed = false;
-        CHECK(std::string(tasks::execute(tr).get("error")).find("task_network = false") != std::string::npos);
+        tr.downloads_allowed = false;
+        CHECK(std::string(tasks::execute(tr).get("error")).find("task_downloads = false") != std::string::npos);
         CHECK(!fs::exists(dir / "home"));  // a dry run creates nothing
     }
     // The helper's validation: names and short string parameters only.
@@ -3998,14 +3998,14 @@ static void test_tasks() {
                             R"({"op":"task_run","site":"r.test","task":""})", R"({"op":"task_run","site":"r.test","task":"db_prepare","params":"name=x"})",
                             R"({"op":"task_run","site":"r.test","task":"db_prepare","params":{"name":5}})", R"({"op":"task_run","site":"r.test","task":"db_prepare","dry_run":"yes"})"})
         CHECK(!provision::validate(js(bad), Config{}).empty());
-    // [control] runtimes, task_limits, task_network; app = "rails".
+    // [control] runtimes, task_limits, task_downloads; app = "rails".
     fs::create_directories(dir / "app");
     auto write = [&](const char* name, const std::string& text) { std::ofstream(dir / name) << text; };
     const std::string rails = "[[site]]\nserver_name = [\"r.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\nuser = \"r1\"\napp = \"rails\"\nupstream = \"http://127.0.0.1:3000\"\n";
-    write("t.toml", "[control]\nruntimes = { ruby = \"/opt/ruby/bin/\" }\ntask_limits = { timeout = 60, processes = 100 }\ntask_network = false\n" + rails);
+    write("t.toml", "[control]\nruntimes = { ruby = \"/opt/ruby/bin/\" }\ntask_limits = { timeout = 60, processes = 100 }\ntask_downloads = false\n" + rails);
     const Config cfg = load_config(dir / "t.toml");
     CHECK(cfg.control.runtimes.ruby == "/opt/ruby/bin" && cfg.control.runtimes.node == "/usr/bin" && cfg.control.task_timeout == 60 && cfg.control.task_processes == 100 &&
-          !cfg.control.task_network);
+          !cfg.control.task_downloads);
     CHECK(runtime_dir(cfg.control, "ruby") == "/opt/ruby/bin" && runtime_dir(cfg.control, "perl").empty());
     const SiteConfig& rs = cfg.sites[0];
     CHECK(rs.app == "rails" && !rs.pool.generated && proxy_app("rails") && proxy_app("proxy") && !proxy_app("laravel") && php_app("laravel") && !php_app("rails"));
@@ -4061,7 +4061,7 @@ static void test_tasks() {
     CHECK(std::find(rsec.begin(), rsec.end(), rs.root + "/config/master.key") != rsec.end() && std::find(rsec.begin(), rsec.end(), rs.root + "/storage") != rsec.end());
     write("d.toml", rails);
     const Config def = load_config(dir / "d.toml");
-    CHECK(def.control.runtimes.ruby == "/usr/bin" && def.control.task_timeout == 1200 && def.control.task_processes == 512 && def.control.task_network);
+    CHECK(def.control.runtimes.ruby == "/usr/bin" && def.control.task_timeout == 1200 && def.control.task_processes == 512 && def.control.task_downloads);
     auto refused = [&](const std::string& text, const char* needle) {
         write("bad.toml", text);
         try {
@@ -5462,7 +5462,7 @@ static void test_control_commands() {
         tasks_changed.control.runtimes.ruby = "/opt/ruby-3.4.7/bin";
         tasks_changed.control.task_timeout = 60;
         tasks_changed.control.task_processes = 64;
-        tasks_changed.control.task_network = false;
+        tasks_changed.control.task_downloads = false;
         CHECK(restart_needed(tasks_changed, cfg).empty());
         const json::Value h = health(cfg, cfg, false, std::time(nullptr));
         CHECK(!h["ok"].boolean() && h["findings"].items().size() == h["count"].num());

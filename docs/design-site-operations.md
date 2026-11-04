@@ -279,7 +279,7 @@ row for its framework exists.
   rule 3 on what changed, the configuration validated: the row-24 pattern, so the answer
   is never an ok the validator refuses.
 - Network: `gem install` and `bundle install` fetch from rubygems.org as the site's
-  account. Rows are marked; `[control] task_network = false` refuses the marked rows (an
+  account. Rows are marked; `[control] task_downloads = false` refuses the marked rows (an
   air-gapped host installs an archive that carries `vendor/bundle`). The private-address
   fence of downloads cannot apply to a package manager's own connections; the transient
   unit of the second way can, as `IPAddressDeny`.
@@ -532,7 +532,7 @@ must stay flat, since nothing changes without the key.
   the tool texts, a `new_app` prompt; `docs/mcp.md` table and session; the `agensio ctl`
   help.
 - New keys, each with a `reference.cpp` row and `docs/keys.md` regenerated: `[control]
-  file_max`, `reveal_secrets`, `trash_keep`, `task_limits`, `task_network`, `runtimes`,
+  file_max`, `reveal_secrets`, `trash_keep`, `task_limits`, `task_downloads`, `runtimes`,
   `service_limits`; on a site `static`, `service`. `docs/configuration.md` 4b (what
   `root` is on a proxy site, `app/`, `static`, `service`), 11 (non-PHP sites with an
   account: the home, the tasks), 15 (the commands); `docs/install.md` section 3 (the

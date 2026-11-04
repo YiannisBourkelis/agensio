@@ -1397,7 +1397,7 @@ json::Value task_run(const json::Value& req, const Config& cfg, int helper_fd) {
     tr.sites_root = provision::sites_root(cfg);
     for (const auto& abs : secret_paths(*site))
         if (provision::under_root(abs, setup.dir) && abs != setup.dir) tr.secrets.push_back(abs.substr(setup.dir.size() + 1));
-    tr.network_allowed = fresh.control.task_network;
+    tr.downloads_allowed = fresh.control.task_downloads;
     tr.dry_run = dry_run;
     json::Value out = run_as_account(uid, gid, helper_fd, -1, [&] { return tasks::execute(tr); }, std::chrono::seconds(tr.ctx.timeout + 120));
     if (!est.notes.empty()) {  // the environment's directory or file, tightened on the way: said, not hidden

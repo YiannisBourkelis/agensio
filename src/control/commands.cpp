@@ -1389,7 +1389,7 @@ std::vector<std::string> restart_needed(const Config& fresh, const Config& runni
     // Not [response_compression]: every site keeps a merged copy built at load, read at routing, so a
     // reload applies every field (2026-10-31; restart-only before, though only the copies' size test
     // read the boot configuration).
-    // Not the task keys (runtimes, task_limits, task_network): the helper reads them from
+    // Not the task keys (runtimes, task_limits, task_downloads): the helper reads them from
     // root's file for every task, and the server from the configuration it runs, so a
     // reload changes them (2026-09-27 Writebook report: a new Ruby cost every site a restart).
     return out;

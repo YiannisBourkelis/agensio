@@ -502,7 +502,7 @@ const std::vector<Row>& rows() {
          "php", "php", {{"artisan"}, {"storage:link"}, {"--no-interaction"}}, {}, {}, false, false, 120, {{"artisan", kNoArtisan}}},
         {"laravel", "queue_restart", "Tells the queue workers to restart after their current job (php artisan queue:restart): after a release.",
          "php", "php", {{"artisan"}, {"queue:restart"}, {"--no-interaction"}}, {}, {}, false, false, 120, {{"artisan", kNoArtisan}}},
-        {"laravel", "schedule_run", "Runs the scheduled commands that are due (php artisan schedule:run): what the site's scheduler timer runs every minute. They are the application's own and may use the network (network: false only says task_network = false does not refuse it).",
+        {"laravel", "schedule_run", "Runs the scheduled commands that are due (php artisan schedule:run): what the site's scheduler timer runs every minute. They are the application's own and may use the network (downloads: false only says task_downloads = false does not refuse it).",
          "php", "php", {{"artisan"}, {"schedule:run"}, {"--no-interaction"}}, {}, {}, false, false, 900, {{"artisan", kNoArtisan}}},
         {"laravel", "queue_work_once", "Works the queue until it is empty, at most 50 s (php artisan queue:work --stop-when-empty --max-time=50): a manual drain.",
          "php", "php", {{"artisan"}, {"queue:work"}, {"--stop-when-empty"}, {"--max-time=50"}, {"--no-interaction"}}, {}, {}, false, false, 300,
@@ -602,7 +602,7 @@ json::Value catalog(std::string_view app, const CatalogContext* ctx) {
         // (2026-09-27 report: 3600 advertised, 1200 applied).
         const unsigned timeout = ctx && ctx->timeout_cap ? std::min(r.timeout, ctx->timeout_cap) : r.timeout;
         json::Value item = json::Value::object().set("task", r.name).set("summary", r.summary).set("runtime", r.runtime).set("params", std::move(params))
-                               .set("network", r.network).set("needs_empty", r.needs_empty).set("timeout", static_cast<double>(timeout));
+                               .set("downloads", r.downloads).set("needs_empty", r.needs_empty).set("timeout", static_cast<double>(timeout));
         if (r.writes) {  // a fixed template, no program: nothing to check for an interpreter
             char mode[8];
             std::snprintf(mode, sizeof mode, "0%o", r.mode);
@@ -1480,7 +1480,7 @@ json::Value write_template(const Request& req, const Row& row, int root_fd, cons
     char mode[8];
     std::snprintf(mode, sizeof mode, "0%o", row.mode);
     json::Value r = json::Value::object().set("task", row.name).set("as", account).set("cwd", req.ctx.root).set("argv", json::Value::array())
-                        .set("env", json::Value::array()).set("network", false).set("writes", path).set("mode", mode);
+                        .set("env", json::Value::array()).set("downloads", false).set("writes", path).set("mode", mode);
     if (req.dry_run) {
         ::close(dfd);
         ::close(root_fd);
@@ -1534,8 +1534,8 @@ json::Value execute(const Request& req) {
     if (me == 0) return refusal("refusing to run a task as root");
     const std::string account = account_name(me);
     if (std::string bad = check_params(row, req.params); !bad.empty()) return refusal(bad);
-    if (row.network && !req.network_allowed)
-        return refusal("task " + std::string(row.name) + " downloads, and downloads by tasks are off on this server ([control] task_network = false)");
+    if (row.downloads && !req.downloads_allowed)
+        return refusal("task " + std::string(row.name) + " downloads, and downloads by tasks are off on this server ([control] task_downloads = false)");
     // The site's directory: opened without following a symlink, and this account's.
     const int root_fd = ::open(req.ctx.root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (root_fd < 0)
@@ -1621,7 +1621,7 @@ json::Value execute(const Request& req) {
         env.push(own ? std::string(name) + "=<site environment>" : e);
     }
     json::Value r = json::Value::object().set("task", row.name).set("as", account).set("cwd", plan.cwd).set("argv", std::move(argv)).set("env", std::move(env))
-                        .set("program", plan.exec).set("network", row.network)
+                        .set("program", plan.exec).set("downloads", row.downloads)
                         .set("limits", json::Value::object().set("timeout", static_cast<double>(plan.timeout)).set("processes", static_cast<double>(plan.processes))
                                            .set("open_files", static_cast<double>(plan.open_files)));
     if (req.dry_run) {

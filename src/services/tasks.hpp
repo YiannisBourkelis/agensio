@@ -59,7 +59,7 @@ struct Row {
     std::vector<Arg> args;
     std::vector<Param> params;
     std::vector<std::pair<const char*, const char*>> env;  // the row's own variables, after the preset's
-    bool network;         // downloads; refused with [control] task_network = false
+    bool downloads;       // fetches packages (gem, bundle, pip, npm); refused with [control] task_downloads = false
     bool needs_empty;     // the site's directory must be empty
     unsigned timeout;     // seconds; [control] task_limits.timeout caps it
     std::vector<Need> needs = {};     // checked before it runs, dry run included
@@ -263,11 +263,11 @@ struct Request {
     Context ctx;
     std::string sites_root;
     std::vector<std::string> secrets;  // the hosting rule's list, relative to ctx.root
-    bool network_allowed = true;       // [control] task_network
+    bool downloads_allowed = true;     // [control] task_downloads
     bool dry_run = false;
 };
 // {"ok", "task", "as", "cwd", "argv", "env" (the site's own variables as NAME=<site
-// environment>), "network", "limits", then for a run "ran", "exit" | "signal", "timed_out",
+// environment>), "downloads", "limits", then for a run "ran", "exit" | "signal", "timed_out",
 // "duration_ms", "output", "output_bytes", "truncated", "secured", "exposed", "hint" when
 // failure_hint knows the cause; "error" (and "run_as_root" for a missing runtime) when refused}.
 json::Value execute(const Request& req);

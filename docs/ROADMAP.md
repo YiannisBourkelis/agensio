@@ -883,7 +883,7 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       a built environment, the runner: own process group, umask 027, `RLIMIT_NPROC`, open
       files, no core, a timeout that kills the group, output head and tail, nothing left
       running; the credential sweep), `[control] runtimes` (root-owned interpreters only,
-      checked before every run), `task_limits`, `task_network`, helper op `task_run` (the
+      checked before every run), `task_limits`, `task_downloads`, helper op `task_run` (the
       site from the configuration on disk, the account's home created), `app = "rails"` in
       its first form (proxy routing, the six Rails rows, its credential files; `static` and
       the `app/` rule are section 7's), `site-task` / `site-tasks`, MCP `site_task` and

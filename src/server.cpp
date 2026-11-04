@@ -1927,7 +1927,7 @@ void Server::task_async(const json::Value& req, std::function<void(json::Value)>
                 for (auto& v : vars) tr.ctx.app_env.emplace_back(std::move(v.name), std::move(v.value));
                 tr.sites_root = provision::sites_root(cfg_);
                 for (const auto& sec : req["secrets"].items()) tr.secrets.push_back(sec.str());
-                tr.network_allowed = ctl.task_network;
+                tr.downloads_allowed = ctl.task_downloads;
                 tr.dry_run = req["dry_run"].boolean();
                 r = tasks::execute(tr);
                 if (!est.notes.empty()) {
