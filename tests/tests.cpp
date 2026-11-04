@@ -1427,6 +1427,34 @@ static void test_dotenv() {
     appenv::Change multi;
     multi.set.push_back({"MULTI", "x"});
     CHECK(dotenv::apply(text, multi).error.find("MULTI") != std::string::npos);  // a value over several lines is not rewritten
+    // Rotation, unset and generate together as the MCP texts advise: a new value where the old line was
+    // (before 2026-11-04 the generate saw the dropped line, called it kept, and the name was removed).
+    {
+        appenv::Change rot;
+        rot.unset.push_back("APP_KEY");
+        rot.generate.push_back("APP_KEY");
+        const std::string old_key = "APP_NAME=x\nAPP_KEY=base64:b2xk\nB=1\n";
+        const dotenv::Result rr = dotenv::apply(old_key, rot);
+        const auto back = dotenv::parse(rr.text);
+        CHECK(rr.error.empty() && back.size() == 3 && back[1].name == "APP_KEY" && back[1].value.size() == 51 && back[1].value != "base64:b2xk" &&
+              rr.generated == std::vector<std::string>{"APP_KEY"} && rr.unset == std::vector<std::string>{"APP_KEY"} && rr.kept.empty());
+    }
+    // "export " kept for a name it starts with (e, ex, exp...: the name was looked for in the text).
+    {
+        appenv::Change ex;
+        ex.set.push_back({"ex", "2"});
+        CHECK(dotenv::apply("export ex=1\n", ex).text == "export ex=2\n");
+    }
+    // A quote never closed: phpdotenv cannot read the file, and the lines after it belong to that value,
+    // so nothing is changed, an unset of that name included (it would drop B with it).
+    {
+        appenv::Change add, rm;
+        add.set.push_back({"C", "1"});
+        rm.unset.push_back("A");
+        const std::string open = "Z=0\nA=\"abc\nB=2\n";
+        CHECK(dotenv::apply(open, add).error.find("line 2 of the file opens a quote it never closes") == 0 && !dotenv::apply(open, rm).error.empty());
+        CHECK(dotenv::parse(open)[1].unterminated && !dotenv::parse(text)[5].unterminated);
+    }
     const json::Value d = dotenv::describe(r.text, "k", {"APP_DEBUG"});
     std::string names;
     for (const auto& x : d["variables"].items()) names += std::string(x.get("name")) + (x["value"].is_string() ? "=" + std::string(x["value"].str()) : "") + " ";
@@ -1525,7 +1553,7 @@ static void test_listen_defaults() {
         // A site on the host's one IPv4 address apart from loopback cuts the others off the same way
         // (the alpha.121 report, problem A: the VPS's only public address); one of several does not.
 #ifdef __linux__
-        set_host_addresses(HostAddresses{{"192.0.2.10"}});
+        set_host_addresses(HostAddresses{{"192.0.2.10"}, false, {}, false});
         // both.test on 0.0.0.0:8080 is cut off by the specific socket too, and from outside answers on no
         // address; the advice names the address to add, not 0.0.0.0 (the alpha.122 report, problem D).
         Config one = load("h.toml", "[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\"]\nacme = { email = \"me@x.test\" }\n"
@@ -1544,7 +1572,7 @@ static void test_listen_defaults() {
             if (n.code == "listen_ipv6_only" && n.site == "both.test")
                 CHECK(n.text.find("listens on 0.0.0.0:8080 and not on 192.0.2.10:8080") != std::string::npos && n.text.find("from outside it is reachable on no address") != std::string::npos);
         }
-        set_host_addresses(HostAddresses{{"192.0.2.10", "198.51.100.7"}});
+        set_host_addresses(HostAddresses{{"192.0.2.10", "198.51.100.7"}, false, {}, false});
         Config two = load("h.toml", "[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\"]\nacme = { email = \"me@x.test\" }\n"
                                         "[[site]]\nserver_name = [\"t.test\"]\n" + root + "tls = \"auto\"\n"
                                         "[[site]]\nserver_name = [\"own.test\"]\nlisten = [\"192.0.2.10:8080\"]\n" + root);
@@ -1553,7 +1581,7 @@ static void test_listen_defaults() {
         // is told to list the address (a managed site takes one address per kind), and a hand-written site
         // that joined it is told why the hand-back is the way, never to list it; with only hand-written
         // sites cut off, the joined one is told who still lacks the address.
-        set_host_addresses(HostAddresses{{"192.0.2.10"}, true});
+        set_host_addresses(HostAddresses{{"192.0.2.10"}, true, {}, false});
         std::ofstream(dir / "sites.d" / "m.test.toml") << "# agensio:managed {}\n[[site]]\nserver_name = [\"m.test\"]\n" + root;
         const std::string head = "include = [\"sites.d/*.toml\"]\n[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\"]\n"
                                  "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"192.0.2.10:8080\"]\n" + root +
@@ -4389,6 +4417,16 @@ static void test_appenv() {
         for (const auto& f : sch)
             if (f.site == "both.test") CHECK(f.message.find("runs 2 times every minute") != std::string::npos && f.message.find("/etc/cron.d/app line 3") != std::string::npos &&
                                              f.message.find("schedule:run") == std::string::npos && f.fix.find("systemctl disable --now agensio-schedule-both.test.timer") != std::string::npos);
+        // The crontab reader the helper runs as root: a line of the site's project as a path, never a
+        // comment, never another project whose name starts with this one's; any line in the account's
+        // own crontab when it has no other Laravel site; at most the limit.
+        const std::string tab = "SHELL=/bin/sh\n* * * * * cd /srv/grab/releases/r1 && php artisan schedule:run >> /dev/null 2>&1\n"
+                                "  # * * * * * php /srv/grab/artisan schedule:run\n* * * * * php /srv/grabber/artisan schedule:run\n"
+                                "* * * * * php artisan schedule:run --project /srv/grab\n* * * * * php /srv/grab/artisan queue:work\n";
+        CHECK((control::scheduler_cron_lines(tab, "/srv/grab", false, 16) == std::vector<std::size_t>{2, 5}));
+        CHECK((control::scheduler_cron_lines(tab, "/srv/grab", true, 16) == std::vector<std::size_t>{2, 4, 5}));
+        CHECK((control::scheduler_cron_lines(tab, "/srv/grab", true, 1) == std::vector<std::size_t>{2}));
+        CHECK(control::scheduler_cron_lines(tab, "", false, 16).empty());
     }
     CHECK(inspect(envdir + "-none", me, {"ok.test"})["sites"].items().empty());
     // Which sites have a file (site_delete names the file only then).
@@ -8506,6 +8544,14 @@ static void test_site_files() {
         CHECK(masked.find(" DB_PASSWORD=<11 bytes>\n") != std::string::npos && masked.find(" # DB_OLD=<7 bytes>\n") != std::string::npos &&
               masked.find(" export MAIL_KEY=<3 bytes>\n") != std::string::npos && masked.find("-APP_DEBUG=<5 bytes>\n+APP_DEBUG=<4 bytes>\n") != std::string::npos &&
               masked.find("@@ -") == 0);
+        // A value over several lines makes the file no env-like one: its base64 line ending in '=' padding
+        // looked like an assignment and was shown as a name (found 2026-11-04). A comment's name is shown
+        // only in capitals: a commented-out key's line is masked whole.
+        const std::string jwt = "APP_NAME=x\nJWT_KEY=\"MIIB\nAbC123xyz==\"\n";
+        CHECK(!control::env_like_text(jwt) && control::mask_credential_diff(control::unified_diff("", jwt, 0), control::env_like_text(jwt)).find("AbC123") == std::string::npos);
+        const std::string commented = "# DB_OLD=oldpass\n#abcDEF123456==\n# export OLD_KEY=x\n";
+        CHECK(control::env_like_text(commented) &&
+              control::mask_credential_diff(control::unified_diff("", commented, 0), true) == "@@ -0,0 +1,3 @@\n+# DB_OLD=<7 bytes>\n+#<15 bytes>\n+# export OLD_KEY=<1 bytes>\n");
         const std::string key = control::mask_credential_diff(control::unified_diff("", "-----BEGIN OPENSSH PRIVATE KEY-----\nAbCdEf0123==\n", 0), false);
         CHECK(key == "@@ -0,0 +1,2 @@\n+<35 bytes>\n+<12 bytes>\n");
         CHECK(control::mask_credential_diff("no change\n", true) == "no change\n");

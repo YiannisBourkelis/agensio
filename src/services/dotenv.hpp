@@ -24,7 +24,9 @@ struct Line {
     std::string name;       // an assignment's name; "" for a comment, a blank or anything else
     std::string value;      // the value as phpdotenv reads it (quotes removed, \" and \\ in double quotes)
     bool assignment = false;
-    bool readable = true;   // false: a value over several lines, kept and never rewritten
+    bool exported = false;      // the assignment starts with "export "
+    bool readable = true;       // false: a value over several lines, kept and never rewritten
+    bool unterminated = false;  // a quote opened and never closed before the end of the file
 };
 std::vector<Line> parse(std::string_view text);
 
@@ -37,10 +39,14 @@ std::string render_value(std::string_view value, std::string& out);
 // Laravel's APP_KEY: "base64:" and 32 random bytes in base64 (php artisan key:generate's form).
 std::string laravel_key();
 
-// A change applied to the text: set replaces the first line of a name (its later ones dropped) or
-// appends one; unset removes every line of a name; generate writes a random secret under a name that
-// is missing or empty (APP_KEY in Laravel's form, any other 128 hex digits) and keeps one that has a
-// value. A name whose value goes over several lines is refused, not rewritten.
+// A change applied to the text, in the environment file's order (appenv): unset removes every line of
+// a name; set replaces the first line of a name (its later ones dropped) or appends one; generate
+// writes a random secret under a name that is missing or empty (APP_KEY in Laravel's form, any other
+// 128 hex digits) and keeps one that has a value, so unset and generate together rotate it, written
+// where the old line was. A name whose value goes over several lines is refused, not rewritten, and a
+// file with a quote never closed is refused whole (phpdotenv cannot read it, and the lines after the
+// quote belong to that value). The text is read back before it is answered: a change that does not
+// read back as given is refused.
 struct Result {
     std::string text;
     std::vector<std::string> set, unset, generated, kept, absent;

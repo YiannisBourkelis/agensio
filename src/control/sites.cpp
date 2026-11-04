@@ -1883,6 +1883,27 @@ TaskSetup task_setup(const Config& cfg, const SiteConfig& site, const tasks::Row
     return out;
 }
 
+std::vector<std::size_t> scheduler_cron_lines(std::string_view text, std::string_view project, bool any_line, std::size_t max) {
+    std::vector<std::size_t> out;
+    std::size_t at = 0, no = 0;
+    while (at < text.size() && out.size() < max) {
+        const std::size_t end = std::min(text.find('\n', at), text.size());
+        const std::string_view line = text.substr(at, end - at);
+        at = end + 1;
+        ++no;
+        const std::size_t first = line.find_first_not_of(" \t");
+        if (first == std::string_view::npos || line[first] == '#') continue;
+        if (line.find("schedule:run") == std::string_view::npos) continue;
+        bool names_project = false;
+        for (std::size_t p = project.empty() ? std::string_view::npos : line.find(project); p != std::string_view::npos && !names_project; p = line.find(project, p + 1)) {
+            const std::size_t after = p + project.size();
+            names_project = after == line.size() || line[after] == '/' || line[after] == ' ';
+        }
+        if (names_project || any_line) out.push_back(no);
+    }
+    return out;
+}
+
 namespace {
 
 // The path of the agensio binary that runs now, for the scheduler unit's ExecStart.

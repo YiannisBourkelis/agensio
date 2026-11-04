@@ -239,6 +239,12 @@ struct TaskSetup {
 };
 TaskSetup task_setup(const Config& cfg, const SiteConfig& site, const tasks::Row& row);
 json::Value service_unit(const SiteConfig& site, const Config& cfg);
+// The lines of a crontab's text that run a Laravel site's scheduler (the helper reads the account's
+// crontab, /etc/crontab and /etc/cron.d as root; the account writes its own): a line, not a comment,
+// that runs schedule:run and names the project directory, or any such line when `any_line` (the
+// account's own crontab when it has no other Laravel site). Line numbers from 1, increasing, at most
+// `max`; never the text, which may carry a secret. Fuzzed (fuzz_cron_lines).
+std::vector<std::size_t> scheduler_cron_lines(std::string_view text, std::string_view project, bool any_line, std::size_t max);
 // How a PHP version's master rereads its pools ("systemctl reload php8.4-fpm" on Debian); "" = the
 // server's default version. A version not installed gets the Debian line with a note.
 std::string php_fpm_reload_command(const Config& cfg, const std::string& version);

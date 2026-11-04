@@ -1,0 +1,4 @@
+/srv/x
+* * * * * php artisan schedule:run
+	# schedule:run
+

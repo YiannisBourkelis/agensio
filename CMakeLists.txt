@@ -381,6 +381,14 @@ if(AGENSIO_FUZZ)
   target_link_libraries(fuzz_response_headers PRIVATE agensio_core_fuzz)
   target_compile_options(fuzz_response_headers PRIVATE -fsanitize=fuzzer)
   target_link_options(fuzz_response_headers PRIVATE -fsanitize=fuzzer)
+  # A Laravel site's .env and the masking of a credential file's diff, and the scheduler's crontab
+  # reader: text a site's account writes, read by the provisioning helper as root (2026-11-04).
+  foreach(t dotenv cron_lines)
+    add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp)
+    target_link_libraries(fuzz_${t} PRIVATE agensio_core_fuzz)
+    target_compile_options(fuzz_${t} PRIVATE -fsanitize=fuzzer -UNDEBUG)
+    target_link_options(fuzz_${t} PRIVATE -fsanitize=fuzzer)
+  endforeach()
 endif()
 
 # ---------------------------------------------------------------- install and packages (H7)

@@ -1001,21 +1001,9 @@ std::string read_small_file(const std::string& path, std::size_t max) {
 json::Value cron_lines(const std::string& project, const std::string& account, bool account_alone) {
     json::Value out = json::Value::array();
     auto scan = [&](const std::string& file, bool own) {
-        const std::string text = read_small_file(file, 64 * 1024);
-        std::size_t at = 0, no = 0;
-        while (at < text.size()) {
-            const std::size_t end = std::min(text.find('\n', at), text.size());
-            const std::string_view line = std::string_view(text).substr(at, end - at);
-            at = end + 1;
-            ++no;
-            const std::size_t first = line.find_first_not_of(" \t");
-            if (first == std::string_view::npos || line[first] == '#') continue;
-            if (line.find("schedule:run") == std::string_view::npos) continue;
-            const bool names_project = line.find(project + "/") != std::string_view::npos || line.find(project + " ") != std::string_view::npos ||
-                                       line.ends_with(project);
-            if (names_project || (own && account_alone)) out.push(json::Value::object().set("file", file).set("line", static_cast<double>(no)));
-            if (out.items().size() >= 16) return;
-        }
+        const std::size_t left = 16 - std::min<std::size_t>(16, out.items().size());
+        for (std::size_t no : control::scheduler_cron_lines(read_small_file(file, 64 * 1024), project, own && account_alone, left))
+            out.push(json::Value::object().set("file", file).set("line", static_cast<double>(no)));
     };
     std::string why;
     if (control::valid_account(account, why)) {

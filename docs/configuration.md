@@ -439,7 +439,10 @@ the site as, `0640`, so the application reads it and neither the site's account 
 application changes it in place (`artisan key:generate` cannot rewrite it: `--generate APP_KEY` writes
 Laravel's key, `base64:` and 32 random bytes). A value is written as phpdotenv reads it back (plain,
 in single quotes, or in double quotes), and a name whose value goes over several lines is refused
-rather than rewritten. A configuration cached by the `optimize` task reads `.env` again only after
+rather than rewritten, as is any change to a file with a quote never closed (phpdotenv cannot read
+it, and the lines after the quote belong to that value: the answer names the line to fix with
+`site_file_edit`). A name in both `--unset` and `--generate` is rotated where its line was. Every
+change is read back before it is written. A configuration cached by the `optimize` task reads `.env` again only after
 `optimize` runs again; the answer says so.
 
 **The scheduler** (2026-11-04): `agensio ctl site-unit NAME` on a Laravel site renders two units for

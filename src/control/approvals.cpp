@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 
+#include "services/dotenv.hpp"
 #include "services/tasks.hpp"
 
 #ifdef AGENSIO_HAS_TLS
@@ -276,7 +277,9 @@ bool masked_assignment(std::string_view line, std::string& out) {
         while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
     };
     blanks();
+    bool comment = false;
     if (i < line.size() && line[i] == '#') {
+        comment = true;
         ++i;
         blanks();
     }
@@ -284,10 +287,16 @@ bool masked_assignment(std::string_view line, std::string& out) {
         i += 7;
         blanks();
     }
+    // The name's bytes in ASCII whatever the locale, as dotenv::parse reads them.
+    auto letter = [](char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'; };
     const std::size_t name = i;
-    if (i >= line.size() || !(std::isalpha(static_cast<unsigned char>(line[i])) || line[i] == '_')) return false;
-    while (i < line.size() && (std::isalnum(static_cast<unsigned char>(line[i])) || line[i] == '_' || line[i] == '.')) ++i;
+    if (i >= line.size() || !letter(line[i])) return false;
+    while (i < line.size() && (letter(line[i]) || (line[i] >= '0' && line[i] <= '9') || line[i] == '.')) ++i;
     if (i - name > 64) return false;
+    // A comment is free text: its "name" is shown only in a variable's usual capitals (# DB_OLD=...),
+    // never a commented-out key's base64 line that happens to end in '=' padding.
+    if (comment && std::any_of(line.begin() + static_cast<std::ptrdiff_t>(name), line.begin() + static_cast<std::ptrdiff_t>(i), [](char c) { return c >= 'a' && c <= 'z'; }))
+        return false;
     blanks();
     if (i >= line.size() || line[i] != '=') return false;
     ++i;
@@ -308,15 +317,17 @@ std::string masked_line(std::string_view line, bool env_like) {
 }  // namespace
 
 bool env_like_text(std::string_view text) {
-    std::size_t at = 0;
-    while (at < text.size()) {
-        const std::size_t end = std::min(text.find('\n', at), text.size());
-        const std::string_view line = text.substr(at, end - at);
-        at = end + 1;
-        const std::size_t first = line.find_first_not_of(" \t\r");
-        if (first == std::string_view::npos || line[first] == '#') continue;
-        std::string ignored;
-        if (!masked_assignment(line, ignored)) return false;
+    // Read as phpdotenv reads it (services/dotenv): a value over several lines makes the file no
+    // env-like one, since a line of that value may look like an assignment, and its "name" would be
+    // shown (before 2026-11-04 a base64 line ending in '=' padding was shown that way).
+    for (const auto& l : dotenv::parse(text)) {
+        if (l.assignment) {
+            if (!l.readable) return false;
+            continue;
+        }
+        const std::size_t first = l.raw.find_first_not_of(" \t\r");
+        if (first == std::string::npos || l.raw[first] == '#') continue;
+        return false;
     }
     return true;
 }

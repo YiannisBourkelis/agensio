@@ -23,10 +23,12 @@ bool name_char(char c, bool first) noexcept {
 }
 
 // The assignment a line starts, if it is one: its name, where its value starts, whether "export ".
-bool assignment_head(std::string_view line, std::string& name, std::size_t& value_at) {
+bool assignment_head(std::string_view line, std::string& name, std::size_t& value_at, bool& exported) {
+    exported = false;
     std::size_t i = line.find_first_not_of(" \t");
     if (i == std::string_view::npos) return false;
     if (line.substr(i).starts_with("export ")) {
+        exported = true;
         i += 7;
         while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
     }
@@ -56,8 +58,9 @@ std::vector<Line> parse(std::string_view text) {
         Line l;
         l.raw = std::string(raw[k]);
         std::size_t v = 0;
-        if (!assignment_head(raw[k], l.name, v)) {
+        if (!assignment_head(raw[k], l.name, v, l.exported)) {
             l.name.clear();
+            l.exported = false;
             out.push_back(std::move(l));
             continue;
         }
@@ -81,9 +84,13 @@ std::vector<Line> parse(std::string_view text) {
             if (!closed) {
                 // A value over several lines: kept whole, never read or rewritten.
                 l.readable = false;
+                l.unterminated = true;
                 while (k + 1 < raw.size()) {
                     l.raw += "\n" + std::string(raw[++k]);
-                    if (raw[k].find(q) != std::string_view::npos) break;
+                    if (raw[k].find(q) != std::string_view::npos) {
+                        l.unterminated = false;
+                        break;
+                    }
                 }
             } else {
                 l.value = std::move(value);
@@ -139,58 +146,86 @@ std::string laravel_key() {
     return "base64:" + files::base64_encode(std::string_view(reinterpret_cast<const char*>(bytes), sizeof bytes));
 }
 
+namespace {
+
+// "" or why: a quote opened and never closed, which phpdotenv cannot read and which takes every line
+// after it into its value (so neither set, which appends, nor unset, which would drop those lines with
+// it, can be done safely).
+std::string open_quote(const std::vector<Line>& lines) {
+    std::size_t line_no = 1;
+    for (const auto& l : lines) {
+        if (l.unterminated)
+            return "line " + std::to_string(line_no) + " of the file opens a quote it never closes, so phpdotenv cannot read the file and every " +
+                   "line after it is taken into that value: fix that line with site_file_edit first";
+        line_no += 1 + static_cast<std::size_t>(std::count(l.raw.begin(), l.raw.end(), '\n'));
+    }
+    return "";
+}
+
+}  // namespace
+
 Result apply(std::string_view text, const appenv::Change& change) {
     Result r;
     std::vector<Line> lines = parse(text);
-    auto lines_of = [&](const std::string& name) {
+    if (std::string why = open_quote(lines); !why.empty()) return r.error = std::move(why), r;
+    std::vector<bool> drop(lines.size(), false);
+    // The lines of a name still in the file (or those the change removed too).
+    auto lines_of = [&](const std::string& name, bool dropped) {
         std::vector<std::size_t> at;
         for (std::size_t i = 0; i < lines.size(); ++i)
-            if (lines[i].assignment && lines[i].name == name) at.push_back(i);
+            if (lines[i].assignment && lines[i].name == name && drop[i] == dropped) at.push_back(i);
         return at;
     };
     auto refuse_unreadable = [&](const std::string& name) {
-        for (std::size_t i : lines_of(name))
+        for (std::size_t i : lines_of(name, false))
             if (!lines[i].readable) {
                 r.error = name + "'s value goes on over several lines in the file, which this does not rewrite: change it with site_file_edit";
                 return true;
             }
         return false;
     };
-    std::vector<bool> drop(lines.size(), false);
     std::vector<std::string> appended;
+    std::vector<std::pair<std::string, std::string>> expect;  // what the text must read back: name, value
     auto put = [&](const std::string& name, const std::string& value) {
         std::string rendered;
         if (std::string why = render_value(value, rendered); !why.empty()) {
             r.error = name + ": " + why;
             return false;
         }
-        const auto at = lines_of(name);
+        auto at = lines_of(name, false);
+        if (at.empty()) at = lines_of(name, true);  // unset and then given again: where it was
         if (at.empty()) {
             appended.push_back(name + "=" + rendered);
         } else {
-            const bool exported = lines[at.front()].raw.find("export ") != std::string::npos &&
-                                  lines[at.front()].raw.find("export ") < lines[at.front()].raw.find(name);
-            lines[at.front()].raw = (exported ? "export " : "") + name + "=" + rendered;
+            Line& l = lines[at.front()];
+            l.raw = (l.exported ? "export " : "") + name + "=" + rendered;
+            l.value = value;
+            l.readable = true;
+            l.unterminated = false;
+            drop[at.front()] = false;
             for (std::size_t k = 1; k < at.size(); ++k) drop[at[k]] = true;
         }
+        std::erase_if(expect, [&](const auto& e) { return e.first == name; });
+        expect.emplace_back(name, value);
         return true;
     };
+    for (const auto& n : change.unset) {
+        if (std::string why = check_name(n); !why.empty()) return r.error = why, r;
+        const auto at = lines_of(n, false);
+        if (at.empty()) r.absent.push_back(n);
+        else r.unset.push_back(n);
+        for (std::size_t i : at) drop[i] = true;
+        std::erase_if(expect, [&](const auto& e) { return e.first == n; });
+    }
     for (const auto& v : change.set) {
         if (std::string why = check_name(v.name); !why.empty()) return r.error = why, r;
         if (refuse_unreadable(v.name) || !put(v.name, v.value)) return r;
         r.set.push_back(v.name);
     }
-    for (const auto& n : change.unset) {
-        if (std::string why = check_name(n); !why.empty()) return r.error = why, r;
-        const auto at = lines_of(n);
-        if (at.empty()) r.absent.push_back(n);
-        else r.unset.push_back(n);
-        for (std::size_t i : at) drop[i] = true;
-    }
     for (const auto& n : change.generate) {
         if (std::string why = check_name(n); !why.empty()) return r.error = why, r;
         if (refuse_unreadable(n)) return r;
-        const auto at = lines_of(n);
+        const auto at = lines_of(n, false);
         if (!at.empty() && !lines[at.front()].value.empty()) {
             r.kept.push_back(n);
             continue;
@@ -208,6 +243,26 @@ Result apply(std::string_view text, const appenv::Change& change) {
     while (tail > 0 && out[tail - 1].find_first_not_of(" \t\r") == std::string::npos) --tail;
     out.insert(out.begin() + static_cast<std::ptrdiff_t>(tail), appended.begin(), appended.end());
     for (const auto& l : out) r.text += l + "\n";
+    // Read back as phpdotenv would: no quote left open, every name given once with its value, every
+    // name removed gone.
+    const std::vector<Line> back = parse(r.text);
+    if (std::string why = open_quote(back); !why.empty()) return r.error = std::move(why), r;
+    auto count_of = [&](const std::string& name, const Line** first) {
+        std::size_t n = 0;
+        for (const auto& l : back)
+            if (l.assignment && l.name == name && n++ == 0) *first = &l;
+        return n;
+    };
+    for (const auto& [name, value] : expect) {
+        const Line* first = nullptr;
+        if (count_of(name, &first) != 1 || !first->readable || first->value != value)
+            return r.error = name + " would not read back from the file as given; nothing was changed", r;
+    }
+    for (const auto& n : r.unset) {
+        const Line* first = nullptr;
+        if (std::none_of(expect.begin(), expect.end(), [&](const auto& e) { return e.first == n; }) && count_of(n, &first) != 0)
+            return r.error = n + " would still be in the file; nothing was changed", r;
+    }
     return r;
 }
 

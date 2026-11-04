@@ -11,7 +11,9 @@ probes, path, a status byte, the served file, flags and the answer's own fields;
 modulo 3 makes the site php, static or without app, the first two with the security baseline;
 `sql_scan/`: a .sql file's text, a TYPO3 schema, a mysqldump, a pg_dump and loose statements;
 `php_constraint/`: a PHP version on the first line, then a Composer constraint, a composer.json or
-WordPress's version.php), and the
+WordPress's version.php; `dotenv/`: a .env's text, a NUL, then a change, one per line, `S NAME=value`,
+`U NAME`, `G NAME`; `cron_lines/`: a byte whose low bit is any_line, a byte for the limit, the project
+directory on the first line, then a crontab), and the
 fuzzers' most interesting corpus entries live here.
 
 Rule: any input that crashes, hangs, or violates an invariant in a fuzzer or in production

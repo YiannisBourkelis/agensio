@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.0-alpha.125 (unreleased)
+
+- **Fix: rotating a variable of a Laravel `.env` removed it.** `site_env_set` with `unset` and
+  `generate` of the same name, the way the tools advise rotating a secret, removed the name from the
+  file and answered it as kept; for `APP_KEY` Laravel is then left without a key. The new value is now
+  written where the old line was, as the systemd environment files of the other applications always
+  did. On 0.1.0-alpha.124, rotate in two calls: `unset` first, then `generate`.
+- **Fix: a credential file's masked diff could show part of a value as a variable's name.** Two
+  cases, both of 0.1.0-alpha.124's masking: a value over several lines, one of whose lines looked like
+  an assignment (a base64 line ending in `=` padding was shown as `AbC123xyz=<2 bytes>`), and a
+  commented line whose text before an `=` was taken for a name (`#abcDEF123456=<1 bytes>`). A file
+  with a value over several lines is now masked by lengths only, and a comment's name is shown only
+  in a variable's capitals (`# DB_OLD=<7 bytes>`), anything else in a comment by its length.
+- **Fix: `site_env_set` on a `.env` with a quote never closed wrote the new variable into that value.**
+  phpdotenv cannot read such a file, and the lines after the quote belong to the open value, so a
+  variable appended there was never read. The change is now refused with the line to fix through
+  `site_file_edit`, and every change is read back before it is written. `export` is kept on a line
+  whose name starts like it (`e`, `ex`).
+- Two fuzz targets for what a site's account writes and the root helper reads: `fuzz_dotenv` (the
+  `.env` reader, every change read back, the masking of its diff, `env_file` paths) and
+  `fuzz_cron_lines` (the crontab reader of the scheduler's visibility, now
+  `control::scheduler_cron_lines`).
+
 ## 0.1.0-alpha.124 (2026-11-04)
 
 - **Fix: no value of a credential file leaves the server through a preview, a dry run or a result**

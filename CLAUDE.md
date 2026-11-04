@@ -188,7 +188,7 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   fuzzed), `http_client` (`HttpRequest`: HTTP/1.1 framing both ways, keep-alive rules).
 - top level, not yet moved: `config`, `path`, `mime`, `http_date`, `file`, `cache`,
   `response` (status lines, error pages), `tls_stream.hpp`, `server`, `main`.
-Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded from
+Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-four, each seeded from
 `tests/fuzz/regressions/<name>/`, all run by `scripts/fuzz-all.sh`).
 
 ## Architecture (as implemented)
