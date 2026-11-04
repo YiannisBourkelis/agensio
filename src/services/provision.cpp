@@ -215,6 +215,7 @@ std::string validate(const json::Value& req, const Config& cfg) {
         if (op == "env_write") {
             appenv::Change change;
             if (std::string bad = appenv::parse_change(req, change); !bad.empty()) return "env_write: " + bad;
+            if (!req["dry_run"].is_null() && req["dry_run"].type() != json::Value::Type::boolean) return "env_write: dry_run must be a boolean";
         }
         return "";
     }
@@ -861,7 +862,7 @@ json::Value env_op(const json::Value& req, const Config& cfg) {
         }
         appenv::Change change;
         if (std::string bad = appenv::parse_change(req, change); !bad.empty()) return fail(bad);
-        return dotenv::write_file(project, site->env_file, 0, gid, change, uid).set("site", site->server_names.front()).set("dotenv", true);
+        return dotenv::write_file(project, site->env_file, 0, gid, change, uid, req["dry_run"].boolean()).set("site", site->server_names.front()).set("dotenv", true);
     }
     if (!proxy_app(site->app)) return fail("site " + name + " has app = \"" + site->app + "\"; a site's environment is for applications agensio runs (rails, redmine, django, wagtail, node, proxy) and Laravel sites");
     const std::string key = site->server_names.front();
@@ -875,7 +876,7 @@ json::Value env_op(const json::Value& req, const Config& cfg) {
     appenv::Change change;
     if (std::string bad = appenv::parse_change(req, change); !bad.empty()) return fail(bad);
     if (std::string bad = appenv::check_change_for_app(site->app, change); !bad.empty()) return fail(bad);
-    return appenv::apply(dir, key, 0, change).set("site", key);
+    return appenv::apply(dir, key, 0, change, req["dry_run"].boolean()).set("site", key);
 }
 
 #ifdef AGENSIO_HAS_AUTH

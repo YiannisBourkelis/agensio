@@ -472,13 +472,44 @@ ctl site-env lv.test > $T/out
 check "site-env lists the .env's names with their lengths, no value, and names optimize" "APP_NAME,DB_PASSWORD,APP_DEBUG,APP_KEY 51 no yes" \
   "$(j '",".join(v["name"] for v in d["variables"]) + " " + str(int([v for v in d["variables"] if v["name"] == "APP_KEY"][0]["length"]))') $(grep -q 'base64:\|"old"\|Grab' $T/out && echo yes || echo no) $(j '"yes" if "optimize" in d["hint"] else d["hint"]')"
 check "the site's account reads its .env and cannot write it in place" "yes no" "$(su -s /bin/sh r9 -c "cat $LV/shared/.env" > /dev/null 2>&1 && echo yes) $(su -s /bin/sh r9 -c "echo x >> $LV/shared/.env" 2>/dev/null && echo yes || echo no)"
+# A dry run writes nothing (the alpha.125 report: site_env_set read no dry_run, and the gate let the dry
+# run through unapproved, so it wrote the file), and a change its dry run refuses is answered at once,
+# never stored for a person's code (problem 1: an open quote and lower-case names were queued).
+cp -p $LV/shared/.env $T/env.before
+"$BIN" ctl site-env-set lv.test --set DRY=1 --generate DRY_KEY --dry-run --socket $CS > $T/out
+check "site-env-set --dry-run answers what it would set and generate, and writes nothing" "True True DRY DRY_KEY same" \
+  "$(j 'd["ok"], d.get("dry_run")' | tr -d '(),') $(j '" ".join(d.get("set", []) + d.get("generated", []))') $(cmp -s $T/env.before $LV/shared/.env && echo same)"
+printf 'MULTI="open\n' >> $LV/shared/.env
+post() { curl -sS -o $T/out -w '%{http_code}' --unix-socket $CS -X POST -H 'Content-Type: application/json' -d "$2" "http://control$1"; }
+waiting() { curl -sS --unix-socket $CS http://control/v1/approvals | python3 -c 'import json,sys; print(sum(1 for a in json.load(sys.stdin)["approvals"] if a["state"] == "waiting"))'; }
+check "a change its dry run refuses is answered at once and waits for no one: an open quote (409), a lower-case name (400, the way to change such a line named)" "409 yes 400 yes 0" \
+  "$(post /v1/sites/lv.test/env '{"set":{"NEWVAR":"1"},"confirm":true,"reason":"q"}') $(j '"yes" if "never closes" in d.get("error", "") else d') $(post /v1/sites/lv.test/env '{"set":{"e":"5"},"confirm":true,"reason":"q"}') $(j '"yes" if "site_file_edit" in d.get("hint", "") else d') $(waiting)"
+for id in $(curl -sS --unix-socket $CS http://control/v1/approvals | python3 -c 'import json,sys; print(" ".join(a["id"] for a in json.load(sys.stdin)["approvals"] if a["state"] == "waiting"))'); do
+  curl -sS -o /dev/null --unix-socket $CS -X POST -d '{}' http://control/v1/approvals/$id/reject
+done
+cp -p $T/env.before $LV/shared/.env
+# A rotated service password is new to its service, and a new APP_KEY signs everyone out (the alpha.125
+# report, problem 3): the person approving reads it in the preview; the answer puts root's step at the
+# service first, with the line that reads the value on root's terminal, optimize after it.
+post /v1/sites/lv.test/env '{"unset":["DB_PASSWORD","APP_KEY"],"generate":["DB_PASSWORD","APP_KEY"],"confirm":true,"reason":"rotate"}' > /dev/null
+check "a rotation's preview notes the service's password and the new APP_KEY" "yes yes" \
+  "$(j '"yes" if "note: DB_PASSWORD is a new password its service" in d.get("preview", "") else d.get("preview")') $(j '"yes" if "a new APP_KEY signs every user out" in d.get("preview", "") else d.get("preview")')"
+curl -sS -o /dev/null --unix-socket $CS -X POST -d '{}' http://control/v1/approvals/$(j 'd["id"]')/reject
+ctl site-env-set lv.test --unset DB_PASSWORD --generate DB_PASSWORD --unset APP_KEY --generate APP_KEY --yes --reason rotate > $T/out
+check "the rotation answers root's step at the service first, optimize after, the APP_KEY warning; root's line prints the new value, which the answer does not hold" "True True True same no" \
+  "$(j 'd["next_steps"][0].startswith("first, before the application needs it: root sets the new DB_PASSWORD"), "optimize" in d["next_steps"][-1], any("signs every user out" in w for w in d["warnings"])' | tr -d '(),') $([ "$(sh -c "$(j 'd["run_as_root"][0]')")" = "$(grep '^DB_PASSWORD=' $LV/shared/.env)" ] && echo same) $(grep -qF "$(sed -n 's/^DB_PASSWORD=//p' $LV/shared/.env)" $T/out && echo yes || echo no)"
+cp -p $T/env.before $LV/shared/.env
 
 # The scheduler (2026-11-04, the grabloop.app answer): the timer asks for schedule_run with --scheduled;
 # it holds no task slot, is skipped while a task runs, keeps the deploy's output, and the audit log
 # names it only when its outcome changes.
-for i in 1 2; do ctl site-task lv.test schedule_run --scheduled --yes --reason scheduler > $T/out; done
+ctl site-task lv.test schedule_run --scheduled --yes --reason scheduler > $T/out
+ctl site-task lv.test schedule_run --scheduled --yes --reason scheduler > $T/out.quiet
 check "a scheduled schedule_run runs php9.9 artisan schedule:run in the live release; twice, one audit line; the deploy's output kept" "True yes 1 yes" \
   "$(j 'd["ok"]') $(grep -q 'args=artisan schedule:run --no-interaction' $T/out && echo yes) $(grep -c 'scheduled schedule_run ran' $T/logs/audit.log) $(ctl site-task-output lv.test > $T/out2; grep -q 'migrate --force' $T/out2 && ! grep -q 'schedule:run' $T/out2 && echo yes)"
+# The journal gets a run's record only when the audit log would (the alpha.125 report: 5,760 lines a day).
+check "the first scheduled run prints its record (outcome_changed), the second, like it, prints nothing" "True 0" \
+  "$(j 'd["outcome_changed"]') $(wc -c < $T/out.quiet | tr -d ' ')"
 check "--scheduled is for schedule_run alone" "400" "$(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS -X POST -H 'Content-Type: application/json' -d '{"task":"optimize","scheduled":true,"confirm":true}' http://control/v1/sites/lv.test/task)"
 touch $LV/releases/r2/slow; chown r9:r9 $LV/releases/r2/slow
 ctl site-task lv.test optimize --yes --reason deploy > $T/out.bg & BG=$!; sleep 1

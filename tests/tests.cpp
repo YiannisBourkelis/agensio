@@ -1595,14 +1595,18 @@ static void test_listen_defaults() {
                                  "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"192.0.2.10:8080\"]\n" + root +
                                  "[[site]]\nserver_name = [\"c.test\"]\nlisten = [\"[::]:8080\", \"192.0.2.10:8080\"]\n" + root;
         Config mixed = load("x.toml", head);
-        std::string joined_text, joined_fix, managed_text, managed_fix;
+        std::string joined_text, joined_fix, managed_text, managed_fix, holder_fix;
         for (const auto& n : access_notices(mixed)) {
             if (n.code == "listen_family_split" && n.site == "c.test") joined_text = n.text, joined_fix = n.fix;
+            if (n.code == "listen_family_split" && n.site == "a.test") holder_fix = n.fix;
             if (n.code == "listen_ipv6_only" && n.site == "m.test") managed_text = n.text, managed_fix = n.fix;
         }
         CHECK(joined_text.find("c.test lists 192.0.2.10:8080 beside [::]:8080, sharing the socket of a.test: m.test is reachable over IPv6 only") == 0 &&
               joined_text.find("m.test is a managed site") != std::string::npos && joined_fix.find("Hand back every site on 192.0.2.10:8080") == 0 &&
               joined_fix.find("list it too") == std::string::npos);
+        // One of several holders: every holder's way once, its own included (the alpha.125 report).
+        CHECK(holder_fix.find("Hand back every site on 192.0.2.10:8080 one after another") == 0 && times(holder_fix, "remove the listen line of a.test") == 1 &&
+              times(holder_fix, "remove the listen line of c.test") == 1);
         CHECK(managed_text.find("the one IPv4 address of the interface with the default route") != std::string::npos && managed_text.find("or add") == std::string::npos &&
               managed_text.find("cannot be finished") == std::string::npos && managed_fix.find("lists that address too") == std::string::npos &&
               managed_fix.find("remove the listen line of a.test") != std::string::npos && managed_fix.find("remove the listen line of c.test") != std::string::npos);
@@ -1622,12 +1626,16 @@ static void test_listen_defaults() {
         // Nothing is cut off now, so it is info (the owner's decision), and a site added later on the
         // server's addresses gets the warning, with a.test, when it is.
         Config took = load("x.toml", head);
-        std::string took_codes, took_a;
+        std::string took_codes, took_a, took_fix;
         for (const auto& n : access_notices(took)) {
             if (n.code.starts_with("listen_")) took_codes += n.code + ":" + n.site + ":" + n.severity + " ";
-            if (n.code == "listen_family_split" && n.site == "a.test") took_a = n.text;
+            if (n.code == "listen_family_split" && n.site == "a.test") took_a = n.text, took_fix = n.fix;
         }
         CHECK(took_codes == "listen_family_split:a.test:info " && took_a.find("no site is cut off now") != std::string::npos);
+        // The note says first what a site added later does, then the hand-back, each site named once (the
+        // alpha.125 report's small items).
+        CHECK(took_fix.find("A site added later on port 8080 lists 192.0.2.10:8080 too, which shares its socket: listen = [\"[::]:8080\", \"192.0.2.10:8080\"]") == 0 &&
+              times(took_fix, "remove the listen line of a.test") == 1 && took_fix.find("Or: Hand back every site on 192.0.2.10:8080") != std::string::npos);
         Config added = load("x.toml", head + "[[site]]\nserver_name = [\"d.test\"]\n" + root);
         std::string added_codes;
         for (const auto& n : access_notices(added))
@@ -4270,6 +4278,13 @@ static void test_appenv() {
         CHECK(!check_change_for_app("node", nch).empty() && check_change_for_app("proxy", nch).empty() && check_change_for_app("node", ok).empty() &&
               !check_change_for_app("node", gen).empty());
     }
+    // What a generated value means beyond the file (the alpha.125 report, problem 3): a service's password
+    // is new to the service; APP_KEY only when it replaces one; an application's own secret says nothing.
+    CHECK(generated_note("DB_PASSWORD", false).find("DB_PASSWORD is a new password its service") == 0 && service_password("REDIS_PASSWORD") &&
+          service_password("MAIL_PASSWORD") && service_password("DB_READ_PASSWORD") && !service_password("DJANGO_SUPERUSER_PASSWORD") &&
+          !service_password("DB_HOST"));
+    CHECK(generated_note("APP_KEY", true).find("signs every user out") != std::string::npos && generated_note("APP_KEY", false).empty() &&
+          generated_note("SECRET_KEY_BASE", true).empty());
     for (const char* bad : {"", "secret", "1ABC", "A-B", "A B", "A=B"}) CHECK(!check_name(bad).empty());
     CHECK(!check_name(std::string(65, 'A')).empty() && check_name(std::string(64, 'A')).empty());
     // Values: one line of UTF-8.
@@ -8573,20 +8588,23 @@ static void test_site_files() {
         const std::string before = "APP_NAME=grab\n# DB_OLD=oldpass\nDB_PASSWORD=s3cr3t-pass\nexport MAIL_KEY=\"k\"\nAPP_DEBUG=false\n\n";
         const std::string after = "APP_NAME=grab\n# DB_OLD=oldpass\nDB_PASSWORD=s3cr3t-pass\nexport MAIL_KEY=\"k\"\nAPP_DEBUG=true\n\n";
         CHECK(control::env_like_text(before) && control::env_like_text(after) && !control::env_like_text("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk=\n"));
-        const std::string masked = control::mask_credential_diff(control::unified_diff(before, after, 0), true);
+        const std::string masked = control::mask_credential_diff(control::unified_diff(before, after, 0), true, control::env_names(before));
         CHECK(masked.find("s3cr3t") == std::string::npos && masked.find("oldpass") == std::string::npos && masked.find("false") == std::string::npos &&
               masked.find("true") == std::string::npos);
-        CHECK(masked.find(" DB_PASSWORD=<11 bytes>\n") != std::string::npos && masked.find(" # DB_OLD=<7 bytes>\n") != std::string::npos &&
+        CHECK(masked.find(" DB_PASSWORD=<11 bytes>\n") != std::string::npos && masked.find(" #<16 bytes>\n") != std::string::npos &&
               masked.find(" export MAIL_KEY=<3 bytes>\n") != std::string::npos && masked.find("-APP_DEBUG=<5 bytes>\n+APP_DEBUG=<4 bytes>\n") != std::string::npos &&
               masked.find("@@ -") == 0);
         // A value over several lines makes the file no env-like one: its base64 line ending in '=' padding
         // looked like an assignment and was shown as a name (found 2026-11-04). A comment's name is shown
-        // only in capitals: a commented-out key's line is masked whole.
+        // only when the file has that variable: a commented-out key's line is masked whole, in capitals too
+        // (the alpha.125 report: base32's alphabet is a variable's, and its '=' padding an assignment).
         const std::string jwt = "APP_NAME=x\nJWT_KEY=\"MIIB\nAbC123xyz==\"\n";
         CHECK(!control::env_like_text(jwt) && control::mask_credential_diff(control::unified_diff("", jwt, 0), control::env_like_text(jwt)).find("AbC123") == std::string::npos);
-        const std::string commented = "# DB_OLD=oldpass\n#abcDEF123456==\n# export OLD_KEY=x\n";
-        CHECK(control::env_like_text(commented) &&
-              control::mask_credential_diff(control::unified_diff("", commented, 0), true) == "@@ -0,0 +1,3 @@\n+# DB_OLD=<7 bytes>\n+#<15 bytes>\n+# export OLD_KEY=<1 bytes>\n");
+        CHECK(control::mask_credential_diff(control::unified_diff("", "#JBSWY3DPEHPK3PXP==\n", 0), true) == "@@ -0,0 +1,1 @@\n+#<19 bytes>\n");
+        const std::string commented = "APP_KEY=new\n# APP_KEY=oldkey\n# DB_OLD=oldpass\n#abcDEF123456==\n#JBSWY3DPEHPK3PXP==\n# export APP_KEY=x\n";
+        CHECK(control::env_like_text(commented) && control::env_names(commented) == std::vector<std::string>{"APP_KEY"} &&
+              control::mask_credential_diff(control::unified_diff("", commented, 0), true, control::env_names(commented)) ==
+                  "@@ -0,0 +1,6 @@\n+APP_KEY=<3 bytes>\n+# APP_KEY=<6 bytes>\n+#<16 bytes>\n+#<15 bytes>\n+#<19 bytes>\n+# export APP_KEY=<1 bytes>\n");
         const std::string key = control::mask_credential_diff(control::unified_diff("", "-----BEGIN OPENSSH PRIVATE KEY-----\nAbCdEf0123==\n", 0), false);
         CHECK(key == "@@ -0,0 +1,2 @@\n+<35 bytes>\n+<12 bytes>\n");
         CHECK(control::mask_credential_diff("no change\n", true) == "no change\n");
@@ -8876,6 +8894,8 @@ static void test_pending_changes() {
     CHECK(reasons("/v1/sites/a.test/copy", "copy", R"({"from":"a","to":"b"})").find("copies a to b") != std::string::npos);
     CHECK(reasons("/v1/sites/a.test/env", "env", R"({"set":{"DATABASE_URL":"x"},"generate":["KEY"]})").find("environment (DATABASE_URL, KEY)") != std::string::npos);
     CHECK(reasons("/v1/sites/a.test/env", "env", R"({"reveal":["A","B"]})").find("reveals the values of A, B") != std::string::npos);
+    // A rotation names each variable once (the alpha.125 report's small item: "(DB_PASSWORD, APP_KEY, DB_PASSWORD, APP_KEY)").
+    CHECK(reasons("/v1/sites/a.test/env", "env", R"({"unset":["DB_PASSWORD","APP_KEY"],"generate":["DB_PASSWORD","APP_KEY"]})").find("environment (DB_PASSWORD, APP_KEY): ") != std::string::npos);
     CHECK(reasons("/v1/sites/a.test/auth-users", "auth-users", R"({"user":"anna","generate":true})").find("password user anna") != std::string::npos);
     CHECK(reasons("/v1/sites/a.test/auth-users/delete", "auth-users/delete", R"({"user":"anna"})").empty());
     CHECK(reasons("/v1/trash/a.test-20261101-120000/delete", "", "{}").find("removes the trash entry a.test-20261101-120000 for good") != std::string::npos);

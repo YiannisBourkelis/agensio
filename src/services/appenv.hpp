@@ -69,6 +69,13 @@ std::string parse_change(const json::Value& body, Change& out);
 // the application to the upstream's loopback address. "" or why. The whole change is checked,
 // set and generate names alike.
 std::string check_change_for_app(std::string_view app, const Change& change);
+// What a value generated under `name` means beyond the file, or "" (the alpha.125 report, problem 3): a
+// password of a service the application connects to (a name starting DB_, REDIS_ or MAIL_ with
+// PASSWORD in it) is new to that service too, which refuses the application until root sets the same
+// password there; APP_KEY `replaced` (unset and generated in one change) signs every user out.
+std::string generated_note(std::string_view name, bool replaced);
+// A name generated_note calls a service's password.
+bool service_password(std::string_view name);
 
 // 128 hex digits from the system's random source (the length of Rails' `bin/rails secret`);
 // "" when none could be read.
@@ -126,8 +133,9 @@ json::Value inspect(const std::string& dir, unsigned owner, const std::vector<st
 // "generated", "kept", "names", "tightened"?, "removed"? (the file, when no variable is
 // left), "still_exposed"? (names others could read that still hold that value)} or
 // {"ok": false, "error", "run_as_root"?}:
-// names only, a value never appears in the answer.
-json::Value apply(const std::string& dir, std::string_view site, unsigned owner, const Change& change);
+// names only, a value never appears in the answer. dry_run: every check made, the same names with
+// "dry_run": true ("removes" for the file the change would remove), nothing written or made.
+json::Value apply(const std::string& dir, std::string_view site, unsigned owner, const Change& change, bool dry_run = false);
 #endif
 
 }  // namespace agensio::appenv

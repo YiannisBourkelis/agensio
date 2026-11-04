@@ -110,8 +110,11 @@ std::string unified_diff(std::string_view before, std::string_view after, std::s
 // A credential file's diff as anyone may see it (the grabloop.app report, 2026-11-03: the context
 // lines of a .env edit carried DB_PASSWORD to the agent): every line of the file, context included,
 // shows no value. env_like: the names and the '=' stay, each value becomes "<N bytes>"; otherwise each
-// line becomes "<N bytes>". The diff's own lines (@@ headers, "no change") are kept.
-std::string mask_credential_diff(std::string_view diff, bool env_like);
+// line becomes "<N bytes>". A comment keeps a name only when it is one of `names` (env_names of the
+// file before and after): any other is "#<N bytes>". The diff's own lines (@@ headers, "no change") are kept.
+std::string mask_credential_diff(std::string_view diff, bool env_like, const std::vector<std::string>& names = {});
+// The names `text` assigns, as phpdotenv reads them (services/dotenv), each once.
+std::vector<std::string> env_names(std::string_view text);
 // Every line blank, a comment, or NAME=value (optionally "export "): the syntax of .env files.
 bool env_like_text(std::string_view text);
 

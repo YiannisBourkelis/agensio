@@ -97,6 +97,20 @@ std::string check_name(std::string_view n) {
     return "";
 }
 
+bool service_password(std::string_view name) {
+    return (name.starts_with("DB_") || name.starts_with("REDIS_") || name.starts_with("MAIL_")) && name.find("PASSWORD") != std::string_view::npos;
+}
+
+std::string generated_note(std::string_view name, bool replaced) {
+    if (service_password(name))
+        return std::string(name) + " is a new password its service (the database, Redis, the mail server) does not know: the application cannot reach that "
+                                   "service until root sets the same password there";
+    if (name == "APP_KEY" && replaced)
+        return "a new APP_KEY signs every user out and leaves what the application encrypted with the old one unreadable (Laravel 11 and later "
+               "read old keys from APP_PREVIOUS_KEYS)";
+    return "";
+}
+
 std::string check_change_for_app(std::string_view app, const Change& change) {
     if (app != "node") return "";
     auto refused = [](std::string_view n) { return n == "HOST" || n == "PORT" || n == "NODE_ENV"; };
@@ -675,23 +689,30 @@ json::Value describe(const std::string& dir, std::string_view site, unsigned own
     return out;
 }
 
-json::Value apply(const std::string& dir, std::string_view site, unsigned owner, const Change& change) {
+json::Value apply(const std::string& dir, std::string_view site, unsigned owner, const Change& change, bool dry_run) {
     static std::mutex serial;  // two writers in one process never interleave a read and a rename
     const std::lock_guard lock(serial);
     json::Value fail = json::Value::object().set("ok", false);
     if (!valid_site(site)) return fail.set("error", "'" + std::string(site) + "' is not a site's host name");
     if (::geteuid() != owner) return fail.set("error", "the environment files are " + whose(owner) + "; this process is not");
     Status st;
-    if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) return fail.set("error", "mkdir " + dir + ": " + std::strerror(errno));
-    const int dfd = open_dir(dir, owner, st);
-    if (dfd < 0) {
-        if (dfd == -2) st.error = dir + " vanished";
-        return failure(st);
-    }
     std::vector<Var> vars;
-    if (!read_at(dfd, dir, site, owner, vars, st)) {
-        ::close(dfd);
-        return failure(st);
+    // A dry run makes no directory: none there reads as no variable yet (the alpha.125 report: a dry
+    // run wrote the file).
+    struct stat ds {};
+    const bool no_dir = dry_run && ::lstat(dir.c_str(), &ds) != 0 && errno == ENOENT;
+    int dfd = -1;
+    if (!no_dir) {
+        if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) return fail.set("error", "mkdir " + dir + ": " + std::strerror(errno));
+        dfd = open_dir(dir, owner, st);
+        if (dfd < 0) {
+            if (dfd == -2) st.error = dir + " vanished";
+            return failure(st);
+        }
+        if (!read_at(dfd, dir, site, owner, vars, st)) {
+            ::close(dfd);
+            return failure(st);
+        }
     }
     std::vector<std::string> set, unset, absent, generated, kept;
     for (const auto& name : change.unset) {
@@ -728,6 +749,16 @@ json::Value apply(const std::string& dir, std::string_view site, unsigned owner,
         return fail.set("error", "the environment would hold more than " + std::to_string(kMaxVars) + " variables or 64 KB");
     }
     const bool changed = !set.empty() || !unset.empty() || !generated.empty();
+    if (dry_run) {  // every check made, nothing written, no ledger entry dropped
+        if (dfd >= 0) ::close(dfd);
+        std::vector<std::string> names;
+        for (const auto& v : vars) names.push_back(v.name);
+        json::Value out = json::Value::object().set("ok", true).set("dry_run", true).set("file", path).set("set", names_of(set)).set("unset", names_of(unset))
+            .set("absent", names_of(absent)).set("generated", names_of(generated)).set("kept", names_of(kept)).set("names", names_of(names));
+        if (!st.notes.empty()) out.set("tightened", names_of(st.notes));
+        if (changed && vars.empty()) out.set("removes", path);
+        return out;
+    }
     bool removed = false;
     if (changed && vars.empty()) {
         if (::unlinkat(dfd, leaf.c_str(), 0) != 0 && errno != ENOENT) {

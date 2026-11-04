@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.1.0-alpha.126
+
+- **Security fix: a dry run of a command that has none ran it, the gated ones without approval.** The
+  gate lets `dry_run: true` through unapproved for the command to answer without changing anything,
+  but `site_env_set`, a reveal sent by POST, `trash_delete` and `trash_expire` read no `dry_run`:
+  through the control socket, or `agensio ctl ... --dry-run`, an admin client wrote the environment,
+  read its values or removed trash entries for good with no person's code (`site_auth_user_set`
+  refused the unknown field). The MCP tools were not open to it: the bridge refuses `dry_run` for these.
+  `ctl --dry-run`, which needs no `--yes` since 0.1.0-alpha.122, also disabled, enabled or deleted a
+  site, or reloaded, unconfirmed. A dry run is now refused (400, nothing done) by every command that has
+  none, and `site_env_set` has one: every check of the real write, nothing written.
+- **Fix: a change its dry run refuses waited for a person's code** (the alpha.125 report, problem 1). An
+  environment change was stored without its dry run, so a `.env` with a quote never closed or a
+  lower-case name was approved and only then failed, and an approved batch after it was skipped. It is
+  dry-run before it is stored now, and refused at once with the dry run's error.
+- **Fix: a commented value in capitals showed in a credential file's masked diff** (problem 2):
+  `#JBSWY3DPEHPK3PXP==`, a base32 seed with its padding, read as a commented variable and kept
+  `#JBSWY3DPEHPK3PXP=`. A comment keeps a name only when the file has that variable (`# APP_KEY=` beside
+  `APP_KEY`); any other comment is shown by its length (`# DB_OLD=x` with no `DB_OLD` too).
+- **A generated password of a service is said to be new to that service** (problem 3): `--generate
+  DB_PASSWORD` (or `REDIS_`, `MAIL_` with `PASSWORD` in the name), rotated or new, answered only
+  `optimize` as the next step, after which the application could not reach its database. The
+  approval's preview says the service does not know the new password; the answer's first step is
+  root's, setting it there, with the `grep` line that prints it on root's terminal (`run_as_root`),
+  and `optimize` after it. A rotated `APP_KEY` is warned of in both: it signs every user out and leaves
+  what the old key encrypted unreadable (`APP_PREVIOUS_KEYS` on Laravel 11 and later).
+- **A dry run needs no `confirm`**, through the API and MCP as through `ctl` since 0.1.0-alpha.122
+  (the report's small item: the agent had to claim the user's agreement to preview a change). Only a
+  command that has a dry run accepts one now, so nothing is done without `confirm`; the MCP tools with
+  `dry_run` no longer list `confirm` as required.
+- **A scheduled run prints its record only when it failed, was skipped or changed the outcome** (the
+  scheduler report): `ctl site-task ... --scheduled` printed the whole record every minute, which
+  systemd kept, about 5,760 journal lines a day for one site. The answer carries `outcome_changed`.
+- `site_env_set`'s refusal of a lower-case name on a Laravel site says that such a line of the `.env`
+  (phpdotenv reads them, `site_env` lists them) is changed with `site_file_edit`.
+- An approval of a rotation names each variable once, not twice (`DB_PASSWORD, APP_KEY`). The address
+  split's fix names each site's way once when several sites hold the address, and the note for a site
+  added later says first what that site does: list the address too.
+- The scheduler's texts: `site_service_logs` on a Laravel site reads the scheduler's journal and says
+  so, with no advice to restart a unit the timer starts each minute; `site_task_output` says the
+  scheduler's runs are in `site_service_status` and `site_service_logs`; `schedule_run` says that its
+  commands, the application's, may use the network whatever its `network: false` says.
+
 ## 0.1.0-alpha.125 (2026-11-04)
 
 - **Fix: rotating a variable of a Laravel `.env` removed it.** `site_env_set` with `unset` and
@@ -16,8 +59,9 @@
 - **Fix: `site_env_set` on a `.env` with a quote never closed wrote the new variable into that value.**
   phpdotenv cannot read such a file, and the lines after the quote belong to the open value, so a
   variable appended there was never read. The change is now refused with the line to fix through
-  `site_file_edit`, and every change is read back before it is written. `export` is kept on a line
-  whose name starts like it (`e`, `ex`).
+  `site_file_edit`, and every change is read back before it is written. The parser keeps `export` on a
+  line whose name occurs inside the word (`e`, `ex`), a case no `site_env_set` call met, since it takes
+  upper-case names only.
 - **Fix: an approval's preview carried the sha256 of a credential file** (the alpha.124 report,
   problem B). The preview of a `.env` edit named the digests of the old and the new file, and so did
   the dry run, the result `approvals_list` keeps, a refused write's error and the audit log; with the

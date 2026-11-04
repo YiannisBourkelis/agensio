@@ -270,8 +270,9 @@ std::string unified_diff(std::string_view before, std::string_view after, std::s
 namespace {
 
 // One line of an env-like file as "NAME=" with what follows the '=' masked; the leading blanks, a
-// comment's '#' and "export " kept. False when the line is no assignment.
-bool masked_assignment(std::string_view line, std::string& out) {
+// comment's '#' and "export " kept. False when the line is no assignment, and for a comment whose
+// "name" is none of `names`, the file's variables.
+bool masked_assignment(std::string_view line, std::string& out, const std::vector<std::string>& names) {
     std::size_t i = 0;
     auto blanks = [&] {
         while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
@@ -293,10 +294,10 @@ bool masked_assignment(std::string_view line, std::string& out) {
     if (i >= line.size() || !letter(line[i])) return false;
     while (i < line.size() && (letter(line[i]) || (line[i] >= '0' && line[i] <= '9') || line[i] == '.')) ++i;
     if (i - name > 64) return false;
-    // A comment is free text: its "name" is shown only in a variable's usual capitals (# DB_OLD=...),
-    // never a commented-out key's base64 line that happens to end in '=' padding.
-    if (comment && std::any_of(line.begin() + static_cast<std::ptrdiff_t>(name), line.begin() + static_cast<std::ptrdiff_t>(i), [](char c) { return c >= 'a' && c <= 'z'; }))
-        return false;
+    // A comment is free text: its "name" is shown only when the file has that variable (# APP_KEY=...
+    // beside APP_KEY), never a commented-out key that happens to end in '=' padding, base64 or base32
+    // in capitals (the alpha.125 report: #JBSWY3DPEHPK3PXP== showed as #JBSWY3DPEHPK3PXP=<1 bytes>).
+    if (comment && std::find(names.begin(), names.end(), line.substr(name, i - name)) == names.end()) return false;
     blanks();
     if (i >= line.size() || line[i] != '=') return false;
     ++i;
@@ -305,10 +306,10 @@ bool masked_assignment(std::string_view line, std::string& out) {
     return true;
 }
 
-std::string masked_line(std::string_view line, bool env_like) {
+std::string masked_line(std::string_view line, bool env_like, const std::vector<std::string>& names) {
     if (line.find_first_not_of(" \t\r") == std::string_view::npos) return std::string(line);
     std::string out;
-    if (env_like && masked_assignment(line, out)) return out;
+    if (env_like && masked_assignment(line, out, names)) return out;
     if (env_like && line.find_first_not_of(" \t") != std::string_view::npos && line[line.find_first_not_of(" \t")] == '#')
         return "#<" + std::to_string(line.size()) + " bytes>";
     return "<" + std::to_string(line.size()) + " bytes>";
@@ -332,7 +333,14 @@ bool env_like_text(std::string_view text) {
     return true;
 }
 
-std::string mask_credential_diff(std::string_view diff, bool env_like) {
+std::vector<std::string> env_names(std::string_view text) {
+    std::vector<std::string> out;
+    for (const auto& l : dotenv::parse(text))
+        if (l.assignment && std::find(out.begin(), out.end(), l.name) == out.end()) out.push_back(l.name);
+    return out;
+}
+
+std::string mask_credential_diff(std::string_view diff, bool env_like, const std::vector<std::string>& names) {
     std::string out;
     std::size_t at = 0;
     while (at < diff.size()) {
@@ -341,7 +349,7 @@ std::string mask_credential_diff(std::string_view diff, bool env_like) {
         at = end + 1;
         // The diff writer's content lines carry one prefix (' ', '-', '+'); its own lines do not.
         if (!line.empty() && (line[0] == ' ' || line[0] == '-' || line[0] == '+'))
-            out += std::string(1, line[0]) + masked_line(line.substr(1), env_like) + "\n";
+            out += std::string(1, line[0]) + masked_line(line.substr(1), env_like, names) + "\n";
         else
             out += std::string(line) + "\n";
     }
@@ -483,10 +491,16 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
             for (const auto& n : body["reveal"].items()) names += (names.empty() ? "" : ", ") + std::string(n.is_string() ? n.str() : "?");
             out.push_back("reveals the values of " + names + " from the site's environment to whoever asked");
         } else {
-            std::string names;
-            for (const auto& [k, v] : body["set"].members()) names += (names.empty() ? "" : ", ") + k;
+            // Each name once: a rotation gives it in unset and generate both (the alpha.125 report's small item).
+            std::vector<std::string> listed;
+            auto add = [&](std::string n) {
+                if (std::find(listed.begin(), listed.end(), n) == listed.end()) listed.push_back(std::move(n));
+            };
+            for (const auto& [k, v] : body["set"].members()) add(k);
             for (const char* key : {"unset", "generate"})
-                for (const auto& n : body[key].items()) names += (names.empty() ? "" : ", ") + std::string(n.is_string() ? n.str() : "?");
+                for (const auto& n : body[key].items()) add(n.is_string() ? std::string(n.str()) : "?");
+            std::string names;
+            for (const auto& n : listed) names += (names.empty() ? "" : ", ") + n;
             out.push_back("changes the site's application environment (" + (names.empty() ? std::string("its variables") : names) +
                           "): where the application keeps its data, what it trusts, its secrets");
         }

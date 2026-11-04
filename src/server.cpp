@@ -1971,7 +1971,7 @@ void Server::env_async(const json::Value& req, std::function<void(json::Value)> 
                 } else {
                     appenv::Change change;
                     const std::string bad = appenv::parse_change(req, change);
-                    r = bad.empty() ? dotenv::write_file(project, file, ::geteuid(), ::getegid(), change, ::geteuid()).set("site", site).set("dotenv", true)
+                    r = bad.empty() ? dotenv::write_file(project, file, ::geteuid(), ::getegid(), change, ::geteuid(), req["dry_run"].boolean()).set("site", site).set("dotenv", true)
                                     : json::Value::object().set("ok", false).set("error", bad);
                 }
                 asio::post(workers_[0]->ctx, [done, r] { done(r); });
@@ -1984,7 +1984,7 @@ void Server::env_async(const json::Value& req, std::function<void(json::Value)> 
             } else {
                 appenv::Change change;
                 const std::string bad = appenv::parse_change(req, change);
-                r = bad.empty() ? appenv::apply(dir, site, ::geteuid(), change).set("site", site) : json::Value::object().set("ok", false).set("error", bad);
+                r = bad.empty() ? appenv::apply(dir, site, ::geteuid(), change, req["dry_run"].boolean()).set("site", site) : json::Value::object().set("ok", false).set("error", bad);
             }
 #else
             r = json::Value::object().set("ok", false).set("error", "not available on this platform");

@@ -86,7 +86,8 @@ void check_masking(std::string_view text, const std::vector<dotenv::Line>& lines
     if (env)
         for (const auto& l : lines) assert(!l.assignment || l.readable);
     const std::vector<std::string_view> orig = split(text);
-    const std::string masked = control::mask_credential_diff(control::unified_diff("", text, 0), env);
+    const std::vector<std::string> names = control::env_names(text);
+    const std::string masked = control::mask_credential_diff(control::unified_diff("", text, 0), env, names);
     std::size_t i = 0;
     for (std::string_view m : split(masked)) {
         if (m.empty() || m.front() != '+') {
@@ -116,7 +117,8 @@ void check_masking(std::string_view text, const std::vector<dotenv::Line>& lines
         const std::string_view name = shown_name(head);
         assert(!name.empty() && dotenv::check_name(name).empty());
         if (comment) {
-            assert(std::none_of(name.begin(), name.end(), [](char c) { return c >= 'a' && c <= 'z'; }));
+            // A comment shows a name only when the text assigns it (the alpha.125 report: a base32 seed).
+            assert(std::find(names.begin(), names.end(), name) != names.end());
         } else {
             // phpdotenv's own reading: this line is an assignment of the name shown (an env-like text's
             // lines are its lines one for one).

@@ -36,7 +36,10 @@ the caller's `confirm`: none of it runs code, moves a secret off the host, grant
 beyond undo.
 
 A dry run (`dry_run: true`, `--dry-run`) is never held: it answers as it always did and adds
-`needs_approval` with the reasons the real change would wait.
+`needs_approval` with the reasons the real change would wait. A command that has no dry run (a
+password user, the trash, a reveal, a site's disable, enable or delete, a reload) refuses one with
+400 and does nothing. A change whose dry run fails (an environment change to a `.env` with a quote
+never closed, a name that is no variable's) is answered at once with that failure and never waits.
 
 ## 2. Set up an approver
 

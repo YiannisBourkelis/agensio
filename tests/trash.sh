@@ -119,6 +119,10 @@ ctl site-delete b.test --files --yes --reason trash > $T/out; E2=$(j 'd["entry"]
 ctl site-delete a.test --files --yes --reason trash > $T/out; E3=$(j 'd["entry"]'); cp $T/out $T/del3.json
 check "the last site of the account takes the state directory whole; trash shows two entries whose account no site uses; the answer says root may remove it" "no yes yes 2 False False yes" "$([ -e $T/state/t1 ] && echo yes || echo no) $([ -f $TR/$E3/state/gems/rails ] && echo yes) $([ -f $TR/$E3/state/venvs/a.test/bin/python ] && echo yes) $(ctl trash > $T/out; j 'len(d["entries"]), d["entries"][0]["account_in_use"], d["entries"][1]["account_in_use"]') $(grep -q 'root may remove it: userdel t1' $T/del3.json && echo yes || echo no)"
 check "the account itself is kept" "yes" "$(id -u t1 > /dev/null 2>&1 && echo yes)"
+# A dry run of a command that has none is refused before anything (the alpha.125 report): before, the
+# gate let a dry run through unapproved and trash_delete, which reads no dry_run, removed the entry.
+check "trash-delete and trash-expire with --dry-run: refused, no dry run, no entry removed" "1 yes 1 2" \
+  "$("$BIN" ctl trash-delete $E3 --dry-run --socket $CS > $T/out; echo -n "$? "; j '"yes" if "has no dry run" in d.get("error", "") else d') $("$BIN" ctl trash-expire --dry-run --socket $CS > /dev/null; echo -n "$? "; ctl trash > $T/out; j 'len(d["entries"])')"
 check "trash-delete removes one entry for good; the other stays" "True 1 $E2" "$(ctl trash-delete $E3 --yes --reason trash > $T/out; j 'd["ok"]') $(ctl trash > $T/out; j 'len(d["entries"]), d["entries"][0]["entry"]')"
 python3 - "$TR/$E2/manifest.json" <<'PY'
 import json, sys

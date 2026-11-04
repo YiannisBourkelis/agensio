@@ -402,7 +402,8 @@ json::Value read_file(const std::string& project, const std::string& rel, std::s
     return v.set("ok", true).set("file", abs).set("exists", exists);
 }
 
-json::Value write_file(const std::string& project, const std::string& rel, unsigned owner, unsigned group, const appenv::Change& change, unsigned account) {
+json::Value write_file(const std::string& project, const std::string& rel, unsigned owner, unsigned group, const appenv::Change& change, unsigned account,
+                       bool dry_run) {
     std::string leaf, why, text;
     const int dfd = open_parent(project, rel, account, leaf, why);
     if (dfd < 0) return fail(std::move(why));
@@ -416,6 +417,14 @@ json::Value write_file(const std::string& project, const std::string& rel, unsig
     if (!r.error.empty()) {
         ::close(dfd);
         return fail(r.error);
+    }
+    auto answer = [&] {
+        return json::Value::object().set("ok", true).set("file", abs).set("mode", "0640").set("set", names(r.set)).set("unset", names(r.unset))
+            .set("generated", names(r.generated)).set("kept", names(r.kept)).set("absent", names(r.absent)).set("created", !exists);
+    };
+    if (dry_run) {  // every check made, nothing written (the alpha.125 report: a dry run wrote the file)
+        ::close(dfd);
+        return answer().set("dry_run", true);
     }
     const std::string tmp = ".agensio-env." + std::to_string(::getpid());
     ::unlinkat(dfd, tmp.c_str(), 0);
@@ -442,8 +451,7 @@ json::Value write_file(const std::string& project, const std::string& rel, unsig
         return fail("writing " + abs + ": " + std::strerror(re));
     }
     ::close(dfd);
-    return json::Value::object().set("ok", true).set("file", abs).set("mode", "0640").set("set", names(r.set)).set("unset", names(r.unset))
-        .set("generated", names(r.generated)).set("kept", names(r.kept)).set("absent", names(r.absent)).set("created", !exists);
+    return answer();
 }
 
 #endif

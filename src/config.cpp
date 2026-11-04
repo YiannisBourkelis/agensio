@@ -4078,12 +4078,15 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                     }
                     if (unjoined) continue;
                 }
-                // One site on the address: its own way, said once (the same report's small item).
+                // One site on the address: its own way, said once (the same report's small item); several:
+                // every site's, each once (the alpha.125 report: the site's own came first and again inside).
                 const bool alone = s.sites.size() == 1;
+                const bool any_managed = std::any_of(s.sites.begin(), s.sites.end(), [](const SiteConfig* h) { return h->managed; });
                 const std::string closes = families_routed ? " and [::]:" + p + " takes " + family + " too" : "; without SO_REUSEPORT [::]:" + p + " then stays IPv6-only until a restart";
                 const std::string once_left = ": once it leaves, the socket of " + s.listen + " closes" + closes;
-                const std::string all_ways = alone ? hand_back(*site) + once_left
+                const std::string all_ways = alone ? hand_back(*site) + (site->managed ? " (MCP site_update with listen_tls: \"\" and listen_plain: \"\")" : "") + once_left
                                                    : "Hand back every site on " + s.listen + " one after another, in one go (" + ways_of(s.sites) +
+                                                         (any_managed ? "; MCP site_update with listen_tls: \"\" and listen_plain: \"\" for a managed site" : "") +
                                                          "): a site handed back answers over " + other + " only until the last leaves and that socket closes" +
                                                          (families_routed ? ", when [::]:" + p + " takes " + family + " too" : "; without SO_REUSEPORT [::]:" + p + " then stays IPv6-only until a restart");
                 const std::string listed = "listen = [\"[::]:" + p + "\", \"" + s.listen + "\"]";
@@ -4108,8 +4111,11 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                                                  : "beside which [::]:" + p + " is opened IPv6-only (no SO_REUSEPORT)") +
                                    ": " + cut + ". Give it the server's addresses (" + hand_back(*site) + "), " + (whole ? "a specific address of this host, " : "") +
                                    (s.specific && s.joinable && count ? "have the sites cut off list " + s.listen + " too, " : "") + "or keep a family out with an access rule",
-                               hand_back(*site) + (site->managed ? " (MCP site_update with listen_tls: \"\" and listen_plain: \"\")" : "") + (alone ? once_left : ". " + all_ways) +
-                                   (s.specific && s.joinable && count ? ". Or the sites cut off list it too: " + victims + ", each " + listed : std::string())});
+                               // With no site cut off, what a site added later does comes first (the alpha.125 report:
+                               // the note never said it).
+                               count ? all_ways + (s.specific && s.joinable ? ". Or the sites cut off list it too: " + victims + ", each " + listed : std::string())
+                                     : "A site added later on port " + p + " lists " + s.listen + " too, which shares its socket: " + listed +
+                                           " (a managed site cannot: it takes one address of its own per kind). Or: " + all_ways});
             }
     if (!cfg.ipv6_note.empty()) out.push_back({"ipv6_unavailable", "info", "", cfg.ipv6_note});
     // What check_redirects noted (docs/redirects.md 8): chains, a soft 404, a rule answering before a

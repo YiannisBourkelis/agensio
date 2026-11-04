@@ -451,7 +451,14 @@ rather than rewritten, as is any change to a file with a quote never closed (php
 it, and the lines after the quote belong to that value: the answer names the line to fix with
 `site_file_edit`). A name in both `--unset` and `--generate` is rotated where its line was. Every
 change is read back before it is written. A configuration cached by the `optimize` task reads `.env` again only after
-`optimize` runs again; the answer says so.
+`optimize` runs again; the answer says so. A generated password of a service the application connects
+to (`DB_`, `REDIS_` or `MAIL_` with `PASSWORD` in the name) is new to that service too: the approval's
+preview says so, and the answer's first step is root's, setting the same password there, with the
+`grep` line that prints the value on root's terminal; `optimize` comes after. A rotated `APP_KEY` signs
+every user out and leaves what the application encrypted with the old key unreadable (Laravel 11 and
+later read old keys from `APP_PREVIOUS_KEYS`); the preview and the answer warn. `--dry-run` checks the
+change as the write would and writes nothing; a dry run needs no `--yes`. Names are upper-case: a line
+of the `.env` under another name (phpdotenv reads lower-case ones too) is changed with `site_file_edit`.
 
 **The scheduler** (2026-11-04): `agensio ctl site-unit NAME` on a Laravel site renders two units for
 root to install once, `agensio-schedule-NAME.timer` (every minute) and the oneshot
@@ -461,7 +468,9 @@ schedule:run` like any of the site's tasks: as the site's account, in the live r
 PHP version, so nothing in the units names a release and a switch needs nothing of root. A scheduled
 run holds no task slot (a deploy's `migrate_force` is never refused for it), is skipped while a task
 runs on the site or the previous minute's still runs, keeps its record apart from the deploy's output,
-and is named in the audit log only when its outcome changes. `site-service NAME` says whether a
+and is named in the audit log only when its outcome changes; `ctl --scheduled` prints the run's record,
+which systemd keeps in the journal, only for a run that failed, was skipped or changed the outcome, so a
+quiet minute leaves systemd's own lines alone. `site-service NAME` says whether a
 scheduler exists before anyone makes another: agensio's timer as installed, any cron line that runs
 `schedule:run` for the site (the account's crontab, `/etc/crontab`, `/etc/cron.d`, named by file and
 line, never by text), and the runs agensio recorded; health warns `site_schedule_duplicate` when two

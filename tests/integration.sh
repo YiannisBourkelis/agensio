@@ -1256,6 +1256,45 @@ api("POST", "/v1/approvals/" + d.get("id", "x") + "/reject", {})
 print(" ".join(out))
 PYT
 )"
+# A dry run runs nothing (the alpha.125 report). The gate lets a dry run through unapproved for the
+# handler to answer without changing anything, but the environment, a reveal by POST, the trash and a
+# site's disable read no dry_run and ran (a password user refused the field): a command without a dry
+# run now refuses one before anything. The environment has its own, and a change it refuses is never
+# stored for a person.
+check "dry runs: a command without one refuses it, the environment's writes nothing, a change its dry run refuses waits for no one" \
+  "env-dry-unwritten 400-reveal 400-user 400-trash 400-disable 400-unstored" \
+  "$(python3 - "$CS" <<'PYT'
+import json, subprocess, sys
+sock = sys.argv[1]
+def api(method, path, body=None):
+    args = ["curl", "-sS", "-o", "/dev/stdout", "-w", "\n%{http_code}", "--unix-socket", sock, "-X", method, "http://control" + path]
+    if body is not None: args += ["-H", "Content-Type: application/json", "-d", json.dumps(body)]
+    out = subprocess.run(args, capture_output=True, text=True).stdout.rsplit("\n", 1)
+    return int(out[1]), (json.loads(out[0]) if out[0].strip() else {})
+def waiting(suffix):
+    return [a["id"] for a in api("GET", "/v1/approvals")[1]["approvals"] if a["state"] == "waiting" and a["path"].endswith(suffix)]
+out = []
+st, d = api("POST", "/v1/sites/dj.test/env", {"set": {"DRY_ONLY": "x"}, "dry_run": True, "confirm": True, "reason": "dry"})
+env = open("bench/tmp/env/dj.test.env").read()
+out.append("env-dry-unwritten" if st == 200 and d.get("dry_run") and "DRY_ONLY" in d.get("set", []) and "DRY_ONLY" not in env else str(st) + " written:" + str("DRY_ONLY" in env))
+st, d = api("POST", "/v1/sites/dj.test/env", {"reveal": ["DATABASE_URL"], "dry_run": True, "confirm": True, "reason": "dry"})
+out.append("400-reveal" if st == 400 and "hunter2" not in json.dumps(d) else str(st) + (" leaked" if "hunter2" in json.dumps(d) else ""))
+st, d = api("POST", "/v1/sites/g3.test/auth-users", {"user": "dryrun", "generate": True, "dry_run": True, "confirm": True, "reason": "dry"})
+_, users = api("GET", "/v1/sites/g3.test/auth-users")
+out.append("400-user" if st == 400 and "dryrun" not in json.dumps(users) else str(st) + " created:" + str("dryrun" in json.dumps(users)))
+st, d = api("POST", "/v1/trash/g3.test-20260101-000000/delete", {"dry_run": True, "confirm": True, "reason": "dry"})
+out.append("400-trash" if st == 400 and "has no dry run" in d.get("error", "") else str(st))
+st, d = api("POST", "/v1/sites/g3.test/disable", {"dry_run": True, "confirm": True, "reason": "dry"})
+s2, _ = api("GET", "/v1/sites/g3.test")
+out.append("400-disable" if st == 400 and s2 == 200 else str(st) + " site:" + str(s2))
+if s2 != 200: api("POST", "/v1/sites/g3.test/enable", {"confirm": True, "reason": "dry"})
+st, d = api("POST", "/v1/sites/dj.test/env", {"set": {"PATH": "/tmp"}, "confirm": True, "reason": "dry"})
+left = waiting("/env")
+out.append("400-unstored" if st == 400 and not left else str(st) + " waiting:" + str(len(left)))
+for i in left: api("POST", "/v1/approvals/" + i + "/reject", {})
+print(" ".join(out))
+PYT
+)"
 check "the audit log: the queued change and the approval, by the approver's name; the run recorded as approved with a code" "yes yes yes" \
   "$(grep -q 'sites/dj.test/task (t): waits for approval [0-9a-f]\{12\}: installs the Python packages' bench/tmp/audit.log && echo yes) $(grep -q 'approvals ([0-9a-f]\{12\}): approved by tester' bench/tmp/audit.log && echo yes) $(grep -q 'running task pip_install packages=wagtail in .*, approved by tester with an authenticator code (approval [0-9a-f]\{12\})' bench/tmp/audit.log && echo yes)"
 # Without the helper, as the server's own account: the template row needs the application's

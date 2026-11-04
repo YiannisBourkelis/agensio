@@ -446,7 +446,12 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         const SiteConfig* site = control::find_site(backend_->running(), name);
         const auto it = site ? last_output_.find(site->server_names.front()) : last_output_.end();
         if (!site || it == last_output_.end()) {
-            reply(s, 404, json::Value::object().set("error", site ? "no task output kept for this site since the server started" : "no such site").set("site", std::string(name)));
+            // A scheduled run keeps its record apart, so the deploy's output stays here: say where it is (the
+            // alpha.125 report).
+            json::Value answer = json::Value::object().set("error", site ? "no task output kept for this site since the server started" : "no such site").set("site", std::string(name));
+            if (site && schedule_app(site->app))
+                answer.set("hint", "the scheduler's own runs are not kept here: site_service_status shows the last one (runs, last_output_end) and site_service_logs each one");
+            reply(s, 404, answer);
             return false;
         }
         const TaskOutput& o = it->second;
@@ -700,6 +705,23 @@ json::Value decisions_json(const std::vector<control::Decision>& needs) {
     return a;
 }
 
+// A POST to the site's environment that only reveals values: what an approved reveal replays.
+bool env_reveal_only(const json::Value& body) {
+    return body["reveal"].is_array() && body["set"].is_null() && body["unset"].is_null() && body["generate"].is_null();
+}
+
+// The commands whose handler answers dry_run without changing anything. Any other must refuse a dry run
+// before it runs (the alpha.125 report: the gate lets a dry run through unapproved for its handler to
+// answer, and the environment, a reveal, the trash and a site's disable read no dry_run, so they ran,
+// the gated ones without a person's approval; ctl's --dry-run, which needs no --yes, ran disable,
+// enable, delete and reload unconfirmed).
+bool has_dry_run(std::string_view path, std::string_view action, const json::Value& body) {
+    if (path == "/v1/sites") return true;
+    if (!path.starts_with("/v1/sites/")) return false;
+    if (action.empty() || action == "install" || action == "copy" || action == "task" || action == "file") return true;
+    return action == "env" && !env_reveal_only(body);
+}
+
 }  // namespace
 
 bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, std::function<void()>& done) {
@@ -752,7 +774,15 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         reply(s, 400, json::Value::object().set("error", "body must be a JSON object: " + err));
         return false;
     }
-    if (!body["confirm"].boolean()) {
+    if (!body["dry_run"].is_null() && (body["dry_run"].type() != json::Value::Type::boolean || (body["dry_run"].boolean() && !has_dry_run(path, action, body)))) {
+        reply(s, 400, json::Value::object().set("error", "POST " + std::string(path) + " has no dry run: nothing was done")
+                          .set("hint", "without dry_run the call makes the change, after a person's approval where one is needed"));
+        return false;
+    }
+    // A dry run changes nothing, so it needs no confirm, through the API and MCP as through ctl since
+    // alpha.122 (the alpha.125 report: the agent had to claim the user's agreement to preview a change);
+    // only a command that has one gets here with dry_run set.
+    if (!body["confirm"].boolean() && !body["dry_run"].boolean()) {
         reply(s, 428, json::Value::object().set("error", "confirm required")
                           .set("hint", "this command changes the server; send {\"confirm\": true, \"reason\": \"...\"} once the user agreed"));
         return false;
@@ -908,7 +938,12 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         }
         if (action == "copy") site_copy(s, name, body, what, std::move(done));
         else if (action == "task") site_task(s, name, body, what, std::move(done));
-        else if (action == "env" && body["reveal"].is_array() && body["set"].is_null() && body["unset"].is_null() && body["generate"].is_null()) {
+        else if (action == "env" && env_reveal_only(body)) {
+            if (!approving_) {  // the gate queues every other: never a value without a person's approval
+                reply(s, 400, json::Value::object().set("error", "a value is revealed with GET ?reveal=NAME, which waits for a person's approval"));
+                done();
+                return true;
+            }
             const json::Value reveal = body["reveal"];  // an approved reveal, replayed (handle_deferred queued it)
             site_env_show(s, name, std::move(done), &reveal);
         }
@@ -2415,8 +2450,13 @@ void ControlHandler::site_files(Stream& s, std::string_view name, const json::Va
             // A credential file's diff shows no value, its context lines included: the preview is kept
             // with the waiting change, which approvals_list hands to any admin client (the grabloop.app
             // report: DB_PASSWORD stood in the context of a .env edit).
-            if (r["secured"].boolean() && new_is_text)
-                diff = control::mask_credential_diff(diff, control::env_like_text(cur["text"].is_string() ? cur["text"].str() : std::string_view()) && control::env_like_text(after));
+            if (r["secured"].boolean() && new_is_text) {
+                const std::string_view before = cur["text"].is_string() ? cur["text"].str() : std::string_view();
+                std::vector<std::string> names = control::env_names(before);
+                for (auto& n : control::env_names(after))
+                    if (std::find(names.begin(), names.end(), n) == names.end()) names.push_back(std::move(n));
+                diff = control::mask_credential_diff(diff, control::env_like_text(before) && control::env_like_text(after), names);
+            }
             r = std::move(without_texts(r).set("diff", std::move(diff)));
         } else if (ok && (op == "write" || op == "edit")) {
             // The real call answers no text either: the previous file whole came back here, and the answer
@@ -2568,6 +2608,7 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
             if (changed)
                 audit_peer(s, what, std::string("scheduled schedule_run ") + (ok ? "ran" : "failed: " + rec.last_error) + " as " + std::string(r.get("as")) + " in " +
                                         std::string(r.get("cwd")) + "; later runs are logged only when the outcome changes");
+            r.set("outcome_changed", changed);  // ctl --scheduled prints only such a run and a failure, as the audit log names them
             reply(s, ok ? 200 : 409, r);
             done();
         });
@@ -2840,15 +2881,24 @@ void ControlHandler::site_service(Stream& s, std::string_view name, bool logs, s
             const std::string& out = r["output"].str();
             const auto count = std::count(out.begin(), out.end(), '\n');
             audit_peer(s, "sites/" + key + "/service/logs", "read " + std::to_string(count) + " lines of the journal of " + std::string(r.get("unit")));
-            r.set("hint", out.empty() ? "the journal holds nothing for this unit in that window: it never ran, or ran before the window"
-                                      : std::string("the application's own lines as systemd kept them, newest last; ") +
-                                            (python ? "a Python traceback (its last line names the exception: ModuleNotFoundError, "
-                                                      "ImproperlyConfigured, OperationalError), 'Address already in use' or a Gunicorn "
-                                                      "'Worker failed to boot'"
-                                             : node ? "a Node stack trace (Error: Cannot find module, EADDRINUSE, EACCES), or the application's own "
-                                                      "last words before it exited"
-                                                    : "a Ruby backtrace or 'Address already in use'") +
-                                            " usually names the cause. After a fix, root restarts the unit");
+            // A Laravel site's journal is its scheduler's, a oneshot the timer starts each minute: nothing to
+            // restart (the alpha.125 report: the hint was the application service's).
+            if (r.get("kind") == "scheduler")
+                r.set("hint", out.empty() ? "the journal holds nothing for the scheduler in that window: its timer is not installed or not running (site_service_status)"
+                                          : "the scheduled runs as systemd kept them, newest last: systemd's start and end lines for each, and the run's "
+                                            "record (ok, exit status, the end of artisan's output: a failed command shows as FAIL) only for a run that failed, "
+                                            "was skipped or changed the outcome, since a run like the one before prints nothing. The timer starts the next "
+                                            "run each minute, so nothing is restarted; after a fix the next minute's run shows it");
+            else
+                r.set("hint", out.empty() ? "the journal holds nothing for this unit in that window: it never ran, or ran before the window"
+                                          : std::string("the application's own lines as systemd kept them, newest last; ") +
+                                                (python ? "a Python traceback (its last line names the exception: ModuleNotFoundError, "
+                                                          "ImproperlyConfigured, OperationalError), 'Address already in use' or a Gunicorn "
+                                                          "'Worker failed to boot'"
+                                                 : node ? "a Node stack trace (Error: Cannot find module, EADDRINUSE, EACCES), or the application's own "
+                                                          "last words before it exited"
+                                                        : "a Ruby backtrace or 'Address already in use'") +
+                                                " usually names the cause. After a fix, root restarts the unit");
             reply(s, 200, r);
         } else {
             const json::Value& st = r["state"];
@@ -2972,8 +3022,15 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
     }
     appenv::Change change;
     if (std::string bad = appenv::parse_change(body, change); !bad.empty()) {
+        // A Laravel .env may hold names this call never writes (phpdotenv reads lower-case ones too, which
+        // site_env lists): say where those are changed (the alpha.125 report's small item).
+        const bool name_refused = bad.find("name") != std::string::npos;
         reply(s, 400, json::Value::object().set("error", bad)
-                          .set("hint", "set: {NAME: value}, unset: [NAME], generate: [NAME] (a random secret for a missing name, e.g. SECRET_KEY_BASE)"));
+                          .set("hint", std::string("set: {NAME: value}, unset: [NAME], generate: [NAME] (a random secret for a missing name, e.g. SECRET_KEY_BASE)") +
+                                           (schedule_app(site->app) && name_refused
+                                                ? "; names are upper-case letters, digits and _: a line of the .env under another name (phpdotenv reads lower-case "
+                                                  "ones too) is changed with site_file_edit"
+                                                : "")));
         done();
         return;
     }
@@ -2983,9 +3040,11 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
         return;
     }
     const std::string key = site->server_names.front();
+    const bool dry_run = body["dry_run"].boolean();
     json::Value req = json::Value::object().set("op", "env_write").set("site", key);
     for (const char* k : {"set", "unset", "generate"})
         if (!body[k].is_null()) req.set(k, body[k]);
+    if (dry_run) req.set("dry_run", true);
     const bool laravel = schedule_app(site->app);
     if (laravel) req.set("dotenv", true).set("project", site->project_root.empty() ? site->root : site->project_root).set("env_file", site->env_file);
     std::string plan;
@@ -3000,7 +3059,7 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
     list("set", set_names);
     list("unset", change.unset);
     list("generate", change.generate);
-    audit_peer(s, what, "changing the environment: " + plan);
+    if (!dry_run) audit_peer(s, what, "changing the environment: " + plan);
     // The service's restart line (P4 b of the alpha.33 report: it named the example file):
     // a Rails site with its own account has the unit site_service_unit renders; any other
     // proxy site's application is started by whatever root set up for it.
@@ -3008,10 +3067,32 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
         ? "the application reads it when its service restarts: the unit site_service_unit renders loads the file (EnvironmentFile=); as root, systemctl restart agensio-app-" + site->user + ".service"
         : std::string("the application reads it when its service restarts: the unit that runs it must load the file (EnvironmentFile=, the file named above); root restarts that unit");
     const bool django = python_app(site->app);
-    backend_->env_async(req, [this, &s, what = std::string(what), restart, django, laravel, key, done](json::Value r) {
+    backend_->env_async(req, [this, &s, what = std::string(what), restart, django, laravel, key, dry_run, done](json::Value r) {
         if (!r["ok"].boolean()) {
-            audit_peer(s, what, "refused: " + std::string(r.get("error")));
-            reply(s, 409, r);
+            if (!dry_run) audit_peer(s, what, "refused: " + std::string(r.get("error")));
+            reply(s, 409, dry_run ? r.set("dry_run", true) : r);
+            done();
+            return;
+        }
+        // What the generated values mean beyond the file (the alpha.125 report, problem 3): a service's
+        // password is new to that service, which root gives it before anything else; a replaced APP_KEY
+        // signs every user out.
+        json::Value warnings = json::Value::array(), service_steps = json::Value::array(), root_lines = json::Value::array();
+        for (const auto& g : r["generated"].items()) {
+            const std::string gen(g.str());
+            bool replaced = false;
+            for (const auto& u : r["unset"].items()) replaced = replaced || u.str() == gen;
+            const std::string note = appenv::generated_note(gen, replaced);
+            if (note.empty()) continue;
+            warnings.push(note);
+            if (!appenv::service_password(gen)) continue;
+            service_steps.push("first, before the application needs it: root sets the new " + gen + " at its service (the site's database user, Redis's password, the "
+                               "mail account), reading it with the run_as_root line, which prints it on root's terminal only; never ask for the value here");
+            root_lines.push("grep -m1 '^" + gen + "=' " + shell_word(std::string(r.get("file"))));
+        }
+        if (dry_run) {  // checked as the write would be, nothing written (the alpha.125 report: the dry run wrote it)
+            if (!warnings.items().empty()) r.set("warnings", warnings);
+            reply(s, 200, r.set("dry_run", true).set("hint", "nothing was written; the same call without dry_run waits for a person's approval, then makes this change"));
             done();
             return;
         }
@@ -3024,10 +3105,12 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
         if (!r.get("removed").empty())
             r.set("done", json::Value::array().push("removed " + std::string(r.get("removed")) + ": no variables left (site_env_set creates it again)"));
         if (!r["still_exposed"].items().empty())
-            r.set("warnings", json::Value::array().push(joined(r["still_exposed"]) + (r["still_exposed"].items().size() == 1 ? " still holds the value" : " still hold the values") +
-                                                         " others could read: give " + (r["still_exposed"].items().size() == 1 ? "it" : "them") +
-                                                         " a new value (generate for a generated secret; change a password where it is used too), and health warns until then"));
-        json::Value steps = json::Value::array();
+            warnings.push(joined(r["still_exposed"]) + (r["still_exposed"].items().size() == 1 ? " still holds the value" : " still hold the values") +
+                          " others could read: give " + (r["still_exposed"].items().size() == 1 ? "it" : "them") +
+                          " a new value (generate for a generated secret; change a password where it is used too), and health warns until then");
+        if (!warnings.items().empty()) r.set("warnings", warnings);
+        if (!root_lines.items().empty()) r.set("run_as_root", root_lines);
+        json::Value steps = service_steps;
         if (laravel) {  // the application reads its .env at each request, unless its configuration is cached
             steps.push("a release that ran the optimize task keeps the old values in its cached configuration until optimize runs again: site_task " + key + " optimize");
             r.set("next_steps", steps);
@@ -3265,7 +3348,13 @@ std::string ControlHandler::approval_preview(std::string_view path, const json::
         t = "change the environment of " + std::string(name) + ":\n";
         for (const auto& [k, v] : body["set"].members()) t += "  set " + k + " (" + std::to_string(v.is_string() ? v.str().size() : 0) + " characters, not shown)\n";
         for (const auto& n : body["unset"].items()) t += "  unset " + std::string(n.is_string() ? n.str() : "?") + "\n";
-        for (const auto& n : body["generate"].items()) t += "  generate " + std::string(n.is_string() ? n.str() : "?") + " (a random secret)\n";
+        for (const auto& n : body["generate"].items()) {
+            const std::string g(n.is_string() ? n.str() : "?");
+            t += "  generate " + g + " (a random secret)\n";
+            bool replaced = false;
+            for (const auto& u : body["unset"].items()) replaced = replaced || (u.is_string() && u.str() == g);
+            if (const std::string note = appenv::generated_note(g, replaced); !note.empty()) t += "    note: " + note + "\n";
+        }
         return control::escape_for_terminal(t);
     }
     if (action == "auth-users") {  // the user and what changes, never a hash
@@ -3352,7 +3441,10 @@ bool ControlHandler::queue_for_approval(Stream& s, WorkerState& ws, std::string_
         reply(s, 202, answer);
     };
     const bool update = path.starts_with("/v1/sites/") && action.empty(), create = path == "/v1/sites";
-    const bool checkable = action == "task" || action == "file" || action == "install" || action == "copy" || update || create;
+    // The environment's change too (the alpha.125 report, problem 1: an open quote and lower-case names
+    // were stored, and failed only once approved); never a reveal, whose dry run is no answer to store.
+    const bool checkable = action == "task" || action == "file" || action == "install" || action == "copy" || update || create ||
+                           (action == "env" && !env_reveal_only(body));
     c->secret_result = (action == "file" && body.get("op") == "read") || (action == "env" && body["reveal"].is_array()) ||
                        (action == "auth-users" && body["generate"].boolean());
     if (!checkable || !done) {

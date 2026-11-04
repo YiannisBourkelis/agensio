@@ -502,7 +502,7 @@ const std::vector<Row>& rows() {
          "php", "php", {{"artisan"}, {"storage:link"}, {"--no-interaction"}}, {}, {}, false, false, 120, {{"artisan", kNoArtisan}}},
         {"laravel", "queue_restart", "Tells the queue workers to restart after their current job (php artisan queue:restart): after a release.",
          "php", "php", {{"artisan"}, {"queue:restart"}, {"--no-interaction"}}, {}, {}, false, false, 120, {{"artisan", kNoArtisan}}},
-        {"laravel", "schedule_run", "Runs the scheduled commands that are due (php artisan schedule:run): what the site's scheduler timer runs every minute.",
+        {"laravel", "schedule_run", "Runs the scheduled commands that are due (php artisan schedule:run): what the site's scheduler timer runs every minute. They are the application's own and may use the network (network: false only says task_network = false does not refuse it).",
          "php", "php", {{"artisan"}, {"schedule:run"}, {"--no-interaction"}}, {}, {}, false, false, 900, {{"artisan", kNoArtisan}}},
         {"laravel", "queue_work_once", "Works the queue until it is empty, at most 50 s (php artisan queue:work --stop-when-empty --max-time=50): a manual drain.",
          "php", "php", {{"artisan"}, {"queue:work"}, {"--stop-when-empty"}, {"--max-time=50"}, {"--no-interaction"}}, {}, {}, false, false, 300,

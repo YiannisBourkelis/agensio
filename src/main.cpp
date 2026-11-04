@@ -81,7 +81,7 @@ void usage(std::ostream& out = std::cout) {
                  "                           [--path SUB] [--create-path] [--strip 0|1] [--dry-run] [--ignore-requirements]\n"
                  "                      site-copy NAME --from SUB --to SUB [--overwrite] [--dry-run]\n"
                  "                      site-task NAME TASK [--param KEY=VALUE]... [--dry-run] (site-tasks NAME lists them)\n"
-                 "                      site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...\n"
+                 "                      site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]... [--dry-run]\n"
                  "                           (site-env NAME [--reveal KEY]... shows names, lengths, fingerprints; admin)\n"
                  "                      site-auth-user-set NAME USER [--generate | --prompt] [--expires YYYY-MM-DD | --no-expiry]\n"
                  "                           [--note TEXT | --no-note] [--lock | --unlock] | site-auth-user-delete NAME USER\n"
@@ -739,7 +739,7 @@ int main(int argc, char** argv) {
                              "                    createsuperuser --param username=U --param email=E, check_deploy;\n"
                              "                    app = node: npm_ci, npm_run --param script=NAME);\n"
                              "                    `site-tasks NAME` lists them with their parameters. Never a command line.\n"
-                             "        site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...: the variables the\n"
+                             "        site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]... [--dry-run]: the variables the\n"
                              "                    site's tasks and its application service get (app = rails, redmine, django, wagtail, node\n"
                              "                    or proxy), in a file\n"
                              "                    root's and 0600; --generate SECRET_KEY_BASE fills a missing name with a random secret\n"
@@ -1590,6 +1590,15 @@ int main(int argc, char** argv) {
             if (raw && (command == "site-unit" || command == "site-service-logs" || command == "site-task-output" || command == "protection")) {
                 std::cerr << "ctl: the server answered " << reply.status << ": " << reply.body << (reply.body.ends_with('\n') ? "" : "\n");
                 return 1;
+            }
+            // The scheduler's run every minute (the alpha.125 report: each one's whole record went to the
+            // journal, 5,760 lines a day for one site): a success like the run before prints nothing; a
+            // failure, a skip and a changed outcome print the record, as the audit log names only those.
+            if (command == "site-task" && body["scheduled"].boolean() && reply.status == 200) {
+                agensio::json::Value u;
+                std::string perr;
+                if (agensio::json::parse(reply.body, u, perr) && u["outcome_changed"].type() == agensio::json::Value::Type::boolean && !u["outcome_changed"].boolean())
+                    return 0;
             }
             if ((command == "access-check" || command == "path-check") && reply.status == 200) {  // the verdict first, the details after
                 agensio::json::Value u;

@@ -66,8 +66,9 @@ json::Value describe(std::string_view text, std::string_view key, const std::vec
 json::Value read_file(const std::string& project, const std::string& rel, std::string_view key, const std::vector<std::string>& reveal, unsigned account);
 // The change written: a temporary file in the same directory, owned `owner`:`group`, 0640, synced and
 // renamed over the file. {"ok", "file", "set", "unset", "generated", "kept", "absent"} (names only) or
-// {"ok": false, "error"}.
-json::Value write_file(const std::string& project, const std::string& rel, unsigned owner, unsigned group, const appenv::Change& change, unsigned account);
+// {"ok": false, "error"}. dry_run: every check made, the same answer with "dry_run": true, nothing written.
+json::Value write_file(const std::string& project, const std::string& rel, unsigned owner, unsigned group, const appenv::Change& change, unsigned account,
+                       bool dry_run = false);
 #endif
 
 }  // namespace agensio::dotenv
