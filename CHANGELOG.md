@@ -18,6 +18,23 @@
   variable appended there was never read. The change is now refused with the line to fix through
   `site_file_edit`, and every change is read back before it is written. `export` is kept on a line
   whose name starts like it (`e`, `ex`).
+- **Fix: an approval's preview carried the sha256 of a credential file** (the alpha.124 report,
+  problem B). The preview of a `.env` edit named the digests of the old and the new file, and so did
+  the dry run, the result `approvals_list` keeps, a refused write's error and the audit log; with the
+  names and lengths of the masked diff, a digest confirms a guessed value (a default, a short or
+  reused password) offline. None of them carries one now; the approval stays bound to the file it
+  showed, inside the server.
+- **Fix: the sites that took the second way out of an address split were told to undo it** (problem
+  A). Once every site cut off lists the address too, none is cut off, but each of them was warned and
+  told to remove the line it had been told to add. They are told nothing now, and the site with the
+  address alone keeps a note on what a site added later would meet, at info: `listen_family_split`
+  is info whenever no site is cut off, and a warning again on both sides once one is, so health is
+  clean on that way. A site alone on the address is no longer given its own command twice in the fix
+  (the small item).
+- **A Laravel task behind a `current` link names the link** (problem C): `served_dir =
+  "current/public"` with `current -> releases/N` was refused as "no Laravel application". The tasks
+  still follow no symbolic link; the refusal, the scheduler's and the task list now say so, and that
+  `served_dir` names the release itself.
 - Two fuzz targets for what a site's account writes and the root helper reads: `fuzz_dotenv` (the
   `.env` reader, every change read back, the masking of its diff, `env_file` paths) and
   `fuzz_cron_lines` (the crontab reader of the scheduler's visibility, now

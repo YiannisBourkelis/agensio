@@ -235,6 +235,15 @@ private:
     // Files found to be private keys by their first line on a read that was not approved (2026-11-04): the
     // content was withheld, and the next read of the path waits for approval like a .env's. "site\npath".
     std::set<std::string> key_files_;
+    // The approval's own dry runs of a file change (design 27.3): their answers keep the file's sha256,
+    // which binds the stored request to the file shown. Every other answer about a credential file goes
+    // without it (the alpha.124 report: the preview carried the plain digests of the old and the new
+    // .env, which confirm a guessed value offline). The weak pointer tells a stream that is gone from
+    // another one at its address.
+    std::map<const Stream*, std::weak_ptr<Stream>> binding_runs_;
+    bool binding_run(const Stream& s) const;
+    // A file operation's answer without the file's sha256 (its own, current's and replaced's).
+    static json::Value without_digest(const json::Value& r);
     void approvals_get(Stream& s, std::string_view id);
     bool approvals_post(Stream& s, WorkerState& ws, std::string_view rest, const json::Value& body, std::function<void()>& done);
     void run_approved(std::shared_ptr<std::vector<std::string>> ids, std::size_t next, WorkerState& ws, std::function<void()> finished);

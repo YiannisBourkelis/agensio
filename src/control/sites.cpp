@@ -1853,7 +1853,9 @@ TaskSetup task_setup(const Config& cfg, const SiteConfig& site, const tasks::Row
             if (text.size() < project.size()) break;
             bool real = true;  // every level from the project down to here a directory, no symlink
             for (fs::path p = at; real && p.lexically_normal().string().size() >= project.size(); p = p.parent_path()) {
-                real = fs::symlink_status(p, ec).type() == fs::file_type::directory;
+                const fs::file_type type = fs::symlink_status(p, ec).type();
+                real = type == fs::file_type::directory;
+                if (type == fs::file_type::symlink && out.link.empty()) out.link = p.lexically_normal().lexically_relative(project).string();
                 if (p.lexically_normal().string() == project) break;
             }
             if (real && fs::symlink_status(at / "artisan", ec).type() == fs::file_type::regular) {
@@ -1881,6 +1883,12 @@ TaskSetup task_setup(const Config& cfg, const SiteConfig& site, const tasks::Row
     }
     out.program = r->cli;
     return out;
+}
+
+std::string linked_release_note(const TaskSetup& ts) {
+    if (ts.link.empty()) return "";
+    return ts.link + " is a symbolic link, which the tasks never follow, so the release behind it is not where they look: name the release itself in served_dir "
+                     "(releases/<id>/public, below the project; docs/examples/php.md, \"Laravel from release directories\")";
 }
 
 std::vector<std::size_t> scheduler_cron_lines(std::string_view text, std::string_view project, bool any_line, std::size_t max) {
@@ -1930,8 +1938,8 @@ json::Value schedule_units(const SiteConfig& site, const Config& cfg) {
     const TaskSetup ts = task_setup(cfg, site, *row);
     std::error_code ec;
     if (std::filesystem::symlink_status(std::filesystem::path(ts.dir) / "artisan", ec).type() != std::filesystem::file_type::regular)
-        return fail.set("error", "no artisan file in " + ts.dir + " (the directory Laravel's tasks run in, from served_dir up): this is no Laravel application, "
-                                 "so no scheduler is rendered");
+        return fail.set("error", "no artisan file in " + ts.dir + " (the directory Laravel's tasks run in, from served_dir up): " +
+                                     (ts.link.empty() ? std::string("this is no Laravel application") : linked_release_note(ts)) + ", so no scheduler is rendered");
     if (!cfg.control.enabled || cfg.control.socket.empty())
         return fail.set("error", "the scheduler asks agensio over its control socket, and this server has none: [control] socket in the main file");
     const std::string service = schedule_unit_name(name, false), timer = schedule_unit_name(name, true);

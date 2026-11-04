@@ -236,8 +236,13 @@ struct TaskSetup {
     std::string program;
     std::string error;
     std::string run_as_root;
+    std::string link;  // the first symbolic link on the way from served_dir up, relative to the project (current)
 };
 TaskSetup task_setup(const Config& cfg, const SiteConfig& site, const tasks::Row& row);
+// Why a Laravel row finds no artisan when the way from served_dir up passed a symbolic link (the
+// release layout with current -> releases/N): the link, which the tasks never follow, and the way;
+// empty when the way passed none.
+std::string linked_release_note(const TaskSetup& ts);
 json::Value service_unit(const SiteConfig& site, const Config& cfg);
 // The lines of a crontab's text that run a Laravel site's scheduler (the helper reads the account's
 // crontab, /etc/crontab and /etc/cron.d as root; the account writes its own): a line, not a comment,

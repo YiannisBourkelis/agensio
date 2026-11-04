@@ -553,7 +553,8 @@ another release or a release's `.env`. The application finds `shared/` by its pl
 Laravel's tasks run as the site's account in the release that holds `artisan`, the nearest
 directory from `served_dir` up (`releases/20261104-1/`), with the command-line binary of the site's
 own PHP version, never the host's default `php`. They run in the live release, so a deploy switches
-first and migrates after.
+first and migrates after. `served_dir` names the release itself, never a `current` link to it: the
+tasks follow no symbolic link, and refuse naming it.
 
 **On a managed site.** A deploy is an upload, then three changes that wait for one approval, then
 the tasks:

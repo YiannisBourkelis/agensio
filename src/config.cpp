@@ -4066,9 +4066,26 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                 const auto own = on_ports(*site);
                 const bool joined = own.count(p) && own.at(p).any6;
                 const std::string partners = names_of(s.sites, site);  // the others holding the address
-                const std::string all_ways = "Hand back every site on " + s.listen + " one after another, in one go (" + ways_of(s.sites) +
-                                             "): a site handed back answers over " + other + " only until the last leaves and that socket closes" +
-                                             (families_routed ? ", when [::]:" + p + " takes " + family + " too" : "; without SO_REUSEPORT [::]:" + p + " then stays IPv6-only until a restart");
+                // No site cut off, and this one lists the address beside [::]:P as the sites cut off were told
+                // to: nothing to tell it while another holder has the address alone, which carries the note on
+                // what a site added later meets (the alpha.124 report: each site that took the way was told to
+                // remove the line it had been told to add).
+                if (!count && joined) {
+                    bool unjoined = false;
+                    for (const SiteConfig* h : s.sites) {
+                        const auto hp = on_ports(*h);
+                        unjoined = unjoined || !hp.count(p) || !hp.at(p).any6;
+                    }
+                    if (unjoined) continue;
+                }
+                // One site on the address: its own way, said once (the same report's small item).
+                const bool alone = s.sites.size() == 1;
+                const std::string closes = families_routed ? " and [::]:" + p + " takes " + family + " too" : "; without SO_REUSEPORT [::]:" + p + " then stays IPv6-only until a restart";
+                const std::string once_left = ": once it leaves, the socket of " + s.listen + " closes" + closes;
+                const std::string all_ways = alone ? hand_back(*site) + once_left
+                                                   : "Hand back every site on " + s.listen + " one after another, in one go (" + ways_of(s.sites) +
+                                                         "): a site handed back answers over " + other + " only until the last leaves and that socket closes" +
+                                                         (families_routed ? ", when [::]:" + p + " takes " + family + " too" : "; without SO_REUSEPORT [::]:" + p + " then stays IPv6-only until a restart");
                 const std::string listed = "listen = [\"[::]:" + p + "\", \"" + s.listen + "\"]";
                 const std::string cut = count ? victims + (count == 1 ? " is" : " are") + (all_other ? " reachable over " + std::string(other) + " only" : " cut off from " + std::string(family) + " clients")
                                               : "no site is cut off now, but the server's [::]:" + p + ", which a site without a listen of its own takes, would answer such a site over " + other + " only";
@@ -4081,7 +4098,9 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                                    s.joinable ? "the sites still without " + s.listen + " list it too: " + victims + ", each " + listed + ". Or: " + all_ways : all_ways});
                     continue;
                 }
-                out.push_back({"listen_family_split", "warning", name,
+                // With no site cut off it is a note on what a site added later would meet, info (the owner,
+                // 2026-11-04, the alpha.124 report): the site cut off then gets its warning, and this one too.
+                out.push_back({"listen_family_split", count ? "warning" : "info", name,
                                name + " listens on " + s.listen + " of its own, " +
                                    (whole        ? "which takes every IPv4 connection of port " + p
                                     : s.v6       ? one_address6 + ", which takes every IPv6 connection of port " + p + " from outside"
@@ -4089,7 +4108,7 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                                                  : "beside which [::]:" + p + " is opened IPv6-only (no SO_REUSEPORT)") +
                                    ": " + cut + ". Give it the server's addresses (" + hand_back(*site) + "), " + (whole ? "a specific address of this host, " : "") +
                                    (s.specific && s.joinable && count ? "have the sites cut off list " + s.listen + " too, " : "") + "or keep a family out with an access rule",
-                               hand_back(*site) + (site->managed ? " (MCP site_update with listen_tls: \"\" and listen_plain: \"\")" : "") + ". " + all_ways +
+                               hand_back(*site) + (site->managed ? " (MCP site_update with listen_tls: \"\" and listen_plain: \"\")" : "") + (alone ? once_left : ". " + all_ways) +
                                    (s.specific && s.joinable && count ? ". Or the sites cut off list it too: " + victims + ", each " + listed : std::string())});
             }
     if (!cfg.ipv6_note.empty()) out.push_back({"ipv6_unavailable", "info", "", cfg.ipv6_note});

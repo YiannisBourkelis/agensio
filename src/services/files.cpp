@@ -455,8 +455,12 @@ json::Value do_write(const Op& op, bool edit) {
         return v;
     };
     if (!op.if_sha256.empty()) {
+        // A credential file's digest is never answered (the alpha.124 report, problem B).
+        const bool secret_now = secret_path(op.path, op.secrets) || (cur.content_known && private_key_head(cur.content));
         if (op.if_sha256 == "absent" ? cur.exists : (!cur.exists || cur.sha256 != op.if_sha256))
-            return done(fail(abs + (op.if_sha256 == "absent" ? " exists now" : cur.exists ? " changed since it was read (its sha256 is " + cur.sha256 + ")" : " no longer exists") +
+            return done(fail(abs + (op.if_sha256 == "absent" ? " exists now"
+                                    : cur.exists              ? " changed since it was read" + (secret_now ? std::string() : " (its sha256 is " + cur.sha256 + ")")
+                                                              : " no longer exists") +
                              "; read it again and send the change again"));
     }
     std::string content = op.content;

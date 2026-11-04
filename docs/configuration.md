@@ -283,7 +283,12 @@ split by a specific address: every site on it hands back, or every site cut off 
 specific socket and would change nothing). The second is offered only while every site cut off is
 hand-written: a managed site takes one address of its own per kind and cannot list both, so with one
 among them the hand-back is the way, and a site that already lists the address is told so rather
-than told to remove its line (the alpha.123 report). A listen address is an IP address, one per
+than told to remove its line (the alpha.123 report). Once every site cut off lists it, none is: the
+sites that joined it are told nothing more, and the site with the address alone keeps a note, at
+info, on what a site added later on the server's addresses would meet, which becomes a warning on
+both once such a site is cut off (until 0.1.0-alpha.125 each site that had joined was warned and told
+to remove the line it was told to add, the alpha.124 report). Whenever no site is cut off, the
+cause's finding is info. A listen address is an IP address, one per
 entry: a host name, or a list written as one value, is refused at load and by `site_create` and
 `site_update` (before 0.1.0-alpha.124 `-t` passed it and the start refused it). To
 keep one family out of a site, use an access rule (section 19), which answers 403 on purpose. An
@@ -424,7 +429,10 @@ application on `app = "php"`, has artisan's own commands as site tasks (section 
 argv, never a command a release declares. They run as the site's account in the directory that holds
 `artisan`: the project for `app = "laravel"`; for `app = "php"` the nearest directory from
 `served_dir` up to the project (`releases/<id>/` for `served_dir = "releases/<id>/public"`), never
-reached through a symlink, and a site with no `artisan` there is refused before anything runs. The
+reached through a symlink, and a site with no `artisan` there is refused before anything runs. So
+`served_dir` names the release itself: a `current` link to it (Deployer's and Envoyer's layout) is
+not followed, and the refusal, the scheduler's and the task list name the link (before
+0.1.0-alpha.125 they said "no Laravel application"). The
 interpreter is the command-line binary of the site's own PHP version (`/usr/bin/php8.5`, from the
 runtimes agensio found, or `cli` in root's `[php.runtimes]`), never the host's default `php`; a
 version without one answers with root's package line (`php8.5-cli`). They run in the live release,

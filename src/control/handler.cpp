@@ -399,12 +399,16 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         cc.runtime_dir = [&cfg](std::string_view runtime) { return runtime_dir(cfg.control, runtime); };
         cc.sites_root = cfg.control.sites_root.empty() ? std::string("/var/www") : cfg.control.sites_root;
         std::string directory = site->project_root.empty() ? site->root : site->project_root;
+        std::string link_note;  // Laravel's rows find no artisan because the way passed a symbolic link
         if (const tasks::Row* php_row = tasks::find(app, "optimize")) {  // the site's PHP binary and artisan's directory, for Laravel's rows
             const control::TaskSetup ts = control::task_setup(cfg, *site, *php_row);
             cc.php_program = ts.program;
             cc.php_problem = ts.error;
             cc.php_run_as_root = ts.run_as_root;
             directory = ts.dir;
+            std::error_code ec;
+            if (!ts.link.empty() && std::filesystem::symlink_status(std::filesystem::path(ts.dir) / "artisan", ec).type() != std::filesystem::file_type::regular)
+                link_note = "no artisan file in " + ts.dir + ": " + control::linked_release_note(ts);
         }
         json::Value list = tasks::catalog(app, &cc);
         // Every package a task's interpreter is missing, once: root installs them before the
@@ -424,6 +428,7 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
                 .set("downloads", cfg.control.task_network).set("timeout_cap", static_cast<double>(cfg.control.task_timeout))
                 .set("runs_as", site->user.empty() ? json::Value("the owner of the site's directory") : json::Value(site->user))
                 .set("directory", directory);
+            if (!link_note.empty()) body.set("note", link_note);
             if (node_app(app)) body.set("entry", site->entry.empty() ? json::Value(nullptr) : json::Value(site->entry));
             if (python_app(app))
                 body.set("project", site->project)
@@ -2231,6 +2236,27 @@ bool ControlHandler::secret_file(std::string_view name, std::string_view rel) {
     return files::secret_path(clean, secrets) || key_files_.count(site->server_names.front() + "\n" + clean) > 0;
 }
 
+bool ControlHandler::binding_run(const Stream& s) const {
+    const auto it = binding_runs_.find(&s);
+    return it != binding_runs_.end() && it->second.lock().get() == &s;
+}
+
+json::Value ControlHandler::without_digest(const json::Value& r) {
+    json::Value out = json::Value::object();
+    for (const auto& [k, v] : r.members()) {
+        if (k == "sha256") continue;
+        if ((k == "current" || k == "replaced") && v.is_object()) {
+            json::Value c = json::Value::object();
+            for (const auto& [ck, cv] : v.members())
+                if (ck != "sha256") c.set(ck, cv);
+            out.set(k, std::move(c));
+            continue;
+        }
+        out.set(k, v);
+    }
+    return out;
+}
+
 std::string ControlHandler::file_preview(const SiteConfig& site, const std::string& site_root, const json::Value& body, const json::Value& checked,
                                          std::vector<std::string>& reasons) {
     const Config& cfg = backend_->running();
@@ -2246,10 +2272,15 @@ std::string ControlHandler::file_preview(const SiteConfig& site, const std::stri
     };
     if (op == "write" || op == "edit") {
         const json::Value& cur = checked["current"];
-        t += (op == "edit" ? "edit " : "write ") + abs + (cur["exists"].boolean() ? "  (replaces " + std::to_string(static_cast<long>(cur["bytes"].num())) + " bytes, sha256 " + std::string(cur.get("sha256")) + ")" : "  (a new file)") + "\n";
+        // A credential file's digests are not shown: with the names and lengths of the diff, they confirm a
+        // guessed value offline (the alpha.124 report, problem B).
+        const bool secured = checked["secured"].boolean();
+        t += (op == "edit" ? "edit " : "write ") + abs +
+             (cur["exists"].boolean() ? "  (replaces " + std::to_string(static_cast<long>(cur["bytes"].num())) + " bytes" + (secured ? std::string() : ", sha256 " + std::string(cur.get("sha256"))) + ")"
+                                      : "  (a new file)") + "\n";
         t += "what the site does with it: " + verdict(rel) + "\n";
-        t += "as " + std::string(checked.get("as")) + ", mode " + std::string(checked.get("mode")) + (checked["secured"].boolean() ? " (a credential file)" : "") +
-             ", " + std::to_string(static_cast<long>(checked["bytes"].num())) + " bytes, sha256 " + std::string(checked.get("sha256")) + "\n";
+        t += "as " + std::string(checked.get("as")) + ", mode " + std::string(checked.get("mode")) + (secured ? " (a credential file)" : "") +
+             ", " + std::to_string(static_cast<long>(checked["bytes"].num())) + " bytes" + (secured ? std::string() : ", sha256 " + std::string(checked.get("sha256"))) + "\n";
         t += std::string(checked.get("diff"));  // made by the dry run (the file callback): the diff, a binary note, or a new file's text
         if (cur["exists"].boolean()) t += "the file there now is kept in the history\n";
     } else if (op == "mkdir") {
@@ -2392,6 +2423,9 @@ void ControlHandler::site_files(Stream& s, std::string_view name, const json::Va
             // is kept as the approval's result, which approvals_list hands out (the same report).
             r = without_texts(r);
         }
+        // A credential file's answers carry no digest of it, but for the approval's own dry run, whose digest
+        // binds the stored change to the file it showed (the alpha.124 report, problem B).
+        if (ok && (op == "write" || op == "edit" || op == "delete") && (r["secured"].boolean() || secret_file(domain, rel)) && !binding_run(s)) r = without_digest(r);
         const SiteConfig* now_site = control::find_site(backend_->running(), domain);
         if (ok && now_site && (op == "write" || op == "edit" || op == "restore")) r.set("site_does", path_verdict(backend_->running(), *now_site, site_root, rel));
         if (ok && now_site && op == "move") r.set("site_does", path_verdict(backend_->running(), *now_site, site_root, to));
@@ -2481,6 +2515,14 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
         json::Value f = json::Value::object().set("error", setup.error).set("task", task);
         if (!setup.run_as_root.empty()) f.set("run_as_root", json::Value::array().push(setup.run_as_root));
         return answer(409, f);
+    }
+    // A release behind a symbolic link (current -> releases/N, Deployer's layout): the row's need would
+    // refuse it as no Laravel application; said as what it is (the alpha.124 report, problem C).
+    if (!setup.link.empty() && std::any_of(row->needs.begin(), row->needs.end(), [](const tasks::Need& n) { return std::string_view(n.path) == "artisan"; })) {
+        std::error_code ec;
+        if (std::filesystem::symlink_status(std::filesystem::path(setup.dir) / "artisan", ec).type() != std::filesystem::file_type::regular)
+            return answer(409, json::Value::object().set("ok", false).set("task", task)
+                                   .set("error", "task " + task + " needs " + setup.dir + "/artisan, which does not exist: " + control::linked_release_note(setup)));
     }
     const bool dry_run = body["dry_run"].boolean();
     const std::string key = site->server_names.front();
@@ -3318,6 +3360,7 @@ bool ControlHandler::queue_for_approval(Stream& s, WorkerState& ws, std::string_
         return false;
     }
     auto rs = std::make_shared<Stream>();
+    if (action == "file") binding_runs_[rs.get()] = rs;
     rs->request.method = Method::post;
     rs->conn.peer_uid = s.conn.peer_uid;
     rs->conn.peer_gid = s.conn.peer_gid;
@@ -3330,6 +3373,7 @@ bool ControlHandler::queue_for_approval(Stream& s, WorkerState& ws, std::string_
     std::function<void()> after = [this, &s, rs, store, finish, once]() {
         if (*once) return;
         *once = true;
+        binding_runs_.erase(rs.get());
         std::string text = rs->response.buffer;
         if (!text.empty() && text.back() == '\n') text.pop_back();
         json::Value v;
@@ -3339,7 +3383,7 @@ bool ControlHandler::queue_for_approval(Stream& s, WorkerState& ws, std::string_
         // site's prerequisites missing, with root's commands to run first).
         if (rs->response.status != 200) reply(s, rs->response.status, v);
         else if (v.is_object() && v["ok"].type() == json::Value::Type::boolean && !v["ok"].boolean()) reply(s, 409, v);
-        else if (v.is_object() && v["unchanged"].boolean()) reply(s, 200, v);  // the file holds that text already: nothing to do, nothing to approve
+        else if (v.is_object() && v["unchanged"].boolean()) reply(s, 200, v["secured"].boolean() ? without_digest(v) : v);  // the file holds that text already: nothing to do, nothing to approve
         else store(v);
         finish();
     };

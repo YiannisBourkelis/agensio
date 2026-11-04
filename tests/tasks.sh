@@ -448,6 +448,16 @@ ctl site-update lv.test --served-dir releases/r2/public --yes --reason switch > 
 ctl site-task lv.test optimize --yes --reason deploy > $T/out
 check "after a switch to a release without artisan, the task is refused before it runs, naming artisan" "False yes" "$(j 'd["ok"]') $(grep -q 'no artisan file' $T/out && echo yes)"
 echo '<?php' > $LV/releases/r2/artisan; chown r9:r9 $LV/releases/r2/artisan
+# Behind a symbolic link (the alpha.124 report, problem C: current -> releases/N, Deployer's layout): the
+# tasks never follow it, and the refusal and the task list say so rather than "no Laravel application".
+ln -s releases/r2 $LV/current; chown -h r9:r9 $LV/current
+ctl site-update lv.test --served-dir current/public --yes --reason link > /dev/null; approve > /dev/null
+ctl site-task lv.test optimize --yes --reason deploy > $T/out
+check "a release behind a symbolic link: the task is refused before it runs, naming the link and the way" "False yes no" \
+  "$(j 'd["ok"]') $(grep -q 'current is a symbolic link, which the tasks never follow' $T/out && echo yes) $(grep -q 'no Laravel application' $T/out && echo yes || echo no)"
+check "the task list names the link too" "yes" "$(ctl site-tasks lv.test > $T/out; j '"yes" if "current is a symbolic link" in d.get("note", "") else d.get("note")')"
+ctl site-update lv.test --served-dir releases/r2/public --yes --reason back > /dev/null; approve > /dev/null
+rm $LV/current
 
 # A Laravel site's own .env (2026-11-04, the grabloop.app answer): env_file names it; site_env_set writes it
 # root's with the site's group, 0640, every other line kept; site_env shows names and lengths, no value.

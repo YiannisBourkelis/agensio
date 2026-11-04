@@ -1525,14 +1525,15 @@ static void test_listen_defaults() {
         CHECK(!c.sites[1].listen_default && c.sites[1].listen == L{"0.0.0.0:8080"});
         CHECK(codes_of(c).find("listen_family_split:own.test") != std::string::npos && codes_of(c).find("listen_ipv6_only:t.test") != std::string::npos);
         // Each carries its fix (the alpha.120 report, problem C): the site to hand back, named on the one it
-        // cut off too, and the order (one after another, the moved ones IPv6-only until the last leaves).
+        // cut off too, and the order where several hold the address (one after another, the moved ones
+        // IPv6-only until the last leaves); own.test, alone on it, is told what its leaving does.
         // own.test is hand-written (the main file): its way is its file's line, never a ctl command,
         // which answers "not managed" (the alpha.121 report, problem B).
         const std::string e_file = (dir / "e.toml").string();
         for (const auto& n : access_notices(c)) {
             if (n.code == "listen_family_split")
-                CHECK(n.site == "own.test" && n.fix.find("remove the listen line of own.test in " + e_file + " and reload") == 0 && n.fix.find("site-update") == std::string::npos &&
-                      n.fix.find("one after another") != std::string::npos && n.text.find("remove the listen line of own.test in " + e_file) != std::string::npos);
+                CHECK(n.site == "own.test" && n.fix.find("remove the listen line of own.test in " + e_file + " and reload: once it leaves, the socket of 0.0.0.0:8080 closes") == 0 &&
+                      n.fix.find("site-update") == std::string::npos && n.text.find("remove the listen line of own.test in " + e_file) != std::string::npos);
             if (n.code == "listen_ipv6_only")
                 CHECK(n.site == "t.test" && n.fix.find("remove the listen line of own.test in " + e_file) != std::string::npos && n.fix.find("site-update") == std::string::npos &&
                       n.text.find("(own.test)") != std::string::npos);
@@ -1562,10 +1563,17 @@ static void test_listen_defaults() {
                                         "[[site]]\nserver_name = [\"both.test\"]\nlisten = [\"0.0.0.0:8080\"]\n" + root);
         CHECK(codes_of(one).find("listen_family_split:own.test") != std::string::npos && codes_of(one).find("listen_ipv6_only:t.test") != std::string::npos &&
               codes_of(one).find("listen_ipv6_only:both.test") != std::string::npos);
+        auto times = [](const std::string& text, const std::string& what) {
+            std::size_t n = 0;
+            for (std::size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) ++n;
+            return n;
+        };
         for (const auto& n : access_notices(one)) {
+            // The site alone on the address: its fix names its own way once (the alpha.124 report's small
+            // item: "remove the listen line of a.test ... Hand back every site ... (remove the listen line of a.test ...)").
             if (n.code == "listen_family_split" && n.site == "own.test")
                 CHECK(n.text.find("192.0.2.10:8080 of its own, the host's one IPv4 address apart from loopback") != std::string::npos && n.text.find("both.test") != std::string::npos &&
-                      n.text.find("cut off from IPv4 clients") != std::string::npos);
+                      n.text.find("cut off from IPv4 clients") != std::string::npos && times(n.fix, "remove the listen line of own.test") == 1);
             if (n.code == "listen_ipv6_only" && n.site == "t.test")
                 CHECK(n.text.find("add 192.0.2.10:8080 to this site's listen") != std::string::npos && n.text.find("reachable over IPv6 only") != std::string::npos &&
                       n.fix.find("listen = [\"[::]:8080\", \"192.0.2.10:8080\"]") != std::string::npos);
@@ -1608,12 +1616,31 @@ static void test_listen_defaults() {
         CHECK(hand_joined.find("the sites still without 192.0.2.10:8080 list it too: d.test, e.test, each listen = [\"[::]:8080\", \"192.0.2.10:8080\"]") == 0);
         CHECK(hand_d.find("or add 192.0.2.10:8080 to this site's listen to serve IPv4 clients too (as every other site cut off there must: e.test)") != std::string::npos &&
               hand_d.find("Or every site cut off there lists that address too, which shares its socket: d.test, e.test, each") != std::string::npos);
+        // That way taken (the alpha.124 report, problem A): no site is cut off now. A site that joined the
+        // address is told nothing (it was told to remove the line it had been told to add); the site with the
+        // address alone keeps the note on what a site added later on the server's addresses would meet.
+        // Nothing is cut off now, so it is info (the owner's decision), and a site added later on the
+        // server's addresses gets the warning, with a.test, when it is.
+        Config took = load("x.toml", head);
+        std::string took_codes, took_a;
+        for (const auto& n : access_notices(took)) {
+            if (n.code.starts_with("listen_")) took_codes += n.code + ":" + n.site + ":" + n.severity + " ";
+            if (n.code == "listen_family_split" && n.site == "a.test") took_a = n.text;
+        }
+        CHECK(took_codes == "listen_family_split:a.test:info " && took_a.find("no site is cut off now") != std::string::npos);
+        Config added = load("x.toml", head + "[[site]]\nserver_name = [\"d.test\"]\n" + root);
+        std::string added_codes;
+        for (const auto& n : access_notices(added))
+            if (n.code.starts_with("listen_")) added_codes += n.code + ":" + n.site + ":" + n.severity + " ";
+        CHECK(added_codes.find("listen_ipv6_only:d.test:warning") != std::string::npos && added_codes.find("listen_family_split:a.test:warning") != std::string::npos &&
+              added_codes.find(":info") == std::string::npos);
         set_host_addresses(std::nullopt);
         // No site cut off, the server's [::]:P open: said as what a site added later would meet (the small item).
         Config later = load("y.toml", "[server]\nlisten_tls = [\"[::]:8443\"]\nlisten_plain = [\"[::]:8080\"]\n"
                                           "[[site]]\nserver_name = [\"both.test\"]\nlisten = [\"[::]:8080\", \"0.0.0.0:8080\"]\n" + root);
         for (const auto& n : access_notices(later))
-            if (n.code == "listen_family_split") CHECK(n.text.find("no site is cut off now, but the server's [::]:8080, which a site without a listen of its own takes, would answer such a site over IPv6 only") != std::string::npos);
+            if (n.code == "listen_family_split")
+                CHECK(n.severity == "info" && n.text.find("no site is cut off now, but the server's [::]:8080, which a site without a listen of its own takes, would answer such a site over IPv6 only") != std::string::npos);
         // The IPv6 side (the alpha.123 report, problem A): a site on the host's one global IPv6 address
         // takes every outside IPv6 connection of its port, and the sites on the server's [::]:P answer
         // over IPv4 only; named on both sides, the advice naming the address. Silent for one of several, and
@@ -3405,6 +3432,14 @@ static void test_served_dir() {
         SiteConfig linked = tcfg.sites[0];
         linked.served_dir = "releases/live/public";
         CHECK(control::task_setup(tcfg, linked, *tasks::find("php", "optimize")).dir == lara);
+        // The refusal names the link (the alpha.124 report, problem C: current -> releases/N, Deployer's and
+        // Envoyer's layout, was answered "no Laravel application").
+        fs::remove(dir / "lara" / "artisan");
+        const control::TaskSetup via_link = control::task_setup(tcfg, linked, *tasks::find("php", "optimize"));
+        CHECK(via_link.dir == lara && via_link.link == "releases/live" &&
+              control::linked_release_note(via_link).find("releases/live is a symbolic link, which the tasks never follow") != npos &&
+              control::linked_release_note(in_release).empty());
+        std::ofstream(dir / "lara" / "artisan") << "<?php\n";
         // The site's version without a command-line binary: refused with what root installs.
         Config nocli = tcfg;
         nocli.php_runtimes.front().cli.clear();

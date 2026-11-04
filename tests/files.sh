@@ -137,6 +137,24 @@ check "an edit's dry run of a credential file: the changed line by name and leng
 ctl site-file-edit a.test .env.app --old 'APP_DEBUG=false' --new 'APP_DEBUG=true' --yes --reason "debug" > /dev/null; approve > $T/ap
 check "the edit approved: made, and its result carries neither the old file nor a value" "true no no" \
   "$(grep -o 'APP_DEBUG=true' $A/.env.app | cut -d= -f2) $(grep -q 'dbs3cr3t\|APP_DEBUG=false' $T/ap && echo yes || echo no) $(curl -sS --unix-socket $CS http://control/v1/approvals | grep -q 'dbs3cr3t' && echo yes || echo no)"
+# Nor its sha256 (the alpha.124 report, problem B: the preview carried the plain digests of the old and
+# the new file, which confirm a guessed value offline): not in the dry run, the queued answer, the list,
+# the result or the audit log. The approval stays bound to the file it showed: changed meanwhile, the
+# approved edit is refused.
+OLD=$(sha256sum < $A/.env.app | cut -d' ' -f1)
+NEW=$(sed 's/^APP_DEBUG=true$/APP_DEBUG=false/' $A/.env.app | sha256sum | cut -d' ' -f1)
+ctl site-file-edit a.test .env.app --old 'APP_DEBUG=true' --new 'APP_DEBUG=false' --dry-run > $T/d1
+ctl site-file-edit a.test .env.app --old 'APP_DEBUG=true' --new 'APP_DEBUG=false' --yes --reason "debug off" > $T/d2
+curl -sS --unix-socket $CS http://control/v1/approvals > $T/d3
+approve > $T/d4
+curl -sS --unix-socket $CS http://control/v1/approvals > $T/d5
+check "no sha256 of a credential file leaves: dry run, queued answer, list, result, audit log" "false no no" \
+  "$(grep -o '^APP_DEBUG=false' $A/.env.app | cut -d= -f2) $(cat $T/d1 $T/d2 $T/d3 $T/d4 $T/d5 | grep -q "$OLD\|$NEW" && echo yes || echo no) $(grep -q "$OLD\|$NEW" $T/logs/audit.log && echo yes || echo no)"
+ctl site-file-edit a.test .env.app --old 'APP_DEBUG=false' --new 'APP_DEBUG=true' --yes --reason "debug on" > /dev/null
+printf 'MAIL_HOST=x\n' >> $A/.env.app
+approve > $T/out
+check "a credential file changed after the edit was queued: the approved edit is refused, naming no digest, the file as changed" "yes no false yes" \
+  "$(grep -q 'changed since it was read' $T/out && echo yes) $(grep -q "$(sha256sum < $A/.env.app | cut -d' ' -f1)" $T/out && echo yes || echo no) $(grep -o '^APP_DEBUG=false' $A/.env.app | cut -d= -f2) $(grep -q '^MAIL_HOST=x' $A/.env.app && echo yes)"
 ctl site-file-read a.test .env > $T/out
 SID=$(j 'd["id"]')
 check "its read waits, naming it; approved, the list never carries the content and GET by id hands it out once" "True yes no yes no" \
