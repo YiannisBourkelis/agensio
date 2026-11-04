@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.126
+## 0.1.0-alpha.126 (2026-11-04)
 
 - **Security fix: a dry run of a command that has none ran it, the gated ones without approval.** The
   gate lets `dry_run: true` through unapproved for the command to answer without changing anything,
