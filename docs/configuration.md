@@ -1759,7 +1759,10 @@ write must not be able to make root open, create or hand over a file anywhere.
   or the server's account; the only directory agensio makes there is `sites/`. A link planted as
   `sites/` or as a site's log, a hard link, a FIFO, a file of another account: refused by name, the
   site set aside, the rest served. A link at or above the log directory itself (the directory on
-  another disk) is the system's layout and is followed.
+  another disk) is the system's layout and is followed. `agensio -t`, the reload's error-log lines and
+  health say it first (`log_path_link`, a warning naming the link and the sites or server files behind
+  it; `-t --strict` fails on it), since the packaged unit runs `-t` before the start, which would
+  otherwise be the first to refuse the link.
 - **Hand-over on the descriptor.** A log opened as root is given to the server's account on the open
   descriptor (`fchown`), never by path: the server's own files `agensio:agensio 0640`, a site's
   `agensio:<site group>` when every site writing it is that account's, `agensio:agensio` for a site

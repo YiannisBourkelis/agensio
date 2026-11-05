@@ -1755,8 +1755,15 @@ int main(int argc, char** argv) {
         for (const auto& o : cfg.orphan_additions)
             std::cerr << "warning: " << o.file << " holds root additions for site " << o.site
                       << ", which is not in the configuration (disabled or deleted): ignored\n";
-        for (const auto& n : agensio::access_notices(cfg))
-            std::cerr << (n.severity == "warning" ? "warning: " : "note: ") << n.text << "\n";
+        bool link_on_the_way = false;  // log_path_link: the start or reload refuses it by name, so --strict fails here first
+        for (const auto& n : agensio::access_notices(cfg)) {
+            std::cerr << (n.severity == "warning" ? "warning: " : "note: ") << n.text << (n.fix.empty() ? "" : "; fix: " + n.fix) << "\n";
+            link_on_the_way = link_on_the_way || n.code == "log_path_link";
+        }
+        if (strict && link_on_the_way) {
+            std::cerr << "configuration error: a symbolic link below the log directory on the way to a log (--strict)\n";
+            return 1;
+        }
         std::cout << "configuration " << cfg.config_path.string() << " is OK (" << cfg.sites.size() << " site(s)"
                   << (cfg.held_back.empty() ? std::string() : ", " + std::to_string(cfg.held_back.size()) + " site file(s) set aside") << ")\n";
         return 0;

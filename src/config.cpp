@@ -4186,6 +4186,64 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
     // X-XSS-Protection turned on.
     for (const auto& site : cfg.sites)
         for (const auto& [code, text] : site.header_notes) out.push_back({code, "warning", site.server_names.front(), text});
+    // A symbolic link below the log directory on the way to a log (docs/configuration.md 8c; the alpha.128
+    // report's addendum, S3): the start and every reload refuse it by name and set the sites behind it
+    // aside, and the packaged unit runs -t before the start, so it is said here first. The log directory
+    // itself a link is the system's layout, followed. One notice per link, naming who logs behind it.
+#ifndef _WIN32
+    {
+        const std::string dir = log_directory(cfg);
+        std::vector<std::pair<std::string, std::vector<std::string>>> links;  // the link -> who logs behind it, in load order
+        std::map<std::string, std::string> targets;
+        bool own_file = false;  // one of the server's own files behind a link: the start or reload is refused
+        auto walk = [&](const std::string& log, const std::string& who, bool own) {
+            if (log.empty() || log == "stderr" || log == "off" || !below_log_dir(dir, log)) return;
+            std::string path = dir;
+            std::string_view rest = std::string_view(log).substr(dir.size() + 1);
+            while (!rest.empty()) {
+                const std::size_t slash = rest.find('/');
+                path += "/" + std::string(rest.substr(0, slash));
+                rest = slash == std::string_view::npos ? std::string_view() : rest.substr(slash + 1);
+                struct stat st {};
+                if (::lstat(path.c_str(), &st) != 0) return;  // not there: made by the start (sites/) or refused at the open
+                if (!S_ISLNK(st.st_mode)) continue;
+                auto it = std::find_if(links.begin(), links.end(), [&](const auto& l) { return l.first == path; });
+                if (it == links.end()) {
+                    char buf[4096];
+                    const ssize_t n = ::readlink(path.c_str(), buf, sizeof buf - 1);
+                    targets[path] = n > 0 ? std::string(buf, static_cast<std::size_t>(n)) : std::string();
+                    links.push_back({path, {}});
+                    it = links.end() - 1;
+                }
+                if (std::find(it->second.begin(), it->second.end(), who) == it->second.end()) it->second.push_back(who);
+                own_file = own_file || own;
+                return;
+            }
+        };
+        walk(cfg.log.access, "[log] access", true);
+        walk(cfg.log.error, "[log] error", true);
+        walk(cfg.control.audit, "[control] audit", true);
+        for (const auto& site : cfg.sites)
+            if (!site.server_names.empty() && site.access_log != cfg.log.access) walk(site.access_log, site.server_names.front(), false);
+        for (const auto& [link, who] : links) {
+            std::string names;
+            std::size_t sites = 0;
+            for (const auto& w : who) {
+                names += (names.empty() ? "" : ", ") + w;
+                if (w.front() != '[') ++sites;
+            }
+            const std::string& target = targets[link];
+            const std::string what = sites && sites == who.size() ? (sites == 1 ? "the site logging there (" + names + ") is set aside at the next start or reload"
+                                                                              : "the " + std::to_string(sites) + " sites logging there (" + names + ") are set aside at the next start or reload")
+                                                                 : "the start or reload is refused for " + names + (sites ? ", the sites among them set aside" : "");
+            out.push_back({"log_path_link", "warning", "",
+                           link + " is a symbolic link" + (target.empty() ? "" : " (to " + target + ")") + ": below the log directory " + dir +
+                               " agensio never follows one, so " + what,
+                           "make it a directory again (move the link aside, mkdir it, move the files back), or set [log] access to a file in the directory it points to, "
+                           "which makes that the log directory; a link at or above the log directory itself is followed"});
+        }
+    }
+#endif
     return out;
 }
 

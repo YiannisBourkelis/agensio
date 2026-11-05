@@ -128,6 +128,15 @@ chmod 644 "$R/sites.d/r.toml"
 "$BIN" -t -c "$R/agensio.toml" > "$R/t2.out" 2>&1; R2=$?
 check "a group-writable site file naming a log outside sites/ is set aside with the rule; the same file 0644 is the owner's word and loads" "0 yes 0 no" \
   "$R1 $(grep -q 'r.toml' "$R/t1.out" && grep -q 'names its access log in' "$R/t1.out" && echo yes) $R2 $(grep -q 'set aside' "$R/t2.out" && echo yes || echo no)"
+# A sites/ that is a link (the alpha.128 addendum, S3): -t says it first, naming the link and the sites
+# behind it, with the ways out; --strict fails on it, since the start or reload refuses the link by name.
+mkdir -p "$T/elsewhere"; ln -s "$T/elsewhere" "$R/logs/sites"
+site k.test 18310 "$T/www/c" "access_log = \"$R/logs/sites/k.test.log\"" > "$R/sites.d/k.toml"
+"$BIN" -t -c "$R/agensio.toml" > "$R/t3.out" 2>&1; R3=$?
+"$BIN" -t --strict -c "$R/agensio.toml" > "$R/t4.out" 2>&1; R4=$?
+check "-t warns log_path_link for a sites/ that is a link, naming it, its target, the site behind it and the fix; --strict fails on it" "0 yes yes 1" \
+  "$R3 $(grep -q "warning: $R/logs/sites is a symbolic link (to $T/elsewhere): .*k.test.*set aside at the next start or reload" "$R/t3.out" && echo yes) $(grep -q 'fix: make it a directory' "$R/t3.out" && echo yes) $R4"
+rm -f "$R/logs/sites" "$R/sites.d/k.toml"
 
 # The control plane: a site-create whose file would be set aside (its alias claims a running
 # site's name on the same address) is refused and its file removed, never reported as done.

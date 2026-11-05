@@ -793,7 +793,7 @@ struct AccessNotice {
     std::string code;      // access_allows_proxy, access_loopback, access_ipv4_only, access_single_ipv6, access_site_restricted,
                            // exact_rule_proxied_script, auth_plain_http, auth_users_mixed_methods, php_keep_conn_ondemand,
                            // php_keep_conn_exceeds_children, listen_ipv6_only, listen_ipv4_only, listen_family_split, redirect_chain, redirect_soft_404,
-                           // redirect_under_protection, redirect_skips_validation, public_archive_refused
+                           // redirect_under_protection, redirect_skips_validation, public_archive_refused, log_path_link
     std::string severity;  // "warning" or "info"
     std::string site, text;
     std::string fix;       // for health, where the notice knows it (the listen notices name the sites to hand back); else health's own

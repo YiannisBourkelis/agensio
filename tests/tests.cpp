@@ -14714,6 +14714,43 @@ static void test_log_placement() {
         why = e.what();
     }
     CHECK(why.find("letters, digits") != npos);
+    // A link below the log directory on the way to a log is said at load (log_path_link: -t, the reload's
+    // lines, health), naming the link, its target and who logs behind it; the log directory itself a
+    // link is the system's layout, followed, nothing to say.
+    {
+        const fs::path n = dir / "n";
+        fs::create_directories(n / "sites.d");
+        fs::create_directories(n / "logs");
+        fs::create_symlink(dir / "elsewhere", n / "logs" / "sites");
+        write(n / "agensio.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\n[log]\naccess = \"" + (n / "logs" / "access.log").string() + "\"\n", rw_r);
+        write(n / "sites.d" / "k.toml", site("k.test", (n / "logs" / "sites" / "k.test.log").string()), rw_r);
+        write(n / "sites.d" / "l.toml", site("l.test", (n / "logs" / "sites" / "l.test.log").string()), rw_r);
+        write(n / "sites.d" / "m.toml", site("m.test", (n / "logs" / "m.log").string()), rw_r);  // not behind it
+        const Config c = load_config(n / "agensio.toml");
+        std::vector<AccessNotice> links;
+        for (const auto& x : access_notices(c))
+            if (x.code == "log_path_link") links.push_back(x);
+        CHECK(links.size() == 1 && links[0].severity == "warning" && links[0].text.find((n / "logs" / "sites").string() + " is a symbolic link (to " + (dir / "elsewhere").string() + ")") != npos &&
+              links[0].text.find("k.test, l.test") != npos && links[0].text.find("m.test") == npos && links[0].text.find("set aside at the next start or reload") != npos &&
+              links[0].fix.find("make it a directory") != npos && links[0].fix.find("[log] access") != npos);
+        // The server's own file behind one: the start or reload refused, said so.
+        write(n / "agensio.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\n[log]\naccess = \"" + (n / "logs" / "access.log").string() + "\"\nerror = \"" + (n / "logs" / "sites" / "error.log").string() + "\"\n", rw_r);
+        const Config c2 = load_config(n / "agensio.toml");
+        links.clear();
+        for (const auto& x : access_notices(c2))
+            if (x.code == "log_path_link") links.push_back(x);
+        CHECK(links.size() == 1 && links[0].text.find("[log] error") != npos && links[0].text.find("refused") != npos);
+        // The log directory itself a link: followed, no notice.
+        const fs::path n2 = dir / "n2";
+        fs::create_directories(n2 / "sites.d");
+        fs::create_symlink(logs, n2 / "logs");
+        write(n2 / "agensio.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\n[log]\naccess = \"" + (n2 / "logs" / "access.log").string() + "\"\n", rw_r);
+        write(n2 / "sites.d" / "k.toml", site("k.test", (n2 / "logs" / "sites" / "k.test.log").string()), rw_r);
+        const Config c3 = load_config(n2 / "agensio.toml");
+        bool any = false;
+        for (const auto& x : access_notices(c3)) any = any || x.code == "log_path_link";
+        CHECK(!any);
+    }
     fs::remove_all(dir);
 }
 

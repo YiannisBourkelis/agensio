@@ -60,6 +60,11 @@
   deletes met a symbolic link below the log directory, the fix told the administrator about the directory's
   access rights; it now says the link is never followed, that a site whose log lies behind one is set aside
   at the next reload, and to make it a directory.
+- `agensio -t`, the reload and health warn `log_path_link` for a symbolic link below the log directory on
+  the way to a log (the addendum's S3, second half: `-t` accepted a `sites/` that is a link, and the start,
+  which runs `-t` first in the packaged unit, was the one to refuse it, with the sites behind it set
+  aside). The warning names the link, its target and the sites or server files behind it, with the two ways
+  out; `-t --strict` fails on it.
 
 ## 0.1.0-alpha.128 (2026-11-05)
 
