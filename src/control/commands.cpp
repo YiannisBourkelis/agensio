@@ -584,6 +584,19 @@ H3BindProblem h3_bind_problem(std::string address, unsigned port, std::string er
     return p;
 }
 
+std::optional<Finding> schedule_background_finding(const std::string& site, const std::string& command, const std::string& at, std::size_t runs,
+                                                   std::time_t when, std::time_t now) {
+    constexpr std::time_t kDay = 24 * 60 * 60;  // a daily command's next run says it again
+    if (!runs || when <= 0 || now - when >= kDay) return std::nullopt;
+    return Finding{"warn", "site_schedule_background", site,
+                   "a scheduled run of " + site + " started " + command + " in background (runInBackground(); last at " + at + ", " + std::to_string(runs) +
+                       (runs == 1 ? " such run" : " such runs") + " since the start), and agensio ends it the moment schedule:run exits, so it is cut off every time; "
+                       "with withoutOverlapping() its lock then makes the scheduler skip it for a day",
+                   "the application drops runInBackground() from that command (the commands after it in the minute then wait for it) or dispatches "
+                   "its work to the queue; then site_task " + site + " schedule_clear_cache removes the lock withoutOverlapping() left. This warning "
+                   "goes a day after the last run that started one; site_service_status " + site + " shows the runs"};
+}
+
 std::string h3_bind_words(const H3BindProblem& p) {
     return p.error + (p.cause.empty() ? std::string() : " (" + p.cause + ")") + "; the listener serves HTTP/2 and HTTP/1 meanwhile and advertises no HTTP/3";
 }

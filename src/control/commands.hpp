@@ -211,6 +211,12 @@ H3BindProblem h3_bind_problem(std::string address, unsigned port, std::string er
 // for the reload's answer and its error-log line.
 Finding h3_bind_finding(const H3BindProblem& p);
 std::string h3_bind_words(const H3BindProblem& p);
+// A Laravel scheduler's run that started a command in background (runInBackground()), which agensio
+// ends when schedule:run exits (the alpha.127 report, S3: a quiet run prints nothing, so it went
+// unseen): site_schedule_background, a warning while the last such run, at `when` (`at` as recorded,
+// `runs` of them since the start), is under a day old.
+std::optional<Finding> schedule_background_finding(const std::string& site, const std::string& command, const std::string& at, std::size_t runs,
+                                                   std::time_t when, std::time_t now);
 // The refusals at the workers' connection ceiling since start (Server::refusal_report),
 // merged over the workers, for one health finding whose fix follows from their shape
 // (2026-10-02: an agent must tell an attack from a low ceiling from stuck clients).

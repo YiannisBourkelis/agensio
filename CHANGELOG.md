@@ -2,6 +2,12 @@
 
 ## 0.1.0-alpha.128
 
+- **Health warns `site_schedule_background`** (the alpha.127 report, S3, the owner's decision): a
+  scheduled run that started a command with `runInBackground()`, which agensio ends the moment
+  `schedule:run` exits, was named only by `site_service_status`; the run was quiet and ok, so the
+  journal had nothing and nothing sent anyone to look. The warning names the command and the last run,
+  with the application's change and `schedule_clear_cache`, for a day after the last run that started
+  one.
 - **Fix: an approved secret went to any admin account that asked by its id** (the alpha.127 report's
   open question). A revealed value, a generated password or a credential file's content is handed out
   once by `approvals_list` with the id, which the list shows every admin account; the first to ask took

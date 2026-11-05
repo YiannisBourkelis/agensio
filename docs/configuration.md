@@ -486,7 +486,9 @@ locks. Such a command drops `runInBackground()` (the commands after it in the mi
 and a minute that runs past the next start skips that one) or dispatches its work to the queue.
 `site-service NAME` names the command when a recorded run started one in background (Laravel 9 and
 later print `Running [COMMAND] in background`), with these steps (0.1.0-alpha.127, the alpha.126
-report).
+report), and health warns `site_schedule_background` with the command and the same steps for a day
+after the last run that started one (0.1.0-alpha.128): such a run is quiet and ok, so the scheduler's
+journal says nothing of it.
 
 **Statamic** is a Laravel application: use `app = "laravel"` unchanged. Its control panel
 uploads and PATCH/DELETE requests all go through `/index.php`. Raise

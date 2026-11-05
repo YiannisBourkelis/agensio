@@ -2605,6 +2605,7 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
             if (const auto bg = control::scheduled_in_background(out)) {
                 ++rec.background;
                 rec.background_at = rec.last_at;
+                rec.background_time = std::time(nullptr);
                 rec.background_command = *bg;
             }
             if (out.size() > 2048) {

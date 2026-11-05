@@ -1166,13 +1166,16 @@ json::Value Server::health_with(const std::vector<control::Finding>& more) {
     }
     for (const auto& w : h3_waiting_) extra.push_back(control::h3_bind_finding(w));  // h3 a reload could not open (the alpha.110 and .112 reports)
     // The Laravel schedulers' last runs (2026-11-04): the control handler's record, here on worker 0.
-    for (const auto& [site, rec] : control_handler_.schedule_records())
+    for (const auto& [site, rec] : control_handler_.schedule_records()) {
         if (rec.runs && !rec.last_ok)
             extra.push_back(control::Finding{"warn", "site_schedule_failing", site,
                                              "the last scheduled schedule_run of " + site + " failed at " + rec.last_at + " (" + std::to_string(rec.failures) + " of " +
                                                  std::to_string(rec.runs) + " runs since the start failed): " + rec.last_error,
                                              "site_service_status " + site + " shows the end of its output; site_task " + site +
                                                  " schedule_run runs it by hand with the whole output (site_task_output)"});
+        if (auto f = control::schedule_background_finding(site, rec.background_command, rec.background_at, rec.background, rec.background_time, std::time(nullptr)))
+            extra.push_back(std::move(*f));
+    }
     const control::TlsFacts tls = tls_facts();
     return control::health(cfg, cfg_, as_root, std::time(nullptr), extra, &tls);
 }

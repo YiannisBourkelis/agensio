@@ -281,6 +281,7 @@ public:
         // runner ends when schedule:run exits (the alpha.126 report, problem 4): the last such command.
         std::size_t background = 0;
         std::string background_at, background_command;
+        std::time_t background_time = 0;  // health's site_schedule_background, for a day after it
     };
     // Health's view (site_schedule_failing) and site_service_status's.
     const std::map<std::string, ScheduleRecord>& schedule_records() const noexcept { return schedule_; }

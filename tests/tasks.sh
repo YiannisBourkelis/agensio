@@ -578,13 +578,19 @@ SH
   # A command started with runInBackground() is ended when schedule:run exits (the alpha.126 report,
   # problem 4): site-service names it from the run's output, with what the application changes.
   ctl site-service lv.test > $T/out
-  check "before a run starts a command in background, site-service names none" "None" "$(j 'd["runs"].get("background")')"
+  check "before a run starts a command in background, site-service names none, health warns of none" "None no" \
+    "$(j 'd["runs"].get("background")') $(ctl health > $T/out.health; python3 -c "import json; print('yes' if any(f['code'] == 'site_schedule_background' for f in json.load(open('$T/out.health'))['findings']) else 'no')")"
   for r in r1 r2; do touch $LV/releases/$r/bg; done
   ctl site-task lv.test schedule_run --scheduled --yes --reason scheduler > /dev/null
   rm -f $LV/releases/r1/bg $LV/releases/r2/bg
   ctl site-service lv.test > $T/out
   check "a scheduled run that started a command in background: site-service names it, the summary says agensio ends it, a step says what to change and schedule_clear_cache" "yes 1 yes yes" \
     "$(j '"yes" if d["runs"]["background"]["command"] == "\x27artisan\x27 report:send" else d["runs"]') $(j 'int(d["runs"]["background"]["runs"])') $(j '"yes" if "agensio ends it when schedule:run exits" in d["summary"] else d["summary"]') $(j '"yes" if any("runInBackground()" in s and "schedule_clear_cache" in s and "queue" in s for s in d["next_steps"]) else d["next_steps"]')"
+  # Health says so too (the alpha.127 report, S3): the run was quiet and ok, so the journal got nothing
+  # and nothing sent anyone to site-service.
+  ctl health > $T/out
+  check "health warns site_schedule_background for it, naming the command, with the application's change and schedule_clear_cache" "warn yes yes" \
+    "$(j '[f["severity"] for f in d["findings"] if f["code"] == "site_schedule_background" and f.get("site") == "lv.test"][0]') $(j '"yes" if any("report:send" in f["message"] for f in d["findings"] if f["code"] == "site_schedule_background") else d["findings"]') $(j '"yes" if any("schedule_clear_cache" in f["fix"] and "runInBackground()" in f["fix"] for f in d["findings"] if f["code"] == "site_schedule_background") else "no"')"
   # The reads and the approval codes have a helper of their own (the alpha.126 report, problem 3): a
   # task holding the main helper for three seconds (task_limits' 5 s leaves room on a loaded host)
   # makes site-service answer neither busy nor late, and a code is checked at once (a wrong one here,

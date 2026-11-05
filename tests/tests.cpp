@@ -4602,6 +4602,17 @@ static void test_appenv() {
         CHECK(!control::scheduled_in_background(""));
         const std::optional<std::string> longer = control::scheduled_in_background("Running [" + std::string(159, 'a') + "é" + std::string(50, 'b') + "] in background");
         CHECK(longer && *longer == std::string(159, 'a') + "...");
+        // Health's warning for it (the alpha.127 report, S3: a quiet run printed nothing and health said
+        // nothing, so the command was cut off unseen): while a run that started one is under a day old.
+        const std::time_t at_now = 1'800'000'000;
+        const auto background = control::schedule_background_finding("lv.test", "'artisan' report:send", "2026-11-04 10:00:00", 3, at_now - 60, at_now);
+        CHECK(background && background->severity == "warn" && background->code == "site_schedule_background" && background->site == "lv.test" &&
+              background->message.find("started 'artisan' report:send in background") != std::string::npos &&
+              background->message.find("cut off every time") != std::string::npos && background->fix.find("runInBackground()") != std::string::npos &&
+              background->fix.find("queue") != std::string::npos && background->fix.find("site_task lv.test schedule_clear_cache") != std::string::npos);
+        CHECK(!control::schedule_background_finding("lv.test", "x", "", 3, at_now - 24 * 3600, at_now));
+        CHECK(control::schedule_background_finding("lv.test", "x", "", 3, at_now - 24 * 3600 + 1, at_now));
+        CHECK(!control::schedule_background_finding("lv.test", "x", "", 0, at_now - 60, at_now));
     }
     CHECK(inspect(envdir + "-none", me, {"ok.test"})["sites"].items().empty());
     // Which sites have a file (site_delete names the file only then).
