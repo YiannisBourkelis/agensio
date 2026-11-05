@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.129
+## 0.1.0-alpha.129 (2026-11-05)
 
 - **Security: where root opens the logs** (`docs/configuration.md` 8c, `docs/security-control-plane.md`
   row 59; found 2026-11-05 while testing `access_log_keep_days`). The start opened every site's
