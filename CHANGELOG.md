@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.130
+## 0.1.0-alpha.130 (2026-11-05)
 
 - **Fix (security): a query login on `/` could be excluded through `/index.php`** (the alpha.129 report,
   P1; security row 58). On a PHP site without a front controller (`app = "php"`, Roundcube's
