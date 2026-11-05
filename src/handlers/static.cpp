@@ -593,10 +593,17 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         return Outcome::done;
     }
     // A method this handler does not serve (POST to a Laravel route): only try_files can
-    // rescue it by redirecting to an application location; a real file means 405.
+    // rescue it by redirecting to an application location, or a directory's index another location
+    // owns (POST / runs /index.php: Dispatcher::check_method); a real file means 405.
     if (!ws.method_allowed) {
         File f;
         FileInfo fi;
+        if (loc.try_files.empty()) {  // only a directory's index form gets here (check_method)
+            if (index_lookup(loc, ws, f, fi) == Lookup::redirect) return Outcome::redirect;
+            f.close();
+            error(s, 405, req.keep_alive, loc.allow);  // its own index, or none: what a POST got before
+            return Outcome::done;
+        }
         switch (try_files_lookup(s, loc, ws, f, fi)) {
             case Lookup::redirect: return Outcome::redirect;
             case Lookup::found: error(s, 405, req.keep_alive, loc.allow); return Outcome::done;

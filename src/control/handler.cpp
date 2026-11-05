@@ -849,9 +849,9 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
             json::Value held = json::Value::array();
             std::string note, message = "configuration reloaded";
             for (const auto& h : backend_->running().held_back) {
-                held.push(json::Value::object().set("file", h.file).set("error", h.error).set("keeps_running_version", h.carried)
-                              .set("hosting_rule", h.hosting).set("certificate", h.certificate));
-                note += "; set aside: " + h.file + ": " + h.error;
+                held.push(json::Value::object().set("file", h.file).set("site", h.site.empty() ? json::Value() : json::Value(h.site)).set("error", h.error)
+                              .set("keeps_running_version", h.carried).set("hosting_rule", h.hosting).set("certificate", h.certificate));
+                note += "; set aside: " + (h.site.empty() ? h.file : "site " + h.site + " of " + h.file) + ": " + h.error;
             }
             if (!held.items().empty()) message += "; site files set aside, see held_back";
             const std::vector<std::string> restart = backend_->restart_pending();

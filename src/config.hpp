@@ -680,6 +680,10 @@ struct Config {
         bool carried = false;
         bool hosting = false;  // set aside by a hosting rule (services/pools.hpp isolate_hosting)
         bool certificate = false;  // set aside because its certificate and key did not load (services/certificates.hpp)
+        // One site of the main file set aside alone, its first name (0.1.0-alpha.130, the owner's decision): the
+        // main file is all or nothing, but an access log the start cannot open is the log directory's, which
+        // the server's account can write, not the main file's (docs/configuration.md 8c); "" the whole file.
+        std::string site;
     };
     std::vector<HeldBack> held_back;
     // Credential files the hosting rules find readable by others or by a group not the site's
@@ -1002,6 +1006,11 @@ bool site_log_name(const std::string& path, const Config& cfg, std::string* name
 // sets it aside; a main-file site's throws, as at the start; the server's own files are returned, each a
 // refusal of the start ("" none).
 std::vector<std::string> isolate_log_paths(Config& cfg);
+// Sets aside every site whose access log `problem` refuses ("" fine; else why): a site file's with its file
+// (set_aside_until_clean, its running version carried on a reload), a main-file site alone (HeldBack::site),
+// its running version carried on a reload, the main file's other sites served. Shared by the start, the
+// reload (Server::isolate_logs) and -t (isolate_log_paths).
+void set_aside_for_logs(Config& cfg, const Config* running, const std::function<std::string(const SiteConfig&)>& problem);
 // Where a site's access_log may be (docs/configuration.md 8c, security row 59): "" when `log` (resolved,
 // or "" for none) may be named by a site file that is the main configuration owner's word
 // (`owner_file`: any path, as nginx's and Apache's configuration names any) or by any other file (sites/

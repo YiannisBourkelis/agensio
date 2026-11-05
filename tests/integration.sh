@@ -2485,12 +2485,21 @@ PYT
   printf '<?php function greet() { return "served-dir-ok"; }\n' > bench/tmp/served/src/lib.php
   printf 'SECRET=served-dir-canary\n' > bench/tmp/served/.env
   chmod 600 bench/tmp/served/.env
+  mkdir -p bench/tmp/served/public/sub bench/tmp/served/public/plain
+  printf '<?php echo "sub-index ", $_SERVER["REQUEST_METHOD"], " ", file_get_contents("php://input"), "\\n";\n' > bench/tmp/served/public/sub/index.php
+  printf 'plain index\n' > bench/tmp/served/public/plain/index.html
   sd_create() { cpost /v1/sites "{\"domain\":\"$1\",\"https\":\"none\",\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/bench/tmp/$2\",\"served_dir\":\"public\",\"listen_plain\":\"127.0.0.1:8096\",\"confirm\":true,\"reason\":\"served\"}"; }
   sd_get() { curl -sS -H "Host: $1" "http://127.0.0.1:8096$2"; }
   sd_code() { code -H "Host: $1" "http://127.0.0.1:8096$2"; }
   check "served_dir: public/ is served and requires the src/ beside it; src/, .env and the project's other files have no URL (a path climbing out of the root is 400); site_show names both directories; a project without public/ yet is created, answers 404 and health names it" \
     "201 served-dir-ok public 404 404 400 404 public:served 201 404 served_dir_missing" \
     "$(sd_create served.test served) $(sd_get served.test /) $(sd_code served.test /src/lib.php) $(sd_code served.test /.env) $(code --path-as-is -H "Host: served.test" "http://127.0.0.1:8096/../src/lib.php") $(sd_code served.test /public/index.php) $(curl -sS --unix-socket $CS http://control/v1/sites/served.test | python3 -c 'import json,sys,os; d=json.load(sys.stdin); print(d.get("served_dir") + ":" + os.path.basename(d.get("project_directory", "")))') $(sd_create later.test served-later) $(sd_code later.test /) $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; print(" ".join(x["code"] for x in json.load(sys.stdin)["findings"] if x.get("site") == "later.test" and x["code"] == "served_dir_missing") or "none")')"
+  # A form posted to a directory's index on app = "php" without try_files (the alpha.129 report, S4): the
+  # index runs, as with nginx's index and Apache's mod_dir; a directory whose index is static still
+  # answers 405 with its Allow, and a static file too.
+  check "POST to a directory runs its index.php (app = php, no try_files), the body reaching PHP; a static index and a static file still answer 405" \
+    "sub-index POST k=v 200 405 GET 405" \
+    "$(curl -sS -X POST --data 'k=v' -H 'Host: served.test' http://127.0.0.1:8096/sub/) $(code -X POST --data 'k=v' -H 'Host: served.test' http://127.0.0.1:8096/) $(code -X POST -H 'Host: served.test' http://127.0.0.1:8096/plain/) $(curl -sS -o /dev/null -D - -X POST -H 'Host: served.test' http://127.0.0.1:8096/plain/ | tr -d '\r' | sed -n 's/^Allow: \([A-Z]*\).*/\1/p') $(code -X POST -H 'Host: served.test' http://127.0.0.1:8096/plain/index.html)"
   cpost /v1/sites/served.test/delete '{"confirm":true,"reason":"served"}' > /dev/null
   cpost /v1/sites/later.test/delete '{"confirm":true,"reason":"served"}' > /dev/null
   # rules.private on a .php file holds for its path-info form too (2026-10-22): before, /install.php/x

@@ -15,9 +15,24 @@
   directory or under a missing subdirectory, or a server file behind a link, passed `-t` and then ended
   the start, and the same for a site file's log set the site aside unannounced. `-t` now walks every log
   below the log directory as the start does, read-only (`probe_below_log_dir`, `isolate_log_paths`): a
-  site file's log the start cannot open sets that file aside in `-t` too (a warning; `--strict` fails), and
-  a main-file site's or a server file's makes `-t` fail. While the server runs, the reload's lines and
-  health say it before the next start: `log_path_link` for a link, `log_path_refused` for anything else.
+  site whose log the start cannot open is set aside in `-t` too (a warning; `--strict` fails), and a server
+  file's makes `-t` fail. While the server runs, the reload's lines and health say it before the next
+  start: `log_path_link` for a link, `log_path_refused` for anything else.
+- **A site of the main file whose access log the start cannot open is set aside alone** (the owner's
+  decision on the report's P2). Before, it ended the start, so the server's account, which owns `sites/`,
+  could keep the host from restarting by planting a FIFO or a link at such a site's log. Now that site is not
+  served and the main file's other sites are, said as `site X of FILE set aside` at the start, in `-t` and
+  in health's `site_file_held_back` (the reload's and `validate`'s `held_back` carry its `site`); on a reload
+  its running version keeps serving. The main file stays all or nothing for everything else.
+- **Fix: a POST to a directory's index answered 405 on `app = "php"`** (the report's S4, the owner's
+  decision). A form posted to `/` or `/sub/` never reached `index.php`: the static location in front of the
+  directory allows GET, HEAD and OPTIONS, and its 405 came before the index lookup that would have routed
+  the request to the `.php` location, so Roundcube's `/?_task=login` and Kanboard's form posts could not
+  work on the preset the cookbook gives them. An application method on a directory's index form now goes
+  through the index lookup, as nginx's `index` and Apache's `mod_dir` do: an index another location owns
+  (the script) is routed there, through the refuse, address and password rules as any internal redirect;
+  a static index or a static file still answers 405. Only the path past the allowed methods changed: a GET
+  pays nothing (A/B against alpha.129, `ab-20261105-184949.md`: 0.972 to 1.026, noise).
 - **Fix: a reopen that could not open a file again said nothing** (P3). A FIFO or a link at a log's path
   after logrotate's rename left `SIGUSR1` and `logs_reopen` answering ok, the site's lines going on into the
   rotated file, which logrotate's next run compresses and removes. Each such file is now an error-log line

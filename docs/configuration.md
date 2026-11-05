@@ -338,7 +338,11 @@ match = "suffix"
 handler = "fastcgi"
 ```
 
-Every `.php` under the root runs, wherever it sits. For an application that lets its users
+Every `.php` under the root runs, wherever it sits, and a request for a directory runs its
+`index.php` whatever the method: a form posted to `/` or `/sub/` (Roundcube's and Kanboard's logins)
+reaches the script, as with nginx's `index` and Apache's `DirectoryIndex` (0.1.0-alpha.130; before,
+anything but GET, HEAD and OPTIONS answered 405 there). A directory whose index is a static file still
+answers 405 to a POST. For an application that lets its users
 upload files, name the scripts that run (exact `fastcgi` locations and a `.php` suffix location
 with `handler = "deny"`, or `rules.entry_points` on a managed site; section 15), or refuse
 `.php` where the uploads go (`refuse = ["/uploads/**/*.php"]`, section 6b): health says
@@ -1764,8 +1768,11 @@ write must not be able to make root open, create or hand over a file anywhere.
   itself); a link, FIFO or hard link standing for the log is removed, and the start creates the log.
 - **What `-t` says.** The packaged unit runs `agensio -t` before the start, so `-t` walks every log
   below the log directory as the start does, read-only (0.1.0-alpha.130; alpha.129 judged links alone):
-  a site file whose log the start cannot open is set aside there too (a warning, `--strict` fails), and
-  a main-file site's or one of the server's own files makes `-t` fail, as the start would. While the
+  a site whose log the start cannot open is set aside there too (a warning, `--strict` fails), and one of
+  the server's own files makes `-t` fail, as it makes the start fail. A site of the main file is set
+  aside alone, the main file's other sites served (0.1.0-alpha.130): the main file is all or nothing,
+  but what stands in the log directory is the server account's to change, not the main file's, and must
+  not keep the host from starting. While the
   server runs, the reload's error-log lines and health say the same before the next start: `log_path_link`
   (a link on the way, naming its target and who logs behind it) and `log_path_refused` (anything else).
   A reload keeps a log it has open, so a link or a FIFO planted over an open log changes nothing until
@@ -2338,7 +2345,8 @@ What sets a file aside:
   the certificate it loaded before, a new one is not served;
 - an access log that cannot be opened (8c): a link planted below the log directory, a file the
   server's account cannot create on a reload, a path a file the server's account can write may not
-  name; a site that was serving keeps the log it opened before;
+  name; a site that was serving keeps the log it opened before. This is the one cause that sets aside
+  a site of the main file, alone, the file's other sites served (0.1.0-alpha.130);
 - something its sites need that does not load: the site's root additions file (section 15;
   a site is never served without the locations root added, which may be the ones that
   protect it), or a users file of a `[[site.auth]]` rule (19b). An additions file that does

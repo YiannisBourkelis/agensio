@@ -130,7 +130,8 @@ Server::Server(Config cfg)
     // Read as root now; every reload reads them as server.user (step T1).
     for (const auto& p : tls_read_problems(gen->cfg, system_facts())) error_log_.warn(p.message + "; fix: " + p.fix);
     for (const auto& h : gen->cfg.held_back)
-        error_log_.error(h.file + " set aside, its sites are not served: " + h.error);
+        error_log_.error(h.site.empty() ? h.file + " set aside, its sites are not served: " + h.error
+                                        : "site " + h.site + " of " + h.file + " set aside, not served (the file's other sites are): " + h.error);
     // Without the record load order decides a conflict between site files, as before the record
     // existed: a warning for each it decided, since the name may have gone to another file than
     // the one served before (the alpha.64 report, finding 2); with none, a note.
@@ -243,12 +244,13 @@ bool Server::isolate_logs(Config& cfg, const Config* running, std::string& error
                 error = "cannot open log file " + f.why + fix(f, nullptr);
                 return false;
             }
-    set_aside_until_clean(cfg, running, [&](const Config& c) -> std::optional<SiteConflict> {
-        for (std::size_t i = 0; i < c.sites.size(); ++i)
-            for (const auto& f : failed)
-                if (c.sites[i].access_log == f.path)
-                    return SiteConflict{i, SiteConflict::npos, "cannot open the access log of " + c.sites[i].server_names.front() + ": " + f.why + fix(f, &c.sites[i])};
-        return std::nullopt;
+    // A site file's with its file, a main-file site's alone (the owner's decision, 2026-11-05): what stands in
+    // the log directory never stops the start of the other sites.
+    set_aside_for_logs(cfg, running, [&](const SiteConfig& site) -> std::string {
+        for (const auto& f : failed)
+            if (site.access_log == f.path && !site.server_names.empty())
+                return "cannot open the access log of " + site.server_names.front() + ": " + f.why + fix(f, &site);
+        return {};
     });
     assign_log_sinks(cfg);  // the sinks of the sites that stay; a set-aside site's sink is not wanted
     return true;
@@ -1458,7 +1460,7 @@ json::Value Server::status() {
     v.set("sites", std::move(sites));
     // Site files set aside (design section 26); health says why and what to do.
     json::Value held = json::Value::array();
-    for (const auto& h : gen_->cfg.held_back) held.push(h.file);
+    for (const auto& h : gen_->cfg.held_back) held.push(h.site.empty() ? h.file : h.file + " (site " + h.site + ")");
     v.set("site_files_held_back", std::move(held));
     v.set("acme", gen_->cfg.acme.enabled);
     return v;
@@ -2552,8 +2554,9 @@ std::shared_ptr<Generation> Server::prepare_reload(std::string& error, std::stri
             if (std::filesystem::path(h.file).lexically_normal().string() == want) return refuse(h.error);
     }
     for (const auto& h : loaded.held_back)
-        error_log_.error(h.file + " set aside: " + h.error +
-                         (h.carried ? " (the version loaded before keeps serving its sites)" : " (its sites are not served)"));
+        error_log_.error((h.site.empty() ? h.file : "site " + h.site + " of " + h.file) + " set aside: " + h.error +
+                         (h.site.empty() ? (h.carried ? " (the version loaded before keeps serving its sites)" : " (its sites are not served)")
+                                         : (h.carried ? " (the version loaded before keeps serving it)" : " (it is not served; the file's other sites are)")));
     for (const auto& k : kept_certificates) error_log_.warn(k);
     return gen;
 }

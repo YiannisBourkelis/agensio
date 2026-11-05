@@ -736,6 +736,12 @@ bool Dispatcher::check_method(Stream& s, const LocationConfig& loc, WorkerState&
     for (const TryStep& step : loc.try_files)
         if (step.kind == TryStep::Kind::fallback) has_fallback = true;
     if (loc.kind == HandlerKind::static_ && application_method && has_fallback) return true;
+    // A directory's index form (a path ending in '/'): its index may be another location's, a script
+    // (POST / on app = "php" without try_files runs /index.php, as nginx's index and Apache's mod_dir do;
+    // the alpha.129 report, S4: it was a 405, so a form posted to a directory never reached it). The
+    // static handler looks the index up and routes it, or answers 405 as before. Only here, past the
+    // allowed methods: a GET pays nothing.
+    if (loc.kind == HandlerKind::static_ && application_method && !ws.path.empty() && ws.path.back() == '/') return true;
     // A method token nobody knows is syntactically valid, so it is a 405; but it is also
     // what a corrupted request line looks like, so the line is logged, escaped.
     if (req.method == Method::other && log_ && log_->enabled(LogLevel::warn)) {

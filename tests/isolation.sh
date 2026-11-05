@@ -142,8 +142,9 @@ mkdir -p "$R/logs/sites"; mkfifo "$R/logs/sites/m.test.log"
 cp "$R/agensio.toml" "$R/agensio.toml.keep"
 site m.test 18311 "$T/www/c" "access_log = \"$R/logs/sites/m.test.log\"" >> "$R/agensio.toml"
 "$BIN" -t -c "$R/agensio.toml" > "$R/t5.out" 2>&1; R5=$?
-check "-t fails for a main-file site whose log is a FIFO, as the start would, naming the kind and the fix" "1 yes" \
-  "$R5 $(grep -q "configuration error: cannot open the access log of m.test: $R/logs/sites/m.test.log: a FIFO, not a regular file.*move it aside" "$R/t5.out" && echo yes)"
+"$BIN" -t --strict -c "$R/agensio.toml" > "$R/t6.out" 2>&1; R6=$?
+check "-t sets aside a main-file site whose log is a FIFO alone, naming the kind and the fix, the other sites loading; --strict fails" "0 yes yes 1" \
+  "$R5 $(grep -q "warning: site m.test of $R/agensio.toml set aside, not loaded (the file's other sites are): cannot open the access log of m.test: $R/logs/sites/m.test.log: a FIFO, not a regular file.*move it aside" "$R/t5.out" && echo yes) $(grep -q 'is OK (2 site(s), 1 site file(s) set aside)' "$R/t5.out" && echo yes) $R6"
 mv "$R/agensio.toml.keep" "$R/agensio.toml"; rm -f "$R/logs/sites/m.test.log"
 
 # A reopen that cannot open a log again (the alpha.129 report, P3): logrotate's rename, then a FIFO at the

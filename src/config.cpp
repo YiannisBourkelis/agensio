@@ -4204,10 +4204,9 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
             std::string path, target;
             bool directory = false;  // a directory on the way for some log, not the log itself
             std::vector<std::string> who;
-            bool fatal = false;      // the server's own file or a main-file site behind it: the start is refused
+            bool fatal = false;      // one of the server's own files behind it: the start is refused
         };
         std::vector<Link> links;
-        const std::string main_file = cfg.config_path.string();
         auto look = [&](const std::string& log, const std::string& who, bool fatal) {
             if (log.empty() || log == "stderr" || log == "off" || !below_log_dir(dir, log)) return;
             std::string path = dir;
@@ -4242,7 +4241,7 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
         look(cfg.log.error, "[log] error", true);
         look(cfg.control.audit, "[control] audit", true);
         for (const auto& site : cfg.sites)
-            if (!site.server_names.empty() && site.access_log != cfg.log.access) look(site.access_log, site.server_names.front(), site.source.empty() || site.source == main_file);
+            if (!site.server_names.empty() && site.access_log != cfg.log.access) look(site.access_log, site.server_names.front(), false);  // a main-file site too: set aside alone
         for (const Link& l : links) {
             std::string names;
             for (const auto& w : l.who) names += (names.empty() ? "" : ", ") + w;
@@ -6034,6 +6033,39 @@ std::string log_directory(const Config& cfg) {
     return fs::path(cfg.log.access).parent_path().string();
 }
 
+void set_aside_for_logs(Config& cfg, const Config* running, const std::function<std::string(const SiteConfig&)>& problem) {
+    const std::string main_file = cfg.config_path.string();
+    const auto in_main = [&](const SiteConfig& s) { return s.source.empty() || s.source == main_file; };
+    // The main file's sites one at a time: never the whole file for what lies in the log directory.
+    for (std::size_t i = 0; i < cfg.sites.size();) {
+        const SiteConfig& s = cfg.sites[i];
+        std::string why;
+        if (!in_main(s) || s.carried || (why = problem(s)).empty()) {
+            ++i;
+            continue;
+        }
+        const std::string name = s.server_names.empty() ? std::string() : s.server_names.front();
+        cfg.sites.erase(cfg.sites.begin() + static_cast<std::ptrdiff_t>(i));
+        bool carried = false;
+        if (running)  // a reload: the version running keeps serving, its log open already
+            for (const SiteConfig& r : running->sites)
+                if ((r.source.empty() || r.source == running->config_path.string()) && !r.server_names.empty() && r.server_names.front() == name) {
+                    cfg.sites.push_back(r);
+                    cfg.sites.back().carried = true;
+                    carried = true;
+                    break;
+                }
+        cfg.held_back.push_back({main_file, why, carried, false, false, name});
+    }
+    set_aside_until_clean(cfg, running, [&](const Config& c) -> std::optional<SiteConflict> {
+        for (std::size_t i = 0; i < c.sites.size(); ++i) {
+            if (in_main(c.sites[i])) continue;  // judged above
+            if (std::string why = problem(c.sites[i]); !why.empty()) return SiteConflict{i, SiteConflict::npos, std::move(why)};
+        }
+        return std::nullopt;
+    });
+}
+
 std::vector<std::string> isolate_log_paths(Config& cfg) {
 #ifndef _WIN32
     const std::string dir = log_directory(cfg);
@@ -6048,15 +6080,11 @@ std::vector<std::string> isolate_log_paths(Config& cfg) {
             if (const std::string why = probe_below_log_dir(where, path); !why.empty()) fatal.push_back("the start cannot open " + std::string(key) + " " + path + ": " + why);
     if (!fatal.empty()) return fatal;
     std::map<std::string, std::string> judged;  // a log path -> the probe's answer, once per file
-    set_aside_until_clean(cfg, nullptr, [&](const Config& c) -> std::optional<SiteConflict> {
-        for (std::size_t i = 0; i < c.sites.size(); ++i) {
-            const SiteConfig& site = c.sites[i];
-            if (site.access_log.empty() || site.access_log == c.log.access || !below_log_dir(dir, site.access_log) || site.server_names.empty()) continue;
-            auto it = judged.find(site.access_log);
-            if (it == judged.end()) it = judged.emplace(site.access_log, probe_below_log_dir(where, site.access_log)).first;
-            if (!it->second.empty()) return SiteConflict{i, SiteConflict::npos, "cannot open the access log of " + site.server_names.front() + ": " + it->second};
-        }
-        return std::nullopt;
+    set_aside_for_logs(cfg, nullptr, [&](const SiteConfig& site) -> std::string {
+        if (site.access_log.empty() || site.access_log == cfg.log.access || !below_log_dir(dir, site.access_log) || site.server_names.empty()) return {};
+        auto it = judged.find(site.access_log);
+        if (it == judged.end()) it = judged.emplace(site.access_log, probe_below_log_dir(where, site.access_log)).first;
+        return it->second.empty() ? std::string() : "cannot open the access log of " + site.server_names.front() + ": " + it->second;
     });
 #else
     (void)cfg;

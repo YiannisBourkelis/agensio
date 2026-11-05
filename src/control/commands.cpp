@@ -1448,8 +1448,8 @@ json::Value validate(const fs::path& path, const Config& running, const Config* 
     // Site files a reload would set aside (design section 26): the rest loads, so ok stays true.
     json::Value held = json::Value::array();
     for (const auto& h : fresh.held_back)
-        held.push(json::Value::object().set("file", h.file).set("error", h.error).set("keeps_running_version", h.carried).set("hosting_rule", h.hosting)
-                      .set("certificate", h.certificate));
+        held.push(json::Value::object().set("file", h.file).set("site", h.site.empty() ? json::Value() : json::Value(h.site)).set("error", h.error)
+                      .set("keeps_running_version", h.carried).set("hosting_rule", h.hosting).set("certificate", h.certificate));
     v.set("held_back", std::move(held));
     // Credential files readable by others (2026-10-22): served anyway, made private at the reload.
     json::Value exposed = json::Value::array();
@@ -1737,6 +1737,13 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     // A hosting rule's (C2) is a hosting_rule finding: the fix is an owner or a mode, not the file.
     auto held_finding = [&](const Config::HeldBack& h, bool on_disk) {
         const std::string name = fs::path(h.file).filename().string();
+        if (!h.site.empty()) {  // one site of the main file, set aside alone for its access log (docs/configuration.md 8c)
+            add("error", "site_file_held_back", h.site,
+                "site " + h.site + " of " + h.file + " was not loaded: " + h.error + "; " +
+                    (h.carried ? "the version loaded before keeps serving it" : "it is not served; the file's other sites are"),
+                "the error names what stands at the log's path and what to do; then reload (a site the start set aside) or restart");
+            return;
+        }
         std::string msg = h.hosting ? h.error + "; " + h.file + (on_disk ? " is set aside at the next reload: " : " is set aside: ")
                                     : h.file + (on_disk ? " does not load as it is on disk: " : " was not loaded: ") + h.error + "; ";
         msg += on_disk ? (h.carried ? "the next reload keeps serving the version running now" : "its sites are not served after the next reload")

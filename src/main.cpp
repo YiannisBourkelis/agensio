@@ -1701,7 +1701,8 @@ int main(int argc, char** argv) {
     // (the packaged unit's ExecStartPre runs it) unless --strict; a reload keeps their last good
     // version.
     for (const auto& h : cfg.held_back)
-        std::cerr << "warning: " << h.file << " set aside, its sites not loaded: " << h.error
+        std::cerr << "warning: " << (h.site.empty() ? h.file + " set aside, its sites not loaded: " : "site " + h.site + " of " + h.file + " set aside, not loaded (the file's other sites are): ")
+                  << h.error
                   << (reload ? " (the running server keeps serving the version it loaded before, if any)" : "") << "\n";
     for (const auto& n : certificate_notes) std::cerr << "note: " << n << "\n";
     // As the start would say it (a reload ranks by the running configuration, not by load order).

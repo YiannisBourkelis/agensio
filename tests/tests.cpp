@@ -14797,14 +14797,24 @@ static void test_log_placement() {
         write(pr / "agensio.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\n[log]\naccess = \"" + (pr / "logs" / "access.log").string() + "\"\n" +
                                        site("m.test", (pr / "logs" / "sites" / "f.test.log").string()), rw_r);
         fs::remove(pr / "sites.d" / "f.toml");
+        write(pr / "agensio.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\n[log]\naccess = \"" + (pr / "logs" / "access.log").string() + "\"\n" +
+                                       site("m.test", (pr / "logs" / "sites" / "f.test.log").string()) + site("n.test", (pr / "logs" / "sites" / "n.test.log").string()), rw_r);
         Config cm = load_config(pr / "agensio.toml");
-        std::string fatal;
-        try {
-            (void)isolate_log_paths(cm);
-        } catch (const std::exception& e) {
-            fatal = e.what();
+        // A main-file site whose log the start cannot open is set aside alone (the owner's decision): the
+        // main file's other site is served, nothing thrown.
+        CHECK(isolate_log_paths(cm).empty() && cm.sites.size() == 1 && cm.sites[0].server_names.front() == "n.test" && cm.held_back.size() == 1 &&
+              cm.held_back[0].site == "m.test" && cm.held_back[0].file == (pr / "agensio.toml").string() &&
+              cm.held_back[0].error.find("cannot open the access log of m.test") != npos && !cm.held_back[0].carried);
+        // On a reload its running version is carried, the log it has open kept.
+        {
+            const Config running = load_config(pr / "agensio.toml");  // both served before, as the running configuration has them
+            Config next = load_config(pr / "agensio.toml", &running);
+            set_aside_for_logs(next, &running, [](const SiteConfig& s) { return s.server_names.front() == "m.test" ? std::string("refused") : std::string(); });
+            const SiteConfig* m = nullptr;
+            for (const auto& x : next.sites)
+                if (x.server_names.front() == "m.test") m = &x;
+            CHECK(m && m->carried && next.held_back.size() == 1 && next.held_back[0].carried && next.held_back[0].site == "m.test" && next.sites.size() == 2);
         }
-        CHECK(fatal.find("cannot open the access log of m.test") != npos);
         // A reopen that cannot open the file again keeps the old descriptor and says so (P3).
         LogRegistry reg;
         reg.set_placement(at);
