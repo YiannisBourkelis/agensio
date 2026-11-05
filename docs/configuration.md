@@ -1583,7 +1583,8 @@ error = "stderr"             # or a file
 level = "warn"               # error | warn | info
 ```
 
-A site sets `access_log = "path"` or `"off"` to differ. A request no site takes (a `421` for a
+A site sets `access_log = "path"` or `"off"` to differ; where that path may be, and which site
+files may name one outside `sites/`, is section 8c. A request no site takes (a `421` for a
 name no site answers on a listener without a catch-all, a scanner going by the bare address)
 is written to `[log] access` whatever the sites log, so the fail2ban jails see it (section 18;
 before 0.1.0-alpha.70 it was in no log). Logs are buffered per worker and
@@ -1710,10 +1711,10 @@ glob names already, so the days cannot be its setting per site.
 The site needs its own access log in `sites/` of agensio's log directory (the directory of `[log]
 access`, `/var/log/agensio` as packaged), named `*.log`, as `site_create` gives a site with its own
 account: a site writing `[log] access`, a file outside that directory or one another site writes too
-is refused (the other site would lose its lines). The log's directory may be root's (the start makes
-it, still root, when a site names a log there before the first start), so a server started as root
-deletes through its root helper, which reads the sites and days from the configuration on disk
-(`docs/security-control-plane.md` row 58); otherwise the server deletes what its account may. A file that could not be deleted is health's
+is refused (the other site would lose its lines). `sites/` is the server account's (8c), and a
+server started as root deletes through its root helper, which reads the sites and days from the
+configuration on disk and reaches the directory without following a link (`docs/security-control-plane.md`
+row 58); otherwise the server deletes as its own account. A file that could not be deleted is health's
 `access_log_keep_failed`. Rotated files named by date (`dateext` set by hand) are not touched.
 
 On a managed site both are fields of `site_update` (and `site_create`): `agensio ctl site-update NAME
@@ -1722,6 +1723,56 @@ excluded path, or sets or lowers the days, waits for a person's approval (`docs/
 both leave less of a record, and deleted lines do not come back. Removing a path or raising the days
 does not wait. Lines written before a path was excluded stay until their rotated files go; agensio
 does not edit log files.
+
+## 8c. Where a log may be
+
+Which paths a log may have, and why there is a rule at all (0.1.0-alpha.129;
+`docs/security-control-plane.md` row 59). The start opens every log as root, before the privilege
+drop, and keeps the descriptors; the site files under `sites.d` belong to the server's account, which
+`site_create` writes them as. nginx and Apache open any path their configuration names, because their
+configuration is root's; agensio's site files are not all root's, so a file the server's account can
+write must not be able to make root open, create or hand over a file anywhere.
+
+- **The main file names any path** for `[log] access`, `[log] error` and `[control] audit`.
+- **A site file of the main configuration's owner names any path** in `access_log`: a regular file
+  (no link) of the same uid as the main file, writable by nobody else (`chown root`, `chmod 0644`).
+  That is the hand-written file, root's word, as nginx's `access_log` directive; the directory of a
+  log elsewhere is root's to own, as Apache's security guide asks of its `logs` directory: a directory
+  another account can write lets that account replace a log with a link before root opens it.
+- **Any other site file** (the managed files, anything the server's account put under `sites.d`, a
+  file writable by its group or by others) names its log in `sites/` of the log directory only:
+  `<log directory>/sites/<name>.log`, `<name>` of letters, digits, `.`, `_` and `-` (a domain), or
+  `[log] access`, or `"off"`. Anything else sets the file aside (12c) with a message naming the rule.
+  A managed site with its own account gets `sites/<domain>.log`; `site_create` and `site_update`
+  have no field for it, and a `site_update` of a file set aside for an older request's path writes
+  that one path back.
+- **Below the log directory nothing is followed.** The log directory is the directory of `[log]
+  access` (`/var/log/agensio` as packaged). A path below it is opened from there one component at a
+  time without following a symbolic link; the file must be a regular one with one name, owned by root
+  or the server's account; the only directory agensio makes there is `sites/`. A link planted as
+  `sites/` or as a site's log, a hard link, a FIFO, a file of another account: refused by name, the
+  site set aside, the rest served. A link at or above the log directory itself (the directory on
+  another disk) is the system's layout and is followed.
+- **Hand-over on the descriptor.** A log opened as root is given to the server's account on the open
+  descriptor (`fchown`), never by path: the server's own files `agensio:agensio 0640`, a site's
+  `agensio:<site group>` when every site writing it is that account's, `agensio:agensio` for a site
+  without a user (before alpha.129 such a log stayed root's, and every reload after the start was
+  refused with `cannot open log file ...: Permission denied`).
+
+The directories as packaged: `/var/log/agensio` is `root:agensio 0750` (Debian's nginx layout since
+CVE-2016-1247: the server's account can replace nothing root or logrotate opens there) and its `sites/`
+`agensio:agensio 0750`, so a reload, which runs as the server's account, creates a new site's log there
+itself; a start makes a missing `sites/` the server's. A log a root-written file names in the log
+directory itself, or `[log] access` renamed, is created by the start as root; a reload that needs it
+sets that site aside, or refuses the reload for the server's own file, naming the one command
+(`install -o agensio -g <group> -m 0640 /dev/null PATH`), until the file exists or a restart creates
+it. logrotate rotates `/var/log/agensio/*.log` and `sites/*.log`, as root in root's directory; a log
+root named elsewhere needs an entry of its own with the same `postrotate`.
+
+The boundary exists where the server runs as `server.user` under a main file of root's. Without
+`server.user` the server is whoever started it (a developer's machine, a container running the
+one account), nothing is root's against it, every site file is the owner's word and nothing but
+the walk applies.
 
 ## 9. php-fpm in a container
 
@@ -2263,6 +2314,9 @@ What sets a file aside:
   'refuse'?)`), a value out of range, a preset that does not fit;
 - a certificate and key pair that does not load (section 14): a site that was serving keeps
   the certificate it loaded before, a new one is not served;
+- an access log that cannot be opened (8c): a link planted below the log directory, a file the
+  server's account cannot create on a reload, a path a file the server's account can write may not
+  name; a site that was serving keeps the log it opened before;
 - something its sites need that does not load: the site's root additions file (section 15;
   a site is never served without the locations root added, which may be the ones that
   protect it), or a users file of a `[[site.auth]]` rule (19b). An additions file that does

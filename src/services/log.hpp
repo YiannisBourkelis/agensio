@@ -35,6 +35,33 @@ inline std::string_view access_log_format_name(AccessLogFormat f) noexcept {
     return f == AccessLogFormat::json ? "json" : f == AccessLogFormat::vhost_combined ? "vhost_combined" : "combined";
 }
 
+// Where the logs are opened (0.1.0-alpha.129, docs/configuration.md 8c, docs/security-control-plane.md
+// row 59). The start opens every log as root and keeps the descriptors across the privilege drop, and
+// the site files under sites.d are the server account's: so below the log directory, whose sites/ is
+// that account's too, nothing is trusted. A path there is reached one component at a time without
+// following a link (a link planted as sites/, or as a site's log, is refused by name), the file must
+// be a regular one with one name, and only sites/ is ever made. A path elsewhere was named by the main
+// file or by a site file of its owner (config.cpp site_log_problem), root's word as with nginx and
+// Apache, and is opened as named; the directory it lies in is root's to own.
+struct LogPlacement {
+    std::string directory;  // the log directory (config.hpp log_directory): "" walks nothing
+    long uid = -1, gid = -1;  // the server's account, which sites/ belongs to when root makes it; -1 unknown
+};
+
+// Whether `path` lies below `directory` (lexically; both absolute and normal; never for "").
+bool below_log_dir(const std::string& directory, const std::string& path) noexcept;
+
+// The one open of a path below the log directory: the directory resolved as the main file names it (a
+// link at or above it is the system's layout; made 0750 root:<server group> when missing, as the package
+// makes it), every component below it opened without following a link, the final one with `flags`
+// (O_NOFOLLOW, O_CLOEXEC and, against a FIFO, O_NONBLOCK added; a file created with `mode`), then checked:
+// a directory when `flags` says so, else a regular file with one name, owned by root or the server's
+// account. sites/ directly below the directory is made when missing (with O_CREAT) and, as root, made the
+// server account's, 0750 (a sites/ root made before 0.1.0-alpha.129 stayed root's); no other directory
+// is made. -1 with `why` and errno (ELOOP for a link, ENOENT for a directory it does not make, EACCES
+// when the account cannot create the file, EINVAL for a path it does not walk).
+int open_below_log_dir(const LogPlacement& where, const std::string& path, int flags, unsigned mode, std::string& why) noexcept;
+
 class LogFile {
 public:
     explicit LogFile(std::string path) : path_(std::move(path)) {}
@@ -42,13 +69,23 @@ public:
     LogFile& operator=(const LogFile&) = delete;
     ~LogFile();
 
-    // Opens (or reopens) the path, creating its parent directory if missing. "stderr" means
-    // descriptor 2. Returns false with errno set.
-    bool open() noexcept;
+    // Opens (or reopens) the path: below `where.directory` through open_below_log_dir, elsewhere as
+    // named, creating its parent directory if missing. "stderr" means descriptor 2. Returns false
+    // with errno set and error() saying why.
+    bool open(const LogPlacement& where) noexcept;
     // Rotation: open again, swap, and release the descriptor from the reopen before this one.
-    bool reopen() noexcept { return open(); }
+    bool reopen(const LogPlacement& where) noexcept { return open(where); }
     // One write() of `data` (looped on partial writes); errors are dropped, logging never fails a request.
     void write(std::string_view data) noexcept;
+    // The open descriptor made `uid`:`gid` 0640 (fchown, fchmod: never by path, which follows a link):
+    // the server's account at the start, so it writes on after the privilege drop and a site's group
+    // reads. True when it already is; false with errno (EPERM for an account not in the group).
+    bool own(unsigned uid, unsigned gid) noexcept;
+    // The open descriptor's owner and group (fstat); false when not open.
+    bool owner(unsigned& uid, unsigned& gid) const noexcept;
+    // Why the last open failed, in words ("" when it succeeded); errno_of() its errno.
+    const std::string& error() const noexcept { return error_; }
+    int errno_of() const noexcept { return errno_; }
 
     const std::string& path() const noexcept { return path_; }
     // Whether the configuration in force names this file. A sink of a site that is gone keeps
@@ -64,22 +101,35 @@ private:
     std::atomic<int> fd_{-1};
     int previous_ = -1;  // descriptor replaced by the last reopen, closed at the next one
     bool wanted_ = true;
+    std::string error_;
+    int errno_ = 0;
 };
 
 // Sinks by path: sites that log to the same file share one descriptor.
 class LogRegistry {
 public:
+    struct Failure {
+        std::string path, why;
+        int err = 0;  // errno
+    };
+    // Where the sinks are opened (LogPlacement); set before the first open, kept for the reopens.
+    void set_placement(LogPlacement where) { where_ = std::move(where); }
+    const LogPlacement& placement() const noexcept { return where_; }
     // Returns the sink id for `path` (adding it if new); "" and "off" give -1 (no logging).
     int add(const std::string& path);  // marks the sink wanted
     void unmark_all() noexcept;        // before a configuration's sinks are added again
     LogFile& sink(int id) noexcept { return *sinks_[static_cast<std::size_t>(id)]; }
     std::size_t size() const noexcept { return sinks_.size(); }
-    // Opens every sink; on failure returns false and names the path in `error`.
+    // Opens every wanted sink not open yet (a reload opens what it added; a file opened before stays
+    // as it is until a SIGUSR1 reopens it), each failure appended to `failed`.
+    void open_wanted(std::vector<Failure>& failed) noexcept;
+    // open_wanted for one error: false naming the first path that did not open in `error`.
     bool open_all(std::string& error) noexcept;
     void reopen_all() noexcept;
 
 private:
     std::vector<std::unique_ptr<LogFile>> sinks_;
+    LogPlacement where_;
 };
 
 // What one access log line needs; every view is borrowed for the duration of the call.

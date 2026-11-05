@@ -11,7 +11,7 @@ pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
 dpkg -i "$deb" > /tmp/dpkg.log 2>&1; check "dpkg -i succeeds" "0" "$?"
 check "service account and groups" "agensio agensio agensio-admin" "$(id -un agensio) $(id -gn agensio) $(getent group agensio-admin | cut -d: -f1)"
-check "directories with owners" "root:agensio 750 | agensio:agensio 750 | agensio:agensio 750 | agensio:agensio 751" "$(stat -c '%U:%G %a' /etc/agensio) | $(stat -c '%U:%G %a' /etc/agensio/sites.d) | $(stat -c '%U:%G %a' /var/log/agensio) | $(stat -c '%U:%G %a' /var/lib/agensio)"
+check "directories with owners (the log directory root's, its sites/ the server's: 8c)" "root:agensio 750 | agensio:agensio 750 | root:agensio 750 | agensio:agensio 750 | agensio:agensio 751" "$(stat -c '%U:%G %a' /etc/agensio) | $(stat -c '%U:%G %a' /etc/agensio/sites.d) | $(stat -c '%U:%G %a' /var/log/agensio) | $(stat -c '%U:%G %a' /var/log/agensio/sites) | $(stat -c '%U:%G %a' /var/lib/agensio)"
 check "main config root:agensio 0640, /var/www/html has content (placeholder or existing)" "root:agensio 640 yes" "$(stat -c '%U:%G %a' /etc/agensio/agensio.toml) $([ -n "$(ls -A /var/www/html)" ] && echo yes)"
 cd /   # the default search must land on /etc/agensio/agensio.toml, not a file in the repository
 check "agensio -t finds and accepts the packaged configuration" "yes" "$(agensio -t 2>&1 | grep -q '/etc/agensio/agensio.toml is OK' && echo yes)"

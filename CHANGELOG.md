@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.1.0-alpha.129
+
+- **Security: where root opens the logs** (`docs/configuration.md` 8c, `docs/security-control-plane.md`
+  row 59; found 2026-11-05 while testing `access_log_keep_days`). The start opened every site's
+  `access_log` as root, following links, kept the descriptor across the privilege drop and gave a user
+  site's log its group by path, from site files the server's account writes (`sites.d` is its, and so was
+  `/var/log/agensio`): a compromised server could name `/etc/passwd`, or plant a link in the log
+  directory, and have the next restart hand it root's open descriptor or the file itself. Now:
+  - a site file is trusted by its ownership, never by the managed marker: under `server.user`, a regular
+    file of the main configuration's owner, writable by nobody else, names any path, as nginx's and
+    Apache's root-owned configuration does; any other site file (the managed ones, anything the server's
+    account put under `sites.d`, a group-writable file) names only `<log directory>/sites/<name>.log`,
+    `[log] access` or `"off"`, and is set aside otherwise (12c). `access_log` is no longer a field of
+    `site_create` and `site_update`; a managed site with its own account gets `sites/<domain>.log`, and a
+    `site_update` writes that path back over an older request's. Without `server.user` there is no
+    boundary and every file is the owner's word;
+  - below the log directory every log is opened one component at a time without following a link; the
+    file must be a regular one with one name, owned by root or the server's account; only `sites/` is
+    made, and made the server's (a `sites/` the start made as root before stayed root's, so every managed
+    site's log after it failed to be created). A link, a FIFO, a hard link, a directory agensio does not
+    make: refused by name, that site set aside, the rest served; a link at or above the log directory
+    (another disk) is followed. A log a root-written file names elsewhere is opened as named, its
+    directory root's to own;
+  - every log opened as root is handed over on its descriptor (`fchown`), never by path: the server's
+    own files `agensio:agensio 0640`, a user site's `agensio:<site group>` when every site writing the
+    file is that account's, and a site without a user `agensio:agensio` (before, its log stayed root's
+    and every reload after the start was refused with `cannot open log file ...: Permission denied`,
+    the cookbook's "An access log per site" recipe among them). A reload opens what it added and leaves
+    an open file alone; `SIGUSR1` reopens every file as before;
+  - the package makes `/var/log/agensio` `root:agensio 0750` and `/var/log/agensio/sites`
+    `agensio:agensio 0750` (Debian's nginx layout since CVE-2016-1247: the server's account can replace
+    nothing root or logrotate opens in the log directory); the shipped logrotate entries rotate
+    `/var/log/agensio/*.log` and `sites/*.log`, and a per-site directory `sites/<domain>/` is no longer
+    among them (a hand-written site's log goes to `sites/<domain>.log`, or anywhere root owns with an
+    entry of its own). An upgrade applies the owners in its postinst.
+
+  No request path is touched (the start, the reload and the rotation), so no A/B. Tests: unit
+  `test_log_placement`, `tests/isolation.sh`, `tests/provision.sh` as root, `tests/package.sh`.
+
 ## 0.1.0-alpha.128 (2026-11-05)
 
 - **Fewer records of a site: `access_log_exclude_paths` and `access_log_keep_days`** (grabloop.app's

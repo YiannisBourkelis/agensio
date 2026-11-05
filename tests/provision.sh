@@ -18,7 +18,11 @@ check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "
 cleanup() { [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; for f in $T/fpm.pid $T/fpm99.pid; do [ -f $f ] && kill "$(cat $f)" 2>/dev/null; done; for u in t9 t8 t7 t6 t5; do userdel $u 2>/dev/null; done; rm -rf "$T"; }
 trap cleanup EXIT
 id -u agensio >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin agensio
-mkdir -p $T/sites.d $T/logs $T/run $T/state $T/www $POOLD $T/pool99.d; chown agensio:agensio $T/sites.d $T/logs $T/state; chmod 751 $T/state
+mkdir -p $T/sites.d $T/logs $T/run $T/state $T/www $POOLD $T/pool99.d; chown agensio:agensio $T/sites.d $T/state; chmod 751 $T/state
+echo served > $T/www/served.html   # a file the hand-written sites below answer with (their root has no index)
+# The log directory as packaged (docs/configuration.md 8c): root's with the server's group, so the server's
+# account can replace nothing root or logrotate opens there; its sites/ the start makes, the server's.
+chown root:agensio $T/logs; chmod 750 $T/logs
 # Each version's php-fpm runs before any site has a pool there, as a distribution's does with its www
 # pool: the helper tests a version's configuration and reloads its master itself (SIGUSR2 through the pid
 # file php-fpm.conf names: these masters have no systemd unit; docs/design-php-versions.md 6.1).
@@ -34,21 +38,13 @@ fpm_start() {  # CONF PIDFILE: a master, started and listening (its notes in CON
 fpm_restart() { local p; p=$(cat "$2" 2>/dev/null); [ -n "$p" ] && kill "$p" 2>/dev/null; for _ in $(seq 1 50); do [ -n "$p" ] && kill -0 "$p" 2>/dev/null || break; sleep 0.1; done; rm -f "$2"; fpm_start "$1" "$2"; }
 fpm_start $T/fpm.conf $T/fpm.pid
 fpm_start $T/fpm99.conf $T/fpm99.pid
-# access_log_keep_days (docs/configuration.md 8b, security row 58): a site's log in a directory root made
-# (as the start does for a log configured before it; logrotate's sites/*/*.log), which the server's account
-# cannot write, so only the helper can delete there; the rotated files stay the server account's, as
-# logrotate keeps their owner. One rotation past the site's days, one within. sites/ itself is the
-# server's, as on a host whose first site log came from site-create.
-mkdir -p $T/logs/sites/keep.test; chown agensio:agensio $T/logs/sites
-for d in 5 1; do
-  printf 'keep.test:18199 203.0.113.7 - - [%s] "GET / HTTP/1.1" 200 5 "-" "planted"\n' \
-    "$(python3 -c "import time; print(time.strftime('%d/%b/%Y:%H:%M:%S %z', time.localtime(time.time() - $d * 86400)))")" > $T/logs/sites/keep.test/access.log.$((d == 5 ? 2 : 1))
-done
-# The current file too, the server's as logrotate's create and a hand-over leave it: one the start made
-# as root would refuse every later reload (a site without a user gets no hand-over; reported 2026-11-05).
-: > $T/logs/sites/keep.test/access.log
-chown agensio:agensio $T/logs/sites/keep.test/access.log*; chmod 640 $T/logs/sites/keep.test/access.log*
-printf '[[site]]\nserver_name = ["keep.test"]\nlisten = ["127.0.0.1:18199"]\nroot = "%s/www"\naccess_log = "%s/logs/sites/keep.test/access.log"\naccess_log_keep_days = 3\n' "$T" "$T" > $T/sites.d/keep.test.toml
+# access_log_keep_days (docs/configuration.md 8b, security row 58): a hand-written site without a user,
+# its log in sites/ (which the start makes, as the server's) created by the start as root and handed over
+# on its descriptor (8c: before 0.1.0-alpha.129 it stayed root's and every reload after the start was
+# refused); its rotations planted after the start as logrotate leaves them, the server account's; one
+# past the site's days, one within. The helper deletes as root (row 58), which the server's own account
+# could do here too.
+printf '[[site]]\nserver_name = ["keep.test"]\nlisten = ["127.0.0.1:18199"]\nroot = "%s/www"\naccess_log = "%s/logs/sites/keep.test.log"\naccess_log_keep_days = 3\n' "$T" "$T" > $T/sites.d/keep.test.toml
 cat > $T/agensio.toml <<CFG
 include = ["sites.d/*.toml"]
 [server]
@@ -81,12 +77,20 @@ listen = ["127.0.0.1:18197"]
 root = "$T/www"
 CFG
 AGENSIO_LOG_EXPIRE_SECONDS=3 "$BIN" -c $T/agensio.toml > $T/server.out 2>&1 & for _ in $(seq 1 50); do [ -S $T/run/control.sock ] && break; sleep 0.1; done; sleep 0.2
+for d in 5 1; do  # keep.test's rotations, before the first expiry
+  printf 'keep.test:18199 203.0.113.7 - - [%s] "GET / HTTP/1.1" 200 5 "-" "planted"\n' \
+    "$(python3 -c "import time; print(time.strftime('%d/%b/%Y:%H:%M:%S %z', time.localtime(time.time() - $d * 86400)))")" > $T/logs/sites/keep.test.log.$((d == 5 ? 2 : 1))
+done
+chown agensio:agensio $T/logs/sites/keep.test.log.*; chmod 640 $T/logs/sites/keep.test.log.*
 source "$(dirname "$0")/approve-lib.sh"; gated_setup "$BIN" $T/agensio.toml $T/run/control.sock   # a gated command is approved with a fresh approver's code
 check "the helper started before the privilege drop, the server runs as agensio" "yes agensio" "$(grep -q 'provisioning helper started' $T/logs/error.log && echo yes) $(ps -o user= -p $(cat $T/agensio.pid) | tr -d ' ')"
+check "the packaged layout (8c): the log directory root's; sites/ made by the start as the server's, 0750; the server's three files and the no-user site's log handed over on their descriptors, agensio:agensio 0640" \
+  "root agensio 750 | agensio agensio 750 | agensio agensio 640 agensio agensio 640 agensio agensio 640 | agensio agensio 640" \
+  "$(stat -c '%U %G %a' $T/logs) | $(stat -c '%U %G %a' $T/logs/sites) | $(stat -c '%U %G %a' $T/logs/access.log) $(stat -c '%U %G %a' $T/logs/error.log) $(stat -c '%U %G %a' $T/logs/audit.log) | $(stat -c '%U %G %a' $T/logs/sites/keep.test.log)"
 HP=$(pgrep -P $(cat $T/agensio.pid) | head -1)
 sleep 3.5  # the first log expiry (AGENSIO_LOG_EXPIRE_SECONDS=3)
-check "access_log_keep_days: the root helper deletes the rotated file past the site's days from a root directory below sites/, which the server's account cannot write; the newer one stays" "gone kept root 755 1" \
-  "$([ -e $T/logs/sites/keep.test/access.log.2 ] && echo there || echo gone) $(grep -q planted $T/logs/sites/keep.test/access.log.1 && echo kept) $(stat -c '%U %a' $T/logs/sites/keep.test) $(grep -c 'access_log_keep_days: 1 rotated access log file(s) past their site.s days removed: .*/keep.test/access.log.2$' $T/logs/error.log)"
+check "access_log_keep_days: the root helper deletes the rotated file past the site's days; the newer one stays" "gone kept 1" \
+  "$([ -e $T/logs/sites/keep.test.log.2 ] && echo there || echo gone) $(grep -q planted $T/logs/sites/keep.test.log.1 && echo kept) $(grep -c 'access_log_keep_days: 1 rotated access log file(s) past their site.s days removed: .*/keep.test.log.2$' $T/logs/error.log)"
 check "the helper is a root child of the server holding one socket and no listener" "root 1 devnull" "$(ps -o user= -p $HP | tr -d ' ') $(ls -l /proc/$HP/fd | grep -c 'socket:') $(readlink /proc/$HP/fd/0 | grep -q null && echo devnull)"
 
 # One call: account, layout, site, log, pool.
@@ -94,6 +98,8 @@ out=$(gated "$BIN" ctl site-create --domain t9.test --app php --root "$T/www/t9.
 check "site-create succeeds in one call with no command handed back" "0 yes no" "$rc $(echo "$out" | grep -q '"ok":true' && echo yes) $(echo "$out" | grep -q 'useradd' && echo yes || echo no)"
 check "done lists the account, the layout, the log and the pool" "yes yes yes yes" "$(echo "$out" | grep -q 'missing_account: account_add t9' && echo yes) $(echo "$out" | grep -q 'root_missing: site_layout' && echo yes) $(echo "$out" | grep -q 'readable by t9' && echo yes) $(echo "$out" | grep -q 'php-fpm pool' && echo yes)"
 check "the log hand-over under done was verified on disk, and the server logged no 'cannot chown' for it" "agensio t9 640 0" "$(stat -c '%U %G %a' $T/logs/sites/t9.test.log) $(grep -c 'cannot chown .*t9.test.log' $T/logs/error.log)"
+check "the reload that brought t9 up succeeded with keep.test's log, which the start made as root, handed over (8c); keep.test still answers" "0 200" \
+  "$(grep -c 'cannot open log file' $T/logs/error.log) $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: keep.test' http://127.0.0.1:18199/served.html)"
 check "the account is a site account: system, nologin, home in the state directory" "/usr/sbin/nologin $T/state/t9" "$(getent passwd t9 | cut -d: -f7) $(getent passwd t9 | cut -d: -f6)"
 check "the layout is t9:agensio 2750 from the domain directory down" "t9 agensio 2750 | t9 agensio 2750" "$(stat -c '%U %G %a' $T/www/t9.test) | $(stat -c '%U %G %a' $T/www/t9.test/web)"
 check "the pool file was written by the helper with the server's group, one per site, tested by its php-fpm" "yes 1" "$(grep -q '^listen.group = agensio' $(P9) && echo yes) $(ls $POOLD | grep -c '^agensio-t9-[0-9a-f]\{8\}\.conf$')"
@@ -289,10 +295,33 @@ check "requirements: --ignore-requirements installs it, facts.php naming the dec
 # changes nothing.
 srv_stop() { local p; p=$(cat $T/agensio.pid); kill -TERM $p; for _ in $(seq 1 100); do kill -0 $p 2>/dev/null || break; sleep 0.1; done; }
 srv_start() { "$BIN" -c $T/agensio.toml > $T/server.out 2>&1 & for _ in $(seq 1 100); do [ -S $CS ] && break; sleep 0.1; done; }
+# Where a site file the server's account writes may put its log (docs/configuration.md 8c, security row
+# 59): sites.d is that account's, so a compromised server writes what it likes there, and the start opens
+# every log as root. A file written as agensio naming a log outside sites/ is set aside at the reload and
+# nothing is created; one naming sites/<name>.log is served, its log the server's own; a link that account
+# planted in sites/ (its directory) is never followed, at a reload nor at a restart as root.
+as_agensio() { su -s /bin/sh agensio -c "$1"; }
+as_agensio "printf '[[site]]\nserver_name = [\"evil.test\"]\nlisten = [\"127.0.0.1:18196\"]\nroot = \"$T/www\"\naccess_log = \"$T/evil.log\"\n' > $T/sites.d/evil.test.toml"
+as_agensio "printf '[[site]]\nserver_name = [\"ok.test\"]\nlisten = [\"127.0.0.1:18196\"]\nroot = \"$T/www\"\naccess_log = \"$T/logs/sites/ok.test.log\"\n' > $T/sites.d/ok.test.toml"
+as_agensio "ln -s /etc/passwd $T/logs/sites/link.test.log"
+PASSWD_BEFORE=$(stat -c '%U %G %a %s' /etc/passwd)
+printf '[[site]]\nserver_name = ["link.test"]\nlisten = ["127.0.0.1:18195"]\nroot = "%s/www"\naccess_log = "%s/logs/sites/link.test.log"\n' "$T" "$T" > $T/sites.d/link.test.toml   # root's file: any path, but never through a link
+gated "$BIN" ctl reload --yes --reason logs --socket $CS > $T/logs-reload.out 2>&1
+h=$(gated "$BIN" ctl health --socket $CS)
+check "a site file written as the server's account naming a log outside sites/: set aside with the rule, nothing created" "yes no" \
+  "$(echo "$h" | python3 -c 'import json,sys; f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="site_file_held_back" and "evil.test.toml" in x["message"] and "names its access log in" in x["message"]]; print("yes" if f else "no")') $([ -e $T/evil.log ] && echo yes || echo no)"
+check "one naming sites/<name>.log: served, its log created by the reload as the server's own, 0640" "200 agensio agensio 640" \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: ok.test' http://127.0.0.1:18196/served.html) $(stat -c '%U %G %a' $T/logs/sites/ok.test.log)"
+check "a link the server's account planted in sites/ as a site's log: refused by name at the reload, the site set aside, /etc/passwd untouched" "yes same" \
+  "$(echo "$h" | python3 -c 'import json,sys; f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="site_file_held_back" and "link.test.toml" in x["message"] and "symbolic link" in x["message"]]; print("yes" if f else "no")') $([ "$(stat -c '%U %G %a %s' /etc/passwd)" = "$PASSWD_BEFORE" ] && echo same || echo changed)"
+rm -f $T/sites.d/evil.test.toml
 srv_stop
 rm -f $POOLD/agensio-t9-*.conf $T/run/agensio-t9-*-$PHPV.sock; fpm_restart $T/fpm.conf $T/fpm.pid
 check "start: before, t9's pool is gone from php-fpm" "no" "$([ -S $T/run/agensio-t9-*-$PHPV.sock ] && echo yes || echo no)"
 srv_start
+check "at a restart, as root: the planted link is refused again by name, /etc/passwd untouched, the other sites up; the start made ok.test's log no other account's" "yes same 200 agensio agensio 640" \
+  "$(grep -q 'link.test.toml set aside.*symbolic link' $T/logs/error.log && echo yes) $([ "$(stat -c '%U %G %a %s' /etc/passwd)" = "$PASSWD_BEFORE" ] && echo same || echo changed) $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: ok.test' http://127.0.0.1:18196/served.html) $(stat -c '%U %G %a' $T/logs/sites/ok.test.log)"
+rm -f $T/sites.d/link.test.toml $T/logs/sites/link.test.log
 check "start: the pool is written and php-fpm reloaded before the listeners accept; the first request is answered" "200 1 yes" \
   "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: t9.test' http://127.0.0.1:18198/who.php) $(ls $POOLD | grep -c '^agensio-t9-') $(grep -q 'php-fpm pools at start: .*wrote .*agensio-t9-.*; reloaded PHP' $T/logs/error.log && echo yes)"  # one line: the whole output on the entry's line
 srv_stop; srv_start

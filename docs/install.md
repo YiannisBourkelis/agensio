@@ -42,8 +42,8 @@ are separate accounts (section 3).
 | main configuration | `/etc/agensio/agensio.toml` | root:agensio 0640 | today (search path) |
 | one file per site | `/etc/agensio/sites.d/<domain>.toml`, pulled in by `include = ["sites.d/*.toml"]`; `agensio ctl site-create` writes here | agensio:agensio 0750 dir, files 0640 | today |
 | TLS material you manage yourself | `/etc/agensio/ssl/<domain>/` (`fullchain.pem`, `key.pem` 0600) | root 0700 | convention |
-| server logs | `/var/log/agensio/access.log`, `/var/log/agensio/error.log` | agensio 0750 dir, files 0640 | planned default; today `logs/` next to the configuration file |
-| per-site logs | `/var/log/agensio/sites/<domain>/access.log` or the site's own `log/` (section 3) | agensio:<site group> 0640 | today via `access_log`; ownership set at start |
+| server logs | `/var/log/agensio/access.log`, `/var/log/agensio/error.log` | root:agensio 0750 dir (the server's account replaces nothing root or logrotate opens there), files agensio 0640 | today (package); `logs/` next to the configuration file without it |
+| per-site logs | `/var/log/agensio/sites/<domain>.log`, the one path a managed site file may name; a site file root writes may name any path, whose directory root owns (configuration guide 8c) | `sites/` agensio:agensio 0750, files agensio:<site group> 0640 | today (`site-create`; handed over at start on the open descriptor) |
 | pid file | `/run/agensio.pid` | root 0644 | today |
 | php-fpm pool sockets, one per site | `/run/php/agensio-<user>-<8 hex>-<version>.sock` (Debian, Ubuntu, Alpine), `/run/php-fpm/...` (RHEL, Fedora) | <user>:agensio 0660 | today (`server.pools_run`) |
 | generated php-fpm pool files, one per site | the pool directory of the site's PHP version: `/etc/php/<version>/fpm/pool.d/agensio-<user>-<8 hex>.conf` (Debian), `/etc/opt/remi/php<XY>/php-fpm.d/` (Remi) | root 0644 | today (`agensio pools`; `[php.runtimes]` for a version not found) |

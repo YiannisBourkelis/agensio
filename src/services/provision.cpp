@@ -116,7 +116,8 @@ std::string validate(const json::Value& req, const Config& cfg) {
     if (op == "log_own") {
         const std::string file(req.get("file")), group(req.get("group"));
         if (!control::safe_path(file, why)) return "log_own: file " + why;
-        if (!under(file, logs_root(cfg)) || !file.ends_with(".log")) return "log_own: " + file + " is not a log under " + logs_root(cfg);
+        // The one log site-create gives a site (docs/configuration.md 8c), never a path elsewhere.
+        if (!site_log_name(file, cfg)) return "log_own: " + file + " is not " + logs_root(cfg) + "/sites/<name>.log";
         if (!control::valid_account(group, why)) return "log_own: group " + why;
         return "";
     }
@@ -2167,17 +2168,19 @@ void close_all_but(int keep) {
                     else
                         reply.set("ok", true);
                 } else if (op == "log_own") {
+                    // The site's log, created by the reload as the server's account in sites/ (its own
+                    // directory), given the site's group: reached as the server opens its logs (services/
+                    // log.hpp open_below_log_dir: no link followed, a regular file with one name, the
+                    // server account's or root's), then fchown on the descriptor, never by path.
                     const std::string file(req.get("file")), group(req.get("group"));
                     const struct group* gr = ::getgrnam(group.c_str());
-                    const int f = gr ? ::open(file.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+                    std::string why;
+                    const int f = gr ? open_below_log_dir(LogPlacement{logs_root(cfg), static_cast<long>(server_uid), -1}, file, O_RDONLY, 0, why) : -1;
                     if (!gr) reply.set("ok", false).set("error", "group " + group + " does not exist");
-                    else if (f < 0) reply.set("ok", false).set("error", file + ": " + std::strerror(errno));
+                    else if (f < 0) reply.set("ok", false).set("error", why);
                     else {
-                        struct stat st {};
-                        if (::fstat(f, &st) == 0 && S_ISREG(st.st_mode) && ::fchown(f, server_uid, gr->gr_gid) == 0 && ::fchmod(f, 0640) == 0)
-                            reply.set("ok", true);
-                        else
-                            reply.set("ok", false).set("error", file + ": " + std::strerror(errno));
+                        if (::fchown(f, server_uid, gr->gr_gid) == 0 && ::fchmod(f, 0640) == 0) reply.set("ok", true);
+                        else reply.set("ok", false).set("error", file + ": " + std::strerror(errno));
                         ::close(f);
                     }
                 } else if (op == "php_runtimes") {

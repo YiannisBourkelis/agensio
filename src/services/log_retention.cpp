@@ -68,31 +68,6 @@ std::time_t oldest_line(std::string_view text) {
 #ifndef _WIN32
 namespace {
 
-// The directory `rel` below `root`: root resolved as configured (a link above the log directory is the
-// system's layout), every component below it opened O_NOFOLLOW; -1 with errno.
-int open_below_root(const std::string& root, const std::string& rel) {
-    std::error_code ec;
-    const fs::path real = fs::canonical(root, ec);
-    if (ec) {
-        errno = ec.value();
-        return -1;
-    }
-    int cur = ::open(real.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    std::size_t pos = 0;
-    while (cur >= 0 && pos < rel.size()) {
-        const std::size_t slash = rel.find('/', pos);
-        const std::string part = rel.substr(pos, slash == std::string::npos ? std::string::npos : slash - pos);
-        pos = slash == std::string::npos ? rel.size() : slash + 1;
-        if (part.empty() || part == ".") continue;
-        const int next = part == ".." ? -1 : ::openat(cur, part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        const int e = part == ".." ? EINVAL : errno;
-        ::close(cur);
-        errno = e;
-        cur = next;
-    }
-    return cur;
-}
-
 // The start of an open rotated file, inflated for a .gz one; "" when it does not read.
 std::string head_of(int fd, bool gz) {
     std::string out(kHead, '\0');
@@ -136,15 +111,13 @@ json::Value expire(const std::vector<Keep>& keeps, std::time_t now) {
         auto fail = [&](const std::string& what) {
             failed.push(json::Value::object().set("site", k.site).set("log", k.log).set("days", k.days).set("error", what + ": " + std::strerror(errno)));
         };
-        const fs::path rel = fs::path(dir).lexically_relative(k.root);
-        if (rel.empty() || rel.native().starts_with("..")) {
-            errno = EINVAL;
-            fail(dir + " is not below " + k.root);
-            continue;
-        }
-        const int d = open_below_root(k.root, rel.string());
+        // The log's directory reached from the log directory as the server opens its logs (services/log.hpp
+        // open_below_log_dir): one component at a time, no link followed, so a link the server's account
+        // planted in sites/ never sends root's deletes elsewhere.
+        std::string why;
+        const int d = open_below_log_dir(LogPlacement{k.root, -1, -1}, dir, O_RDONLY | O_DIRECTORY, 0, why);
         if (d < 0) {
-            if (errno != ENOENT) fail(dir + " (reached from " + k.root + " without following a link)");
+            if (errno != ENOENT) fail(why);
             continue;
         }
         std::vector<std::string> names;

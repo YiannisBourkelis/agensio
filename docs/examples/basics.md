@@ -992,7 +992,7 @@ level = "warn"
 server_name = ["example.com", "www.example.com"]
 root = "/var/www/example.com/web"
 tls = "auto"
-access_log = "/var/log/agensio/sites/example.com/access.log"   # the port-80 redirects in the same file
+access_log = "/var/log/agensio/sites/example.com.log"   # the port-80 redirects in the same file
 ```
 
 **What it does.** Each site writes the file its `access_log` names, or the server-wide one;
@@ -1006,16 +1006,19 @@ so a shared file tells sites apart too, and a scan by bare address shows as `203
 format is one setting for every access log, and the trade-off of JSON is fail2ban: its filters
 read the two combined forms, so with JSON no jail can count login attempts (`agensio ctl health`
 says `fail2ban_log_format`). A site with its own
-`user` gets its log made `agensio:<site group>` `0640` at start, so the account can read it.
-The package's logrotate rule rotates `/var/log/agensio/*.log` and the sites' own logs,
-`/var/log/agensio/sites/*.log` (where `site-create` puts them) and `/var/log/agensio/sites/*/*.log`,
-keeping each site log's group so the account goes on reading it, and sends `SIGUSR1`, which reopens
-every file; a log elsewhere needs a rule of its own with the same `postrotate`.
+`user` gets its log made `agensio:<site group>` `0640` at start, so the account can read it; a site
+without one `agensio:agensio`. The package's logrotate rule rotates `/var/log/agensio/*.log` and the
+sites' own logs, `/var/log/agensio/sites/*.log` (where `site-create` puts them), keeping each site
+log's group so the account goes on reading it, and sends `SIGUSR1`, which reopens every file; a log
+elsewhere needs a rule of its own with the same `postrotate`. Where a log may be: `sites/<name>.log`
+of the log directory for every site file; any path for a file you write as root (a regular file of the
+main configuration's owner, `0644`), whose directory is then yours to keep root's; a managed file
+(`site-create`'s) names nothing else ([configuration guide 8c](../configuration.md#8c-where-a-log-may-be)).
 
 **Check it.**
 
 ```sh
-tail -f /var/log/agensio/sites/example.com/access.log
+tail -f /var/log/agensio/sites/example.com.log
 agensio ctl logs --site example.com --status all --since 10m     # read back, by site
 agensio ctl logs-reopen --yes --reason "after moving a log"      # what SIGUSR1 does
 ```

@@ -15,10 +15,12 @@
     endscript
 }
 
-# Sites' own logs: <domain>.log as site-create writes them, <domain>/access.log as a hand-written
-# site may. Each is agensio's with the site's group (0640), which the new file keeps, so the site's
-# account goes on reading it after the rotation.
-/var/log/agensio/sites/*.log /var/log/agensio/sites/*/*.log {
+# Sites' own logs: <domain>.log as site-create writes them, the one place a site file the server's
+# account writes may put a log (docs/configuration.md 8c). Each is agensio's with the site's group
+# (0640), which the new file keeps, so the site's account goes on reading it after the rotation.
+# sites/ is the server's account's and /var/log/agensio root's, so that account cannot replace
+# sites/ while logrotate works in it; a log root named elsewhere needs an entry of its own.
+/var/log/agensio/sites/*.log {
     daily
     rotate 14
     nodateext

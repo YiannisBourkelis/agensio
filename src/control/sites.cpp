@@ -769,7 +769,7 @@ const std::vector<std::string_view>& site_request_fields() {
     static const std::vector<std::string_view> fields = {
         "domain", "aliases", "canonical", "https", "redirect_http", "hsts", "encoded_slashes", "app", "root", "served_dir", "env_file", "upstream", "project", "entry", "user",
         "no_user", "group", "php_socket", "php_children", "php_version", "settings", "rules", "redirects", "response_headers",
-        "response_headers_baseline", "response_headers_offer_declined", "response_compression", "login_paths", "public_archives", "mime_types", "trusted_proxies", "access_log",
+        "response_headers_baseline", "response_headers_offer_declined", "response_compression", "login_paths", "public_archives", "mime_types", "trusted_proxies",
         "access_log_exclude_paths", "access_log_keep_days", "listen_plain", "listen_tls", "confirm", "reason", "dry_run", "cut_requests", "ignore_requirements"};
     return fields;
 }
@@ -802,6 +802,11 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     for (const auto& [key, value] : body.members()) {
         const auto& fields = site_request_fields();
         if (std::find(fields.begin(), fields.end(), key) != fields.end()) continue;
+        if (key == "access_log") {  // a field until 0.1.0-alpha.129 (docs/configuration.md 8c)
+            error = "access_log is not a field: a site with its own account logs to <log directory>/sites/<domain>.log, which site_create gives it; "
+                    "a log elsewhere is root's to name in a hand-written site file (docs/configuration.md 8c)";
+            return needs;
+        }
         const std::string nearest = nearest_name(key, fields);
         error = "unknown field '" + key + "'" + (nearest.empty() ? std::string() : " (did you mean '" + nearest + "'?)") + "; the fields are";
         for (std::size_t i = 0; i < fields.size(); ++i) error += (i ? ", " : " ") + std::string(fields[i]);
@@ -1247,7 +1252,6 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             spec.trusted_proxies = list;
         }
     }
-    if (has_key(body, "access_log")) spec.access_log = body.get("access_log");
     // What the site keeps out of its logs (0.1.0-alpha.128, docs/configuration.md 8b): given whole, each
     // a plain path from / (never / itself, no query), at most 16, [] or null clears them; the overlap
     // with the paths the fail2ban jails count is the load's (check_log_exclusions), which knows the rules.
@@ -1394,12 +1398,11 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     }
     const bool user_decided = spec.user_decided || !spec.user.empty();
     // A site with its own user gets its own access log next to the server's: sites of
-    // different users never share a log (rule 5), and the file is made theirs to read.
-    if (!spec.user.empty() && spec.access_log.empty()) {
-        const fs::path base = (cfg.log.access.empty() || cfg.log.access == "off") ? fs::path("/var/log/agensio")
-                                                                                     : fs::path(cfg.log.access).parent_path();
-        spec.access_log = (base / "sites" / (spec.domain + ".log")).string();
-    }
+    // different users never share a log (rule 5), and the file is made theirs to read. Always
+    // that one file (docs/configuration.md 8c): the managed file is the server account's, and the
+    // loader lets such a file name no other log; a path a request chose before 0.1.0-alpha.129 is
+    // replaced by it here, so a site_update repairs a file set aside for it.
+    spec.access_log = spec.user.empty() ? std::string() : (fs::path(log_directory(cfg)) / "sites" / (spec.domain + ".log")).string();
 
     if (spec.https != "auto" && spec.https != "none" && spec.https != "manual") {
         Decision d{"https", "Should the site be served over HTTPS?", "", {"auto", "none", "{\"cert\": ..., \"key\": ...}"}};

@@ -300,8 +300,17 @@ private:
     // Every worker's refusals merged, for status and health.
     control::RefusalReport refusal_report() const;
     void open_logs();
-    void assign_log_sinks(Config& cfg);  // site access logs into the registry (opened by open_all)
-    void own_site_logs(const Config& cfg);  // per-site logs: agensio:<site group> 0640, when we can chown
+    void assign_log_sinks(Config& cfg);  // site access logs into the registry (opened by isolate_logs)
+    // Every log the configuration names opened, the sinks of the sites that stay assigned (docs/
+    // configuration.md 8c): a site whose access log cannot be opened (a link below the log directory, a
+    // file this account cannot create in root's directory on a reload) is set aside with its file, as a
+    // file that does not load is (design section 26); one of the server's own, or a main-file site's,
+    // refuses the start or the reload: false with `error`.
+    bool isolate_logs(Config& cfg, const Config* running, std::string& error);
+    // Every open log handed over on its descriptor, never by path: the server's own files agensio:agensio
+    // 0640, a site's agensio:<site group> when every site writing it is that account's, else the server's.
+    // Needs root (the start); after the drop a site's group is the helper's to give (site_create's log_own).
+    void own_logs(const Config& cfg);
     void drop_privileges();   // server.user: after binding and opening logs
     void arm_flush(Worker& w);
     void write_pid_file();

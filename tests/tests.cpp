@@ -13328,12 +13328,14 @@ static void test_packaged_logrotate() {
                 if (::fnmatch(pat.c_str(), path, FNM_PATHNAME) == 0) return &st;
         return nullptr;
     };
-    const Stanza* managed = stanza_for("/var/log/agensio/sites/example.com.log");       // site-create's
-    const Stanza* written = stanza_for("/var/log/agensio/sites/example.com/access.log");  // the cookbook's
+    const Stanza* managed = stanza_for("/var/log/agensio/sites/example.com.log");  // site-create's, and the cookbook's
     const Stanza* own = stanza_for("/var/log/agensio/access.log");
     CHECK(managed && managed->create == "create 0640");  // the owner and group kept: agensio, the site's group
-    CHECK(written && written->create == "create 0640");
     CHECK(own && own->create == "create 0640 agensio agensio");
+    // A per-site directory below sites/ is nobody's any more (docs/configuration.md 8c: a site file the
+    // server's account writes names sites/<name>.log alone, and a hand-written site's log in such a
+    // directory needs an entry of its own): the shipped rotation stays inside the log directory root owns.
+    CHECK(!stanza_for("/var/log/agensio/sites/example.com/access.log"));
     // Numbered rotations on every system (FILE.1, FILE.2.gz), the names the log queries read: RHEL's,
     // Fedora's and Rocky's /etc/logrotate.conf turn dateext on for everything, which would name them
     // FILE-20261021 and leave every rotated line out of logs_query and health.
@@ -14594,6 +14596,127 @@ static void test_strict_hosts() {
 // access_log_exclude_paths and access_log_keep_days (0.1.0-alpha.128, docs/configuration.md 8b): the
 // matcher on the cleaned path, the loader's checks against what the fail2ban jails count, the rotated
 // files deleted, the managed fields, the approval gate and health.
+// Where root opens the logs (0.1.0-alpha.129, docs/configuration.md 8c, security row 59): below the log
+// directory no link is followed, only sites/ is made, a log is a regular file with one name; elsewhere a
+// path is opened as named. And the loader's rule: under server.user, a site file that is not the main
+// configuration owner's word (here: writable by its group) names its log in sites/ alone.
+static void test_log_placement() {
+    namespace fs = std::filesystem;
+    constexpr auto npos = std::string::npos;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-logplace-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir / "elsewhere");
+    const fs::path logs = dir / "logs";  // the log directory, made by the first open
+    const LogPlacement where{logs.string(), -1, -1};
+    auto failure_of = [&](const std::string& path, const LogPlacement& at = LogPlacement{}) {  // what one open says, "" when it opens
+        LogRegistry r;
+        r.set_placement(at.directory.empty() ? where : at);
+        r.add(path);
+        std::vector<LogRegistry::Failure> failed;
+        r.open_wanted(failed);
+        return failed.empty() ? std::string() : failed.front().why;
+    };
+    {
+        LogRegistry reg;
+        reg.set_placement(where);
+        const int a = reg.add((logs / "sites" / "a.test.log").string());
+        reg.add((logs / "error.log").string());
+        reg.add((dir / "elsewhere" / "deep" / "o.log").string());  // not below the log directory: as named, its directory made
+        std::string err;
+        CHECK(reg.open_all(err));
+        CHECK(fs::is_regular_file(logs / "sites" / "a.test.log") && fs::is_regular_file(logs / "error.log") && fs::is_regular_file(dir / "elsewhere" / "deep" / "o.log"));
+        CHECK((fs::status(logs / "sites").permissions() & fs::perms::all) == (fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec));
+        CHECK((fs::status(logs / "sites" / "a.test.log").permissions() & fs::perms::all) == (fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read));
+        // Handed over on the descriptor: already this account's; the owner read back from it. A reopen
+        // after a rotation goes through the walk again.
+        CHECK(reg.sink(a).own(::geteuid(), ::getegid()));
+        unsigned u = 0, g = 0;
+        CHECK(reg.sink(a).owner(u, g) && u == ::geteuid() && g == ::getegid());
+        fs::rename(logs / "sites" / "a.test.log", logs / "sites" / "a.test.log.1");
+        reg.reopen_all();
+        CHECK(fs::is_regular_file(logs / "sites" / "a.test.log"));
+        // open_wanted opens what is not open yet, nothing twice (a reload adds, SIGUSR1 reopens).
+        std::vector<LogRegistry::Failure> failed;
+        reg.open_wanted(failed);
+        CHECK(failed.empty());
+    }
+    // What is refused below the log directory, by name, and what stays untouched.
+    std::ofstream(dir / "elsewhere" / "victim") << "secret\n";
+    fs::create_symlink(dir / "elsewhere" / "victim", logs / "sites" / "link.test.log");
+    CHECK(failure_of((logs / "sites" / "link.test.log").string()).find("symbolic link") != npos);
+    fs::create_symlink(dir / "elsewhere", logs / "sites2");
+    CHECK(failure_of((logs / "sites2" / "b.log").string()).find("symbolic link") != npos && !fs::exists(dir / "elsewhere" / "b.log"));
+    CHECK(failure_of((logs / "sites" / "sub" / "c.log").string()).find("makes only sites/") != npos && !fs::exists(logs / "sites" / "sub"));
+    CHECK(failure_of((logs / "sites" / ".." / "x.log").string()).find("not a plain path") != npos && !fs::exists(logs / "x.log"));
+    CHECK(::mkfifo((logs / "sites" / "fifo.test.log").c_str(), 0600) == 0);
+    CHECK(failure_of((logs / "sites" / "fifo.test.log").string()).find("a FIFO or a device") != npos);  // and the open did not wait for a reader
+    std::ofstream(logs / "sites" / "two.test.log") << "";
+    fs::create_hard_link(logs / "sites" / "two.test.log", logs / "sites" / "other.test.log");
+    CHECK(failure_of((logs / "sites" / "two.test.log").string()).find("hard link") != npos);
+    CHECK(std::string(std::istreambuf_iterator<char>(std::ifstream(dir / "elsewhere" / "victim").rdbuf()), {}) == "secret\n");
+    // The log directory itself a link (on another disk): the system's layout, followed.
+    fs::create_symlink(logs, dir / "logs-link");
+    CHECK(failure_of((dir / "logs-link" / "sites" / "d.test.log").string(), LogPlacement{(dir / "logs-link").string(), -1, -1}).empty() &&
+          fs::is_regular_file(logs / "sites" / "d.test.log"));
+
+    // The loader (docs/configuration.md 8c): under server.user a site file writable by its group is not
+    // the owner's word and names its log in sites/ alone; the owner's file names any path; a name in
+    // sites/ is a plain one for everybody; [log] access and "off" are everybody's.
+    fs::create_directories(dir / "sites.d");
+    fs::create_directories(dir / "www");
+    auto write = [&](const fs::path& p, const std::string& text, fs::perms mode) {
+        std::ofstream(p) << text;
+        fs::permissions(p, mode);
+    };
+    const fs::perms rw_r = fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::others_read;  // 0644
+    const fs::perms rw_rw = rw_r | fs::perms::group_write;                                                                    // 0664
+    const fs::path main = dir / "agensio.toml";
+    auto head = [&](const std::string& user) {
+        return "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\n" + user + "[log]\naccess = \"" + (logs / "access.log").string() + "\"\n";
+    };
+    auto site = [&](const std::string& name, const std::string& log) {
+        return "[[site]]\nserver_name = [\"" + name + "\"]\nlisten = [\"127.0.0.1:18731\"]\nroot = \"" + (dir / "www").string() + "\"\naccess_log = \"" + log + "\"\n";
+    };
+    const std::string user_line = "user = \"agensio\"\n";
+    write(main, head(user_line), rw_r);
+    write(dir / "sites.d" / "a.toml", site("a.test", (dir / "elsewhere" / "a.log").string()), rw_r);            // the owner's: anywhere
+    write(dir / "sites.d" / "b.toml", site("b.test", (dir / "elsewhere" / "b.log").string()), rw_rw);           // group-writable: not the owner's word
+    write(dir / "sites.d" / "c.toml", site("c.test", (logs / "sites" / "c.test.log").string()), rw_rw);         // sites/<name>.log: anyone
+    write(dir / "sites.d" / "d.toml", site("d.test", (logs / "sites" / "sub" / "d.log").string()), rw_rw);      // below sites/: not
+    write(dir / "sites.d" / "e.toml", site("e.test", "off"), rw_rw);
+    write(dir / "sites.d" / "f.toml", site("f.test", (logs / "access.log").string()), rw_rw);                   // [log] access: anyone
+    write(dir / "sites.d" / "g.toml", site("g.test", (logs / "sites" / "bad name.log").string()), rw_r);        // a plain name, whoever writes
+    auto held = [&](const Config& c, const char* f) {
+        const Config::HeldBack* h = c.held((dir / "sites.d" / f).string());
+        return h ? h->error : std::string("served");
+    };
+    {
+        const Config c = load_config(main);
+        CHECK(c.owner_files.count((dir / "sites.d" / "a.toml").string()) == 1 && c.owner_files.count((dir / "sites.d" / "b.toml").string()) == 0);
+        CHECK(held(c, "a.toml") == "served" && held(c, "c.toml") == "served" && held(c, "e.toml") == "served" && held(c, "f.toml") == "served");
+        CHECK(held(c, "b.toml").find("names its access log in") != npos && held(c, "b.toml").find("sites/<name>.log") != npos);
+        CHECK(held(c, "d.toml").find("names its access log in") != npos);
+        CHECK(held(c, "g.toml").find("letters, digits") != npos);
+        CHECK(c.sites.size() == 4 && c.held_back.size() == 3);
+    }
+    // Without server.user there is no boundary: every file is the owner's word; the plain name still holds.
+    write(main, head(""), rw_r);
+    {
+        const Config c = load_config(main);
+        CHECK(c.held_back.size() == 1 && held(c, "g.toml").find("letters, digits") != npos && c.sites.size() == 6);
+    }
+    // The main file's own site: all or nothing, as every error of the main file.
+    write(main, head("") + site("m.test", (logs / "sites" / "bad name.log").string()), rw_r);
+    std::string why;
+    try {
+        load_config(main);
+    } catch (const std::exception& e) {
+        why = e.what();
+    }
+    CHECK(why.find("letters, digits") != npos);
+    fs::remove_all(dir);
+}
+
 static void test_access_log_privacy() {
     namespace fs = std::filesystem;
     // The matcher: whole segments, the capitalisation written, the cleaned path.
@@ -14989,6 +15112,7 @@ int main() {
     test_refusal_finding();
     test_protection();
     test_access_log_privacy();
+    test_log_placement();
     test_install();
 #ifdef AGENSIO_HAS_TLS
     test_acme();

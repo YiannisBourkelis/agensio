@@ -698,6 +698,12 @@ struct Config {
     // a newcomer when two of them conflict (the running one keeps its place).
     std::map<std::string, std::size_t> file_digests;
     std::set<std::string> managed_files;  // the included files whose first line is the control plane's marker
+    // The included files that are the main configuration owner's word, as the main file is (docs/
+    // configuration.md 8c): a regular file of the same uid, writable by nobody else. What root wrote by
+    // hand; the control plane's files are the server account's, and so is anything that account put
+    // under sites.d. The marker above is text that account writes, never a boundary. Every file when
+    // `server.user` is empty: the server is then whoever started it, and nothing is root's against it.
+    std::set<std::string> owner_files;
     // At start (no running configuration): the site files the server served at its last start or
     // reload, with their digests, from the record (served_record): the ranking of conflicts uses
     // them as a reload uses the running configuration (the alpha.63 report, finding 1).
@@ -980,6 +986,16 @@ std::string check_log_exclusions(const SiteConfig& site);
 // agensio's log directory: the [log] access file's, else /var/log/agensio (what the shipped logrotate
 // configuration covers). access_log_keep_days needs the site's access_log below its sites/.
 std::string log_directory(const Config& cfg);
+// <log directory>/sites/<name>.log, the one site log every site file may name (docs/configuration.md
+// 8c): `name` set when `path` has that form, whatever its characters.
+bool site_log_name(const std::string& path, const Config& cfg, std::string* name = nullptr);
+// Where a site's access_log may be (docs/configuration.md 8c, security row 59): "" when `log` (resolved,
+// or "" for none) may be named by a site file that is the main configuration owner's word
+// (`owner_file`: any path, as nginx's and Apache's configuration names any) or by any other file (sites/
+// <name>.log of a plain name, [log] access, or none); else why not. The start opens every log as root
+// and the site files are the server account's, so a file that account can write names nothing root
+// would open, create or hand over elsewhere.
+std::string site_log_problem(const std::string& log, const Config& cfg, bool owner_file);
 // An `public_archives` entry: a path as served from the site's root ("/downloads/world.sql.gz") or
 // a directory ending in "/", any character but a control one or a wildcard ('*', '?', '['), no empty,
 // "." or ".." segment, not "/" alone, at most 1024 bytes; "" or why not.

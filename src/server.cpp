@@ -116,10 +116,13 @@ Server::Server(Config cfg)
     open_logs();
     if (cfg_.control.enabled) audit_sink_ = logs_.add(cfg_.control.audit);
     control_handler_.attach(this, &logs_, audit_sink_);
-    assign_log_sinks(gen->cfg);
-    std::string err;
-    if (!logs_.open_all(err)) throw std::runtime_error(err);
-    own_site_logs(gen->cfg);
+    {
+        // Where the logs are opened (docs/configuration.md 8c): below the log directory through the
+        // no-link walk, with sites/ the server account's; a site whose log cannot be opened is set aside.
+        std::string err;
+        if (!isolate_logs(gen->cfg, nullptr, err)) throw std::runtime_error(err);
+    }
+    own_logs(gen->cfg);
     for (const auto& o : gen->cfg.orphan_additions)
         error_log_.warn(o.file + " holds root additions for site " + o.site + ", which is not in the configuration (disabled or deleted): ignored");
     prepare_acme(gen->cfg);
@@ -201,11 +204,57 @@ void Server::assign_log_sinks(Config& cfg) {
     if (cfg.log.access_sink >= 0) access_logging_ = true;
 }
 
-// A site with `user` gets its access log as agensio:<site group> 0640: agensio writes it
-// as the owner (also after a SIGUSR1 reopen once privileges are dropped), the customer
-// reads it through the group, nobody else. Needs root (or CAP_CHOWN); otherwise one
-// warning per site and the file stays ours.
-void Server::own_site_logs(const Config& cfg) {
+bool Server::isolate_logs(Config& cfg, const Config* running, std::string& error) {
+    {
+        // The walk's start is this configuration's log directory ([log] access applies on reload, and
+        // the loader held the sites' logs to the same directory); whom sites/ belongs to is the server's
+        // account, restart-only, resolved once.
+        LogPlacement where = logs_.placement();
+        where.directory = log_directory(cfg);
+#ifndef _WIN32
+        unsigned uid = 0, gid = 0;
+        if (where.uid < 0 && !cfg_.user.empty() && system_facts().user(cfg_.user, uid, gid)) {
+            if (!cfg_.group.empty()) system_facts().group(cfg_.group, gid);
+            where.uid = static_cast<long>(uid);
+            where.gid = static_cast<long>(gid);
+        }
+#endif
+        logs_.set_placement(std::move(where));
+    }
+    assign_log_sinks(cfg);
+    std::vector<LogRegistry::Failure> failed;
+    logs_.open_wanted(failed);
+    if (failed.empty()) return true;
+    // What to do about it, by the errno: a link is named by the message itself; a file this account
+    // cannot create (a reload, after the privilege drop, in root's directory) root creates, or a
+    // restart does; a directory agensio does not make root makes.
+    auto fix = [&](const LogRegistry::Failure& f, const SiteConfig* site) -> std::string {
+        if (f.err == EACCES && ::geteuid() != 0) {
+            const std::string user = cfg_.user.empty() ? std::string("agensio") : cfg_.user;
+            const std::string group = site && !site->user.empty() ? (site->group.empty() ? site->user : site->group) : (cfg_.group.empty() ? user : cfg_.group);
+            return "; as root: install -o " + user + " -g " + group + " -m 0640 /dev/null " + f.path + ", then reload; or restart agensio, which creates it as root";
+        }
+        if (f.err == ENOENT) return "; mkdir it as root, or name " + log_directory(cfg) + "/sites/<name>.log";
+        return "";
+    };
+    for (const std::string& own : {cfg.log.error, cfg.log.access, cfg.control.audit})
+        for (const auto& f : failed)
+            if (!own.empty() && f.path == own) {
+                error = "cannot open log file " + f.why + fix(f, nullptr);
+                return false;
+            }
+    set_aside_until_clean(cfg, running, [&](const Config& c) -> std::optional<SiteConflict> {
+        for (std::size_t i = 0; i < c.sites.size(); ++i)
+            for (const auto& f : failed)
+                if (c.sites[i].access_log == f.path)
+                    return SiteConflict{i, SiteConflict::npos, "cannot open the access log of " + c.sites[i].server_names.front() + ": " + f.why + fix(f, &c.sites[i])};
+        return std::nullopt;
+    });
+    assign_log_sinks(cfg);  // the sinks of the sites that stay; a set-aside site's sink is not wanted
+    return true;
+}
+
+void Server::own_logs(const Config& cfg) {
 #ifndef _WIN32
     const HostFacts facts = system_facts();
     unsigned agensio_uid = ::geteuid();
@@ -215,33 +264,40 @@ void Server::own_site_logs(const Config& cfg) {
         if (facts.user(cfg_.user, agensio_uid, primary)) agensio_gid = primary;
     }
     if (!cfg_.group.empty()) facts.group(cfg_.group, agensio_gid);
-    // The server's own files (error, default access, audit) were opened as root: hand them
-    // to the service user so SIGUSR1 can reopen them after the privilege drop.
-    if (::geteuid() == 0 && !cfg_.user.empty()) {
-        for (const std::string& path : {cfg.log.error, cfg.log.access, cfg.control.audit}) {
-            if (path.empty() || path == "stderr" || path == "off") continue;
-            if (::chown(path.c_str(), agensio_uid, agensio_gid) == 0) ::chmod(path.c_str(), 0640);
-        }
-    }
+    // The group that reads each sink: a site's own when every site writing the file is that
+    // account's, the server's for its own files, a file sites of two accounts share, or a site
+    // without an account (whose file the start made as root before 0.1.0-alpha.129 and never handed
+    // over, so every reload after it was refused: "cannot open log file ...: Permission denied").
+    struct Reader {
+        unsigned gid = 0;
+        bool mixed = false;
+        const SiteConfig* site = nullptr;  // the one site with a user writing it, for the warning
+    };
+    std::map<int, Reader> readers;
+    for (int own : {error_sink_, cfg.log.access_sink, audit_sink_})
+        if (own >= 0) readers[own] = {agensio_gid, true, nullptr};
     for (const auto& site : cfg.sites) {
-        if (site.user.empty() || site.access_log.empty()) continue;
-        unsigned uid = 0, gid = 0;
-        if (!facts.user(site.user, uid, gid)) continue;  // check_hosting already refused this
-        if (!site.group.empty()) facts.group(site.group, gid);
-        // Already the site's group: nothing to do (a non-root chown to the same owner still
-        // fails with EPERM, which warned on every reload before 2026-09-20). Otherwise the
-        // helper hands it over at creation; only without one is there something to warn about.
-        struct stat st {};
-        if (::stat(site.access_log.c_str(), &st) == 0 && st.st_gid == gid && (st.st_mode & 0040)) continue;
-        if (::chown(site.access_log.c_str(), agensio_uid, gid) != 0) {
-            if (provisioner_.available()) continue;  // site-create's log_own does it and verifies it
-            error_log_.warn("cannot chown " + site.access_log + " to " + std::to_string(agensio_uid) + ":" +
-                            (site.group.empty() ? site.user : site.group) + " (not root); " + site.user +
-                            " cannot read its log");
-            continue;
+        if (site.access_log_sink < 0) continue;
+        unsigned uid = 0, gid = agensio_gid;
+        if (!site.user.empty()) {
+            if (!facts.user(site.user, uid, gid)) continue;  // check_hosting already refused this
+            if (!site.group.empty()) facts.group(site.group, gid);
         }
-        ::chmod(site.access_log.c_str(), 0640);
+        auto [it, fresh] = readers.try_emplace(site.access_log_sink, Reader{gid, false, site.user.empty() ? nullptr : &site});
+        if (!fresh && it->second.gid != gid) it->second.mixed = true;
     }
+    for (const auto& [id, r] : readers) {
+        LogFile& f = logs_.sink(id);
+        if (!f.is_open() || !f.wanted()) continue;
+        const unsigned gid = r.mixed ? agensio_gid : r.gid;
+        if (f.own(agensio_uid, gid)) continue;
+        // Not root: a site's group is the helper's to give (site_create's log_own); without one, say so once.
+        if (::geteuid() == 0 || provisioner_.available() || !r.site) continue;
+        error_log_.warn("cannot chown " + f.path() + " to " + std::to_string(agensio_uid) + ":" + (r.site->group.empty() ? r.site->user : r.site->group) +
+                        " (not root); " + r.site->user + " cannot read its log");
+    }
+#else
+    (void)cfg;
 #endif
 }
 
@@ -2186,10 +2242,9 @@ bool Server::switch_to(const std::shared_ptr<Generation>& gen, std::string& erro
         error = e.what();
         return false;
     }
-    if (logs) {
+    if (logs) {  // opened by isolate_logs in prepare_reload; here the sinks and the hand-over
         assign_log_sinks(gen->cfg);
-        if (!logs_.open_all(error)) return false;
-        own_site_logs(gen->cfg);
+        own_logs(gen->cfg);
     }
 
     // New addresses are bound before anything switches, so a port that cannot be bound
@@ -2436,6 +2491,10 @@ std::shared_ptr<Generation> Server::prepare_reload(std::string& error, std::stri
             for (const auto& e : hosting) all += (all.empty() ? "" : "; ") + e;
             return refuse(all);
         }
+        // And the logs (docs/configuration.md 8c): a site whose log cannot be opened is set aside,
+        // kept in its running version, whose log is open already.
+        std::string logs;
+        if (!isolate_logs(fresh, &gen_->cfg, logs)) return refuse(logs);
     } catch (const std::exception& e) {
         return refuse(e.what());
     }

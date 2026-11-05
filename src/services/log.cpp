@@ -15,6 +15,7 @@
 #define AGENSIO_OPEN_FLAGS (_O_WRONLY | _O_APPEND | _O_CREAT | _O_BINARY)
 #else
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #define AGENSIO_OPEN_FLAGS (O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC)
 #endif
@@ -32,6 +33,156 @@ int sys_open_append(const char* path) noexcept {
     return ::open(path, AGENSIO_OPEN_FLAGS, 0640);  // logs are the server's and a site group's to read, nobody else's
 #endif
 }
+
+#ifndef _WIN32
+// The log directory made when it is not there (a first start without the package, the default logs/
+// next to the configuration): root's with the server's group, 0750, the package's layout; as anyone
+// else, that account's. The components above it as create_directories makes them.
+bool make_log_dir(const LogPlacement& where, std::string& why) noexcept {
+    std::error_code ec;
+    std::filesystem::create_directories(where.directory, ec);
+    if (ec) {
+        errno = ec.value();
+        why = where.directory + ": " + ec.message();
+        return false;
+    }
+    ::chmod(where.directory.c_str(), 0750);
+    if (::geteuid() == 0 && where.gid >= 0) (void)::chown(where.directory.c_str(), 0, static_cast<gid_t>(where.gid));
+    return true;
+}
+#endif
+
+}  // namespace
+
+bool below_log_dir(const std::string& directory, const std::string& path) noexcept {
+    return !directory.empty() && path.size() > directory.size() + 1 && path.compare(0, directory.size(), directory) == 0 && path[directory.size()] == '/';
+}
+
+int open_below_log_dir(const LogPlacement& where, const std::string& path, int flags, unsigned mode, std::string& why) noexcept {
+#ifdef _WIN32
+    (void)where;
+    (void)flags;
+    (void)mode;
+    errno = EINVAL;
+    why = path + ": not on this platform";
+    return -1;
+#else
+    namespace fs = std::filesystem;
+    const std::string& dir = where.directory;
+    if (!below_log_dir(dir, path)) {
+        errno = EINVAL;
+        why = path + " is not below the log directory " + dir;
+        return -1;
+    }
+    std::error_code ec;
+    fs::path real = fs::canonical(dir, ec);
+    if (ec == std::errc::no_such_file_or_directory && (flags & O_CREAT)) {
+        if (!make_log_dir(where, why)) return -1;
+        real = fs::canonical(dir, ec);
+    }
+    if (ec) {
+        errno = ec.value();
+        why = dir + ": " + ec.message();
+        return -1;
+    }
+    int cur = ::open(real.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (cur < 0) {
+        why = dir + ": " + std::strerror(errno);
+        return -1;
+    }
+    const std::string rel = path.substr(dir.size() + 1);
+    std::string walked = dir;  // the directory `cur` is, by the path's own name
+    std::size_t pos = 0;
+    bool first = true;
+    for (;;) {
+        const std::size_t slash = rel.find('/', pos);
+        const bool last = slash == std::string::npos;
+        const std::string part = rel.substr(pos, last ? std::string::npos : slash - pos);
+        pos = last ? rel.size() : slash + 1;
+        if (part.empty() || part == "." || part == "..") {
+            ::close(cur);
+            errno = EINVAL;
+            why = path + ": not a plain path below the log directory " + dir;
+            return -1;
+        }
+        if (last) {
+            const bool directory = (flags & O_DIRECTORY) != 0;
+            const int fd = ::openat(cur, part.c_str(), flags | O_NOFOLLOW | O_CLOEXEC | (directory ? 0 : O_NONBLOCK), mode);
+            int e = errno;
+            ::close(cur);
+            if (fd < 0) {
+                errno = e;
+                // A link gives ELOOP, or ENOTDIR when a directory was asked for; a FIFO without a reader ENXIO.
+                if (e == ELOOP || (directory && e == ENOTDIR))
+                    why = path + ": a symbolic link" + (directory ? " or not a directory" : "") + "; below the log directory " + dir + " every path is opened without following a link";
+                else if (e == ENXIO) why = path + ": a FIFO or a device, not a regular file (below the log directory nothing else is opened)";
+                else if (e == EACCES) why = path + ": " + std::strerror(e) + " (this account cannot create it in " + walked + ")";
+                else why = path + ": " + std::strerror(e);
+                return -1;
+            }
+            struct stat st {};
+            if (::fstat(fd, &st) != 0) {
+                e = errno;
+                ::close(fd);
+                errno = e;
+                why = path + ": " + std::strerror(e);
+                return -1;
+            }
+            if (directory ? !S_ISDIR(st.st_mode) : !S_ISREG(st.st_mode)) {
+                ::close(fd);
+                errno = EINVAL;
+                why = path + ": not a " + (directory ? "directory" : "regular file") + " (below the log directory nothing else is opened)";
+                return -1;
+            }
+            if (!directory && st.st_nlink > 1) {  // a hard link to another file (fs.protected_hardlinks off): not written, not handed over
+                ::close(fd);
+                errno = EINVAL;
+                why = path + ": has " + std::to_string(st.st_nlink) + " names (a hard link); below the log directory a log has one";
+                return -1;
+            }
+            if (!directory && st.st_uid != 0 && where.uid >= 0 && st.st_uid != static_cast<uid_t>(where.uid) && ::geteuid() != st.st_uid) {
+                ::close(fd);
+                errno = EINVAL;
+                why = path + ": owned by uid " + std::to_string(st.st_uid) + ", neither root's nor the server account's: not written";
+                return -1;
+            }
+            if (!directory) {  // O_NONBLOCK served against a FIFO; a regular file's writes ignore it, but keep the descriptor plain
+                const int fl = ::fcntl(fd, F_GETFL);
+                if (fl >= 0) (void)::fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+            }
+            return fd;
+        }
+        int next = ::openat(cur, part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        const bool sites = first && part == "sites";
+        if (next < 0 && errno == ENOENT && sites && (flags & O_CREAT)) {
+            if (::mkdirat(cur, "sites", 0750) == 0 || errno == EEXIST) next = ::openat(cur, part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        }
+        int e = errno;
+        ::close(cur);
+        if (next < 0) {
+            errno = e;
+            if (e == ELOOP || e == ENOTDIR)  // a link to a directory is ENOTDIR to an O_DIRECTORY open without following
+                why = walked + "/" + part + ": a symbolic link or not a directory; below the log directory " + dir + " every path is opened without following a link";
+            else if (e == ENOENT) why = path + ": the directory " + walked + "/" + part + " does not exist; below the log directory agensio makes only sites/";
+            else why = walked + "/" + part + ": " + std::strerror(e);
+            return -1;
+        }
+        if (sites && where.uid >= 0 && ::geteuid() == 0) {
+            // sites/ is the server account's: it creates a site's log there on a reload, after the
+            // privilege drop (the package makes it so; a start before 0.1.0-alpha.129 made it root's).
+            struct stat st {};
+            if (::fstat(next, &st) == 0 && S_ISDIR(st.st_mode) && (st.st_uid != static_cast<uid_t>(where.uid) || (where.gid >= 0 && st.st_gid != static_cast<gid_t>(where.gid)))) {
+                if (::fchown(next, static_cast<uid_t>(where.uid), where.gid >= 0 ? static_cast<gid_t>(where.gid) : st.st_gid) == 0) (void)::fchmod(next, 0750);
+            }
+        }
+        walked += "/" + part;
+        cur = next;
+        first = false;
+    }
+#endif
+}
+
+namespace {
 
 void sys_close(int fd) noexcept {
 #ifdef _WIN32
@@ -138,22 +289,66 @@ LogFile::~LogFile() {
     if (previous_ > 2) sys_close(previous_);
 }
 
-bool LogFile::open() noexcept {
+bool LogFile::open(const LogPlacement& where) noexcept {
     int fd = -1;
+    error_.clear();
+    errno_ = 0;
     if (path_ == "stderr") fd = 2;
-    else {
+    else if (below_log_dir(where.directory, path_)) {
+        fd = open_below_log_dir(where, path_, AGENSIO_OPEN_FLAGS, 0640, error_);
+        if (fd < 0) {
+            errno_ = errno;
+            return false;
+        }
+    } else {
         fd = sys_open_append(path_.c_str());
-        if (fd < 0 && errno == ENOENT) {  // default "logs/access.log" next to a fresh config
+        if (fd < 0 && errno == ENOENT) {  // a path root named elsewhere, its directory not there yet
             std::error_code ec;
             std::filesystem::create_directories(std::filesystem::path(path_).parent_path(), ec);
             if (!ec) fd = sys_open_append(path_.c_str());
         }
-        if (fd < 0) return false;
+        if (fd < 0) {
+            errno_ = errno;
+            error_ = path_ + ": " + std::strerror(errno);
+            return false;
+        }
     }
     const int old = fd_.exchange(fd, std::memory_order_acq_rel);
     if (previous_ > 2) sys_close(previous_);
     previous_ = old;
     return true;
+}
+
+bool LogFile::own(unsigned uid, unsigned gid) noexcept {
+#ifdef _WIN32
+    (void)uid;
+    (void)gid;
+    return true;
+#else
+    const int fd = fd_.load(std::memory_order_acquire);
+    if (fd <= 2) return true;  // stderr, or not open
+    struct stat st {};
+    if (::fstat(fd, &st) != 0) return false;
+    if (st.st_uid == uid && st.st_gid == gid && (st.st_mode & 07777) == 0640) return true;
+    if (::fchown(fd, uid, gid) != 0) return false;
+    (void)::fchmod(fd, 0640);
+    return true;
+#endif
+}
+
+bool LogFile::owner(unsigned& uid, unsigned& gid) const noexcept {
+#ifdef _WIN32
+    (void)uid;
+    (void)gid;
+    return false;
+#else
+    const int fd = fd_.load(std::memory_order_acquire);
+    struct stat st {};
+    if (fd < 0 || ::fstat(fd, &st) != 0) return false;
+    uid = st.st_uid;
+    gid = st.st_gid;
+    return true;
+#endif
 }
 
 void LogFile::write(std::string_view data) noexcept {
@@ -179,20 +374,24 @@ void LogRegistry::unmark_all() noexcept {
     for (auto& s : sinks_) s->set_wanted(false);
 }
 
-bool LogRegistry::open_all(std::string& error) noexcept {
+void LogRegistry::open_wanted(std::vector<Failure>& failed) noexcept {
     for (auto& s : sinks_) {
-        if (!s->wanted()) continue;
-        if (!s->open()) {
-            error = "cannot open log file " + s->path() + ": " + std::strerror(errno);
-            return false;
-        }
+        if (!s->wanted() || s->is_open()) continue;
+        if (!s->open(where_)) failed.push_back({s->path(), s->error(), s->errno_of()});
     }
-    return true;
+}
+
+bool LogRegistry::open_all(std::string& error) noexcept {
+    std::vector<Failure> failed;
+    open_wanted(failed);
+    if (failed.empty()) return true;
+    error = "cannot open log file " + failed.front().why;
+    return false;
 }
 
 void LogRegistry::reopen_all() noexcept {
     for (auto& s : sinks_)
-        if (s->wanted()) s->reopen();  // a failed reopen keeps writing to the previous descriptor
+        if (s->wanted()) s->reopen(where_);  // a failed reopen keeps writing to the previous descriptor
 }
 
 // ---- WorkerLogs ----

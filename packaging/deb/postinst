@@ -6,8 +6,11 @@ if [ "$1" = "configure" ]; then
     getent group agensio-admin >/dev/null || groupadd --system agensio-admin
     getent passwd agensio >/dev/null || \
         useradd --system --gid agensio --home-dir /var/lib/agensio --no-create-home --shell /usr/sbin/nologin agensio
-    install -d -o root    -g agensio -m 0750 /etc/agensio
-    install -d -o agensio -g agensio -m 0750 /etc/agensio/sites.d /var/log/agensio
+    # The log directory is root's and the files in it the server's, as Debian's nginx since
+    # CVE-2016-1247 (the server's account can then replace nothing root or logrotate opens there);
+    # sites/ is the server's, where a reload creates a new site's log (docs/configuration.md 8c).
+    install -d -o root    -g agensio -m 0750 /etc/agensio /var/log/agensio
+    install -d -o agensio -g agensio -m 0750 /etc/agensio/sites.d /var/log/agensio/sites
     install -d -o agensio -g agensio -m 0751 /var/lib/agensio   # site users traverse to their own state directory
     install -d -o root    -g root    -m 0755 /var/www
     if [ ! -d /var/www/html ]; then

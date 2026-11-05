@@ -1508,6 +1508,22 @@ struct RootAdditions {
     bool used = false;
 };
 
+// Whether `file` is the main configuration owner's word, as the main file is (docs/configuration.md 8c,
+// Config::owner_files): a regular file (no link) of the same uid, writable by nobody else. The test the
+// root additions files pass below; here it decides what a site file may name as its log. On Windows
+// every file.
+bool file_of_owner(const fs::path& file, const fs::path& main_file) noexcept {
+#ifndef _WIN32
+    struct stat fst {}, mst {};
+    if (::lstat(file.c_str(), &fst) != 0 || !S_ISREG(fst.st_mode) || ::stat(main_file.c_str(), &mst) != 0) return false;
+    return fst.st_uid == mst.st_uid && !(fst.st_mode & (S_IWGRP | S_IWOTH));
+#else
+    (void)file;
+    (void)main_file;
+    return true;
+#endif
+}
+
 void check_additions_file(const fs::path& file, const fs::path& main_file, const std::string& label) {
 #ifndef _WIN32
     struct stat fst {}, mst {};
@@ -3094,12 +3110,17 @@ void parse_sites_from(const toml::table& tbl, const fs::path& base_dir, Config& 
             }
         }
     } stamp{cfg, first, source};
+    // Where this file may put a site's log (docs/configuration.md 8c): anywhere when it is the main
+    // file or one of its owner's (Config::owner_files), sites/<name>.log of the log directory otherwise.
+    const bool owners = source == cfg.config_path.string() || cfg.owner_files.count(source) > 0;
     if (auto arr = tbl["site"].as_array()) {
         std::size_t idx = 0;
         for (auto& node : *arr) {
             auto* t = node.as_table();
             if (!t) fail(file_label + ": each [[site]] must be a table");
             parse_site(*t, base_dir, cfg, file_label + " [[site]] #" + std::to_string(idx + 1), root_adds);
+            if (const std::string why = site_log_problem(cfg.sites.back().access_log, cfg, owners); !why.empty())
+                fail(file_label + " [[site]] #" + std::to_string(idx + 1) + ".access_log: " + why);
             ++idx;
         }
     } else if (tbl.contains("site")) {
@@ -5107,6 +5128,9 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
                 text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
                 cfg.file_digests[file.string()] = file_digest(text);
                 if (text.starts_with("# agensio:managed ")) cfg.managed_files.insert(file.string());  // sites.cpp kManagedMarker
+                // A boundary exists where the server runs as `server.user` under a main file of root's;
+                // without one the server is whoever started it, and every file is the owner's word.
+                if (cfg.user.empty() || file_of_owner(file, cfg.config_path)) cfg.owner_files.insert(file.string());
             }
             toml::table sub;
             try {
@@ -5884,6 +5908,34 @@ std::string check_log_exclusions(const SiteConfig& site) {
 std::string log_directory(const Config& cfg) {
     if (cfg.log.access.empty()) return "/var/log/agensio";
     return fs::path(cfg.log.access).parent_path().string();
+}
+
+bool site_log_name(const std::string& path, const Config& cfg, std::string* name) {
+    const std::string sites = log_directory(cfg) + "/sites/";
+    if (path.size() <= sites.size() || path.compare(0, sites.size(), sites) != 0) return false;
+    const std::string rest = path.substr(sites.size());
+    if (rest.find('/') != std::string::npos || rest.size() <= 4 || !rest.ends_with(".log")) return false;
+    if (name) *name = rest.substr(0, rest.size() - 4);
+    return true;
+}
+
+std::string site_log_problem(const std::string& log, const Config& cfg, bool owner_file) {
+    if (log.empty() || log == cfg.log.access) return "";  // none, or the shared file every site may write
+    const std::string dir = log_directory(cfg);
+    std::string name;
+    if (site_log_name(log, cfg, &name)) {
+        // The form every file may name; the name a domain's: what logrotate's glob and the retention read.
+        bool plain = !name.empty() && name.size() <= 253 && name.front() != '.';
+        for (const char c : name)
+            plain = plain && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-');
+        if (!plain)
+            return "\"" + log + "\": a site log in " + dir + "/sites/ is named <name>.log, <name> of letters, digits, '.', '_' and '-' (a domain), not starting with '.'";
+        return "";
+    }
+    if (owner_file) return "";  // root's word, as nginx's and Apache's configuration: any path; its directory is root's to own
+    return "\"" + log + "\": a site file the server's account can write names its access log in " + dir + "/sites/ only, as " + dir +
+           "/sites/<name>.log (what site-create gives a site), or [log] access, or \"off\"; only a site file of the main configuration's owner, "
+           "a regular file writable by nobody else (chown root, chmod 0644), names a log elsewhere (docs/configuration.md 8c)";
 }
 
 std::vector<std::string> app_presets() {

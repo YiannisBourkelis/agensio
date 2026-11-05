@@ -28,7 +28,7 @@ include = ["sites.d/*.toml"]
 workers = 1
 pid_file = "$T/agensio.pid"
 [log]
-access = "off"
+access = "$T/logs/access.log"   # the log directory: what the no-link walk of 8c protects
 error = "$T/logs/error.log"
 [control]
 socket = "$CS"
@@ -96,6 +96,38 @@ check "a site whose root additions file is refused is not served, and health say
   "$(body d.test 18304) $(held d.toml | grep -q 'd.test.root.toml' && echo yes)"
 rm -f "$T/sites.d/d.test.root.toml" "$T/sites.d/d.toml"
 reload
+
+# Where a log may be (docs/configuration.md 8c, security row 59). A link planted as a site's log in
+# sites/ of the log directory is never followed: the site is set aside, the file it points to untouched,
+# the others served; the link gone, the site serves and its log is a regular file.
+echo secret > "$T/victim"; mkdir -p "$T/logs/sites"; ln -s "$T/victim" "$T/logs/sites/l.test.log"
+site l.test 18307 "$T/www/c" "access_log = \"$T/logs/sites/l.test.log\"" > "$T/sites.d/l.toml"
+reload
+check "a link planted as a site's log below the log directory: refused by name, the site set aside, the victim untouched, the other site served" "none yes secret site a2" \
+  "$(body l.test 18307) $(held l.toml | grep -q 'symbolic link' && echo yes) $(cat "$T/victim") $(body a.test 18301)"
+rm -f "$T/logs/sites/l.test.log"; reload
+check "the link gone: the site serves and its log is a regular file in sites/" "site c yes" "$(body l.test 18307) $([ -f "$T/logs/sites/l.test.log" ] && [ ! -L "$T/logs/sites/l.test.log" ] && echo yes)"
+rm -f "$T/sites.d/l.toml"; reload
+# Under server.user (a boundary between root's main file and the server's account) a site file that is
+# not the owner's word, here writable by its group, names its log in sites/ alone; the same file 0644 is
+# the owner's and names any path. Judged by the loader: -t says it.
+R=$T/rule; mkdir -p "$R/sites.d" "$R/logs"
+cat > "$R/agensio.toml" <<EOF
+include = ["sites.d/*.toml"]
+[server]
+workers = 1
+user = "$(id -un)"
+[log]
+access = "$R/logs/access.log"
+error = "$R/logs/error.log"
+EOF
+site r.test 18308 "$T/www/c" "access_log = \"$R/elsewhere.log\"" > "$R/sites.d/r.toml"; chmod 664 "$R/sites.d/r.toml"
+site s.test 18309 "$T/www/c" > "$R/sites.d/s.toml"   # a second site, so the configuration keeps a site when r.toml is set aside
+"$BIN" -t -c "$R/agensio.toml" > "$R/t1.out" 2>&1; R1=$?
+chmod 644 "$R/sites.d/r.toml"
+"$BIN" -t -c "$R/agensio.toml" > "$R/t2.out" 2>&1; R2=$?
+check "a group-writable site file naming a log outside sites/ is set aside with the rule; the same file 0644 is the owner's word and loads" "0 yes 0 no" \
+  "$R1 $(grep -q 'r.toml' "$R/t1.out" && grep -q 'names its access log in' "$R/t1.out" && echo yes) $R2 $(grep -q 'set aside' "$R/t2.out" && echo yes || echo no)"
 
 # The control plane: a site-create whose file would be set aside (its alias claims a running
 # site's name on the same address) is refused and its file removed, never reported as done.
