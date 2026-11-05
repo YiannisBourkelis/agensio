@@ -14795,6 +14795,21 @@ static void test_access_log_privacy() {
     refused("access_log_exclude_paths = [\"/admin/x\"]\n[[site.access]]\npath = \"/admin\"\nallow = [\"10.0.0.0/8\"]\n", "the address rule on /admin restricts");
     refused("access_log_exclude_paths = [\"/api/\"]\n[[site.access]]\npath = \"/api/keys\"\nallow = [\"10.0.0.0/8\"]\nmode = \"report\"\n", "its report lines name the clients");
     refused("access_log_exclude_paths = [\"/api/notices/\"]\n[[site.access]]\npath = \"/\"\nallow = [\"10.0.0.0/8\"]\n", "the address rule on / restricts");
+    // Through the front controller (the alpha.128 report, P1): the application runs /index.php/login as
+    // /login and the login jail's filter reads it so; /index.php itself takes every request it routes.
+    const std::string lv = "app = \"laravel\"\nphp = { socket = \"unix:/run/php/x.sock\" }\n";
+    fs::create_directories(dir / "www" / "public");  // the preset serves the project's public/
+    refused(lv + "access_log_exclude_paths = [\"/index.php/\"]\n", "covers the front controller /index.php");
+    refused(lv + "access_log_exclude_paths = [\"/index.php\"]\n", "covers the front controller /index.php");
+    refused(lv + "access_log_exclude_paths = [\"/INDEX.PHP/login\"]\n", "covers the login path /login through the front controller /index.php");
+    refused(lv + "access_log_exclude_paths = [\"/index.php/login/x\"]\n", "lies under the login path /login through the front controller");
+    refused(lv + "access_log_exclude_paths = [\"/index.php/cp/\"]\n", "covers the login path /cp/auth/login through the front controller");
+    refused("app = \"drupal\"\nphp = { socket = \"unix:/run/php/x.sock\" }\naccess_log_exclude_paths = [\"/index.php/user/login\"]\n", "covers the login path /user/login");
+    CHECK(load(head + lv + "access_log_exclude_paths = [\"/index.php/api/notices/\"]\n").has_value());  // a path the application routes elsewhere
+    // The path info of a script an exact rule covers (P2): /adm.php/x runs /adm.php, as the rules judge it.
+    refused("access_log_exclude_paths = [\"/adm.php/x\"]\n[[site.access]]\npath = \"/adm.php\"\nmatch = \"exact\"\nallow = [\"10.0.0.0/8\"]\n", "the address rule on /adm.php restricts");
+    refused("access_log_exclude_paths = [\"/ADM.PHP\"]\n[[site.access]]\npath = \"/adm.php\"\nmatch = \"exact\"\nallow = [\"10.0.0.0/8\"]\n", "the address rule on /adm.php restricts");
+    CHECK(load(head + "access_log_exclude_paths = [\"/adm.php.bak\", \"/adm\"]\n[[site.access]]\npath = \"/adm.php\"\nmatch = \"exact\"\nallow = [\"10.0.0.0/8\"]\n").has_value());  // beside it
     {
         // A login with its query is that path with it alone; a path ["any"] reopens may be excluded.
         CHECK(load(head + "login_paths = [\"/?_task=login\"]\naccess_log_exclude_paths = [\"/healthz\"]\n").has_value());
@@ -14816,6 +14831,15 @@ static void test_access_log_privacy() {
         CHECK(check_log_exclusions(s).empty());
         s.access_log_exclude = {"/staging/"};
         CHECK(!check_log_exclusions(s).empty());
+        // An exact rule on a script covers what runs it with path info (P2), not a neighbour.
+        AuthRule script;
+        script.path = "/adm.php";
+        script.exact = true;
+        s.auth = {script};
+        s.access_log_exclude = {"/adm.php/x"};
+        CHECK(check_log_exclusions(s).find("the password rule on /adm.php protects") != std::string::npos);
+        s.access_log_exclude = {"/adm.php.bak"};
+        CHECK(check_log_exclusions(s).empty());
     }
     // The days: whole, 1 to 14, the site's own file below sites/.
     refused("access_log = \"logs/sites/a.test.log\"\naccess_log_keep_days = 0\n", "from 1 to 14");
@@ -14954,6 +14978,32 @@ static void test_access_log_privacy() {
         const std::string cleared = control::render_site(spec, "now");
         CHECK(err.empty() && spec.access_log_exclude_paths.empty() && spec.access_log_keep_days == 0 && cleared.find("access_log_exclude") == std::string::npos &&
               cleared.find("access_log_keep") == std::string::npos && cleared.find("\naccess_log = ") != std::string::npos);
+        // The loader's coverage checks in the request itself (the alpha.128 report, P3): a dry run says
+        // it, and nothing waits for a person's code only to fail at the reload.
+        auto request_error = [&](const char* app, const char* rules, const char* request, bool with_user) {
+            control::SiteSpec x;
+            x.domain = "x.test";
+            x.app = app;
+            x.root = "/srv/x";
+            x.php_socket = "unix:/run/php/x.sock";
+            if (with_user) x.user = "x";
+            else x.user_decided = true;
+            std::string e;
+            if (rules && *rules) CHECK(json::parse(rules, x.rules, e));
+            json::Value b;
+            CHECK(json::parse(request, b, e));
+            (void)control::apply_request(b, cfg, x, e);
+            return e;
+        };
+        CHECK(request_error("wordpress", "", R"({"access_log_exclude_paths": ["/wp-login.php"]})", true).find("covers the login path /wp-login.php") != std::string::npos);
+        CHECK(request_error("laravel", "", R"({"access_log_exclude_paths": ["/index.php/login"]})", true).find("through the front controller /index.php") != std::string::npos);
+        CHECK(request_error("laravel", "", R"({"access_log_exclude_paths": ["/index.php/api/"]})", true).empty());
+        CHECK(request_error("php", R"({"auth": [{"path": "/adm.php", "match": "exact"}]})", R"({"access_log_exclude_paths": ["/adm.php/x"]})", true)
+                  .find("the password rule on /adm.php protects") != std::string::npos);
+        CHECK(request_error("static", R"({"restricted": [{"path": "/admin/", "allow": ["10.0.0.1"]}]})", R"({"access_log_exclude_paths": ["/admin/x"]})", true)
+                  .find("the address rule on /admin restricts") != std::string::npos);
+        CHECK(request_error("static", "", R"({"access_log_keep_days": 7})", false).find("needs the site's own access log") != std::string::npos);
+        CHECK(request_error("static", "", R"({"access_log_keep_days": 7})", true).empty());
         for (const char* bad : {R"({"access_log_keep_days": 15})", R"({"access_log_keep_days": 7.5})", R"({"access_log_keep_days": "7"})", R"({"access_log_exclude_paths": ["/"]})",
                                 R"({"access_log_exclude_paths": "/api/"})", R"({"access_log_exclude_paths": [7]})"}) {
             control::SiteSpec copy = spec;

@@ -6,7 +6,8 @@
 set -u
 [ "$(id -u)" = 0 ] && { [ -f /.dockerenv ] || [ -n "${AGENSIO_PACKAGE_TEST:-}" ]; } || { echo "package: needs root inside a container (or AGENSIO_PACKAGE_TEST=1); skipped"; exit 0; }
 cd "$(dirname "$(readlink -f "$0")")/.."
-deb=$(ls -t "$PWD"/build/agensio_*.deb 2>/dev/null | head -1);  # the newest: an older package left in build/ sorted first and was the one tested [ -n "$deb" ] || { echo "package: no build/agensio_*.deb (run cpack -G DEB in build/); skipped"; exit 0; }
+deb=$(ls -t "$PWD"/build/agensio_*.deb 2>/dev/null | head -1)  # the newest: an older package left in build/ sorted first and was the one tested
+[ -n "$deb" ] || { echo "package: no build/agensio_*.deb (run cpack -G DEB in build/); skipped"; exit 0; }   # on its own line: joined to the comment above, the guard never ran and an absent .deb was 14 failures
 pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
 dpkg -i "$deb" > /tmp/dpkg.log 2>&1; check "dpkg -i succeeds" "0" "$?"

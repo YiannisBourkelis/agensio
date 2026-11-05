@@ -38,6 +38,24 @@
 
   No request path is touched (the start, the reload and the rotation), so no A/B. Tests: unit
   `test_log_placement`, `tests/isolation.sh`, `tests/provision.sh` as root, `tests/package.sh`.
+- **Fix: a login route could be excluded from the logs through the front controller** (the alpha.128
+  report, P1; security row 58). On a preset with one, `access_log_exclude_paths = ["/index.php/"]`,
+  `["/index.php"]` or `["/index.php/login"]` loaded, though the application runs `/index.php/login` as
+  `/login` and the login jail's filter reads it so: a site with such an exclusion took unlimited
+  password guessing there with no line for the login or the `-post` jail. The loader now refuses
+  `/index.php` and `/index.php/` (every request the application routes) and judges `/index.php/<path>`
+  as `<path>` against the login paths as well, in any capitalisation; a path the application routes
+  elsewhere (`/index.php/api/notices/`) may still be excluded.
+- **Fix: the path info of a script an exact rule covers could be excluded** (P2). `[[site.auth]]` and
+  `[[site.access]]` rules with `match = "exact"` on `/adm.php` judge `/adm.php/x` too (it runs that
+  script), but the exclusion check let `["/adm.php/x"]` through, so the 401s and 403s there left no
+  access-log line for the `-denied` jail. The check now covers what an exact rule on a script covers.
+- **Fix: a managed change the loader refuses waited for approval and failed after the code** (P3). A
+  `site_update` excluding a login path, or setting `access_log_keep_days` on a site without its own log,
+  passed the dry run, was stored for approval, and failed at the reload with the loader's message, after
+  the person had spent a code and with the rest of the approval batch skipped. The request now runs the
+  loader's coverage check on the rules as the file would hold them (`log_view_of`) and the own-log rule,
+  so the dry run says it and nothing waits for a code only to fail.
 
 ## 0.1.0-alpha.128 (2026-11-05)
 

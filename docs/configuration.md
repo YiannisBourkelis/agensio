@@ -1687,11 +1687,18 @@ in the capitalisation written, on the cleaned path, the one routing judges, neve
 characters, no query.
 
 It is refused for `/` (`access_log = "off"` is that) and for every path the fail2ban jails count
-(section 18): a login path (the preset's and the site's `login_paths`), a path a `[[site.auth]]`
-password protects (the `agensio-auth` jail counts failed passwords by address) and one a
-`[[site.access]]` rule restricts, report mode included (the `-denied` jail counts its 403s, the report
-lines name the clients); a path `["any"]` reopens below a restricted one may be excluded. The
-`-scan` and `-post` jails go on counting everything else of the site. Health lists the paths
+(section 18): a login path (the preset's and the site's `login_paths`), also reached through the
+site's front controller (on a preset with one, `/index.php` and `/index.php/` are refused, since the
+application routes every request through it, and `/index.php/login` is `/login` to the application
+and to the login jail's filter, so it is judged as that path; 0.1.0-alpha.129), a path a
+`[[site.auth]]` password protects (the `agensio-auth` jail counts failed passwords by address) and
+one a `[[site.access]]` rule restricts, report mode included (the `-denied` jail counts its 403s,
+the report lines name the clients), where an exact rule on a script covers the paths that run it
+with path info (`/adm.php/x` runs `/adm.php`, as the rules judge it; alpha.129); a path `["any"]`
+reopens below a restricted one may be excluded. The `-scan` and `-post` jails go on counting
+everything else of the site. On a managed site the same checks run in the request itself, so a dry
+run refuses what the reload would and nothing waits for a person's approval only to fail (alpha.129;
+before, the coverage checks ran at the reload alone). Health lists the paths
 (`access_log_excluded`, info) and `site_show` shows them; `logs_query` answers nothing for them. The
 application behind the site keeps whatever it logs itself (Laravel's `storage/logs`, an analytics
 tag): the key covers agensio's logs alone. The php-fpm pools agensio writes keep no access log.

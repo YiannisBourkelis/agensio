@@ -5855,6 +5855,24 @@ std::string check_log_exclude_path(const std::string& p) {
     return check_login_path(p);
 }
 
+bool preset_front_controller(const std::string& app) {
+    const PhpPreset* p = php_preset(app);
+    return p && p->front_controller;
+}
+
+std::string front_controller_of(const SiteConfig& site) {
+    auto script = [](const std::vector<TryStep>& steps) -> std::string {
+        for (const TryStep& s : steps)
+            if (s.kind == TryStep::Kind::fallback && s.target.size() > 4 && access::iequal_prefix(std::string_view(s.target).substr(s.target.size() - 4), ".php"))
+                return s.target;
+        return {};
+    };
+    if (std::string f = script(site.try_files); !f.empty()) return f;
+    for (const LocationConfig& l : site.locations)
+        if (std::string f = script(l.try_files); !f.empty()) return f;
+    return {};
+}
+
 std::string check_log_exclusions(const SiteConfig& site) {
     if (site.access_log_exclude.empty()) return "";
     // `path` lies under `prefix` as core/log_exclude.hpp covers it, in any capitalisation: a jail's
@@ -5863,25 +5881,48 @@ std::string check_log_exclusions(const SiteConfig& site) {
         if (!access::iequal_prefix(path, prefix)) return false;
         return path.size() == prefix.size() || prefix.back() == '/' || path[prefix.size()] == '/';
     };
+    const auto same = [](std::string_view a, std::string_view b) { return a.size() == b.size() && access::iequal_prefix(a, b); };
+    // An exact rule covers its path and, for a script, the paths that run it with path info, as the
+    // request path does (access::script_of): /adm.php/x runs /adm.php (the alpha.128 report, P2).
+    const auto exact_covers = [&](std::string_view rule, std::string_view path) {
+        if (!access::iequal_prefix(path, rule)) return false;
+        if (path.size() == rule.size()) return true;
+        return path[rule.size()] == '/' && rule.size() > 4 && same(rule.substr(rule.size() - 4), ".php");
+    };
     std::vector<std::string> login = preset_login_paths(site.app);
     for (const auto& l : site.login_paths)
         if (std::find(login.begin(), login.end(), l) == login.end()) login.push_back(l);
+    const std::string front = front_controller_of(site);  // "/index.php" where missing paths are routed to it
     for (const std::string& p : site.access_log_exclude) {
+        // Through the front controller (the alpha.128 report, P1): /index.php and /index.php/ take every
+        // request the application routes, its login form among them; /index.php/login is /login to the
+        // application (PATH_INFO), and the login jail's filter reads it so, so that form is judged too.
+        std::vector<std::string> forms{p};
+        if (!front.empty()) {
+            if (same(p, front) || same(p, front + "/"))
+                return "\"" + p + "\" covers the front controller " + front + ", which runs every path the application routes, its login form among them (a request for " +
+                       front + "/login runs as /login); exclude the application's paths by their own names";
+            if (access::iequal_prefix(p, front) && p.size() > front.size() + 1 && p[front.size()] == '/') forms.push_back(p.substr(front.size()));
+        }
         for (const std::string& l : login) {
             const std::size_t q = l.find('?');
             const std::string_view lp = std::string_view(l).substr(0, q);
             // The exclusion covers the login path, or one without a query covers the exclusion
             // (/wp-login.php/x runs /wp-login.php; a login with a query is that path with it alone).
-            const bool covers = below(p, lp);
-            if (covers || (q == std::string::npos && below(lp, p)))
-                return "\"" + p + "\" " + (covers ? "covers" : "lies under") + " the login path " + l +
-                       " (the fail2ban jail counts attempts there); a login path stays in the access log";
+            for (const std::string& form : forms) {
+                const bool covers = below(form, lp);
+                if (covers || (q == std::string::npos && below(lp, form)))
+                    return "\"" + p + "\" " + (covers ? "covers" : "lies under") + " the login path " + l +
+                           (form != p ? " through the front controller " + front + " (the application runs " + p + " as " + form + ")" : "") +
+                           " (the fail2ban jail counts attempts there); a login path stays in the access log";
+            }
         }
-        // An address rule: the prefix rule deciding the path itself (the longest covering it, the
-        // rules being sorted longest first), and every rule below it; ["any"] reopens, never restricts.
+        // An address rule: the rule deciding the path itself (the longest covering it, the rules being
+        // sorted longest first; an exact one through exact_covers), and every rule below it; ["any"]
+        // reopens, never restricts.
         const AccessRule* restricting = nullptr;
         for (const AccessRule& r : site.access)
-            if (!r.exact && access::covers(r, p)) {
+            if (r.exact ? exact_covers(r.path, p) : access::covers(r, p)) {
                 if (!r.any) restricting = &r;
                 break;
             }
@@ -5892,7 +5933,7 @@ std::string check_log_exclusions(const SiteConfig& site) {
                    (restricting->report ? "its report lines name the clients" : "the fail2ban jail counts its 403s") + "); a restricted path stays in the logs";
         const AuthRule* protecting = nullptr;
         for (const AuthRule& r : site.auth)
-            if (!r.exact && access::covers(r, p)) {
+            if (r.exact ? exact_covers(r.path, p) : access::covers(r, p)) {
                 if (!r.open) protecting = &r;
                 break;
             }

@@ -782,6 +782,55 @@ std::string utc_minute(std::time_t t) {
     return buf;
 }
 
+// The site as the loader sees what the fail2ban jails count (check_log_exclusions), built from the
+// request: its app and login paths, the address rules (rules.restricted and the admin rules), the
+// password rules (rules.auth), the front controller (rules.front_controller, or the preset's), the
+// rules longest first as finalize_site sorts them. So a dry run refuses what the reload would (the
+// alpha.128 report, P3), and no change waits for a person's code only to fail.
+static SiteConfig log_view_of(const SiteSpec& spec, const Config& cfg) {
+    SiteConfig site;
+    site.server_names = {spec.domain};
+    site.app = spec.app;
+    site.login_paths = spec.login_paths;
+    site.access_log_exclude = spec.access_log_exclude_paths;
+    const json::Value admin = admin_rules(spec);  // a value of its own: items() borrows from it
+    json::Value all = json::Value::array();
+    for (const auto& r : spec.rules["restricted"].items()) all.push(r);
+    for (const auto& r : admin.items()) all.push(r);
+    // A prefix rule's path as the loader stores it: without its trailing slash (access::covers reads
+    // the boundary itself), which check_rules strips before a file is written.
+    const auto rule_path = [](const json::Value& r) {
+        std::string path(r.get("path"));
+        if (r.get("match") != "exact" && path.size() > 1 && path.back() == '/') path.pop_back();
+        return path;
+    };
+    for (const auto& r : all.items()) {
+        AccessRule rule;
+        rule.path = rule_path(r);
+        rule.exact = r.get("match") == "exact";
+        rule.report = r.get("mode") == "report";
+        for (const auto& e : r["allow"].items()) (void)access_entry(e.str(), cfg, rule.allow, rule.any);  // checked by check_rules already
+        site.access.push_back(std::move(rule));
+    }
+    for (const auto& r : spec.rules["auth"].items()) {
+        AuthRule rule;
+        rule.path = rule_path(r);
+        rule.exact = r.get("match") == "exact";
+        rule.open = r["open"].boolean();
+        site.auth.push_back(std::move(rule));
+    }
+    const auto longest_first = [](auto& rules) {
+        std::stable_sort(rules.begin(), rules.end(), [](const auto& a, const auto& b) { return a.path.size() > b.path.size(); });
+    };
+    longest_first(site.access);
+    longest_first(site.auth);
+    std::string front;
+    if (spec.rules["front_controller"].is_string()) front = std::string(spec.rules["front_controller"].str());
+    else if (preset_front_controller(spec.app)) front = "/index.php";
+    if (!front.empty()) site.try_files = parse_try_files({"$uri", "$uri/", front + "?$query_string"});
+    return site;
+}
+
 std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, SiteSpec& spec, std::string& error) {
     ApplyContext ctx;
     ctx.now = std::time(nullptr);
@@ -1460,6 +1509,20 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (php && spec.user.empty() && spec.php_socket.empty() && user_decided)
         needs.push_back(Decision{"php_socket", "Without a site user no pool is generated: which php-fpm socket serves this site?",
                                  "unix:/run/php/php-fpm.sock", {}});
+    // What the site keeps out of its logs (docs/configuration.md 8b), judged here as the loader will
+    // (the alpha.128 report, P3: a change the reload refuses waited for a person's code and failed after
+    // it): the jails' paths against the rules as the file would hold them, and the days against the
+    // site's own log, which a site with its own account has.
+    if (!spec.access_log_exclude_paths.empty())
+        if (const std::string why = check_log_exclusions(log_view_of(spec, cfg)); !why.empty()) {
+            error = "access_log_exclude_paths: " + why;
+            return needs;
+        }
+    if (spec.access_log_keep_days && spec.access_log.empty()) {
+        error = "access_log_keep_days needs the site's own access log, which a site with its own account (user) has; this site writes the server-wide "
+                "[log] access, which holds other sites' lines too";
+        return needs;
+    }
     return needs;
 }
 

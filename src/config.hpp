@@ -979,10 +979,17 @@ std::string check_login_path(const std::string& path);
 // An `access_log_exclude_paths` entry: a login path's alphabet without a query, not "/" alone; "" or why not.
 std::string check_log_exclude_path(const std::string& path);
 // What keeps the site's exclusions out of the paths the fail2ban jails count (core/log_exclude.hpp):
-// a login path (the preset's and the site's), a path a password rule protects or an address rule
-// restricts (report mode included); "" when none, else the refusal. Called by the loader once the
-// site's rules are final, by the control plane's checks too.
+// a login path (the preset's and the site's), also reached through the site's front controller
+// (/index.php/login runs as /login: the alpha.128 report, P1) and /index.php itself; a path a password
+// rule protects or an address rule restricts (report mode included), an exact rule on a script covering
+// the paths that run it with path info (/adm.php/x runs /adm.php: P2); "" when none, else the refusal.
+// Called by the loader once the site's rules are final, by the control plane's request checks too (P3).
 std::string check_log_exclusions(const SiteConfig& site);
+// The script every missing path is routed to ("/index.php"): the first .php fallback of the site's
+// try_files or a location's; "" without one.
+std::string front_controller_of(const SiteConfig& site);
+// Whether the preset `app` routes missing paths to /index.php (its front controller).
+bool preset_front_controller(const std::string& app);
 // agensio's log directory: the [log] access file's, else /var/log/agensio (what the shipped logrotate
 // configuration covers). access_log_keep_days needs the site's access_log below its sites/.
 std::string log_directory(const Config& cfg);
