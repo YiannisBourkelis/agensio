@@ -58,11 +58,26 @@ bool below_log_dir(const std::string& directory, const std::string& path) noexce
     return !directory.empty() && path.size() > directory.size() + 1 && path.compare(0, directory.size(), directory) == 0 && path[directory.size()] == '/';
 }
 
-int open_below_log_dir(const LogPlacement& where, const std::string& path, int flags, unsigned mode, std::string& why) noexcept {
+namespace {
+
+constexpr int kProbeFine = -2;  // the probe's answer: nothing there the start would refuse, or nothing this account may judge
+
+// The fix each refusal carries (the alpha.129 report, S2: one answer for every kind was wrong for most):
+// a link standing for a directory, one standing for the log itself, a file of another kind.
+std::string dir_link_fix(const std::string& dir) {
+    return "; below the log directory " + dir + " every path is opened without following a link: make it a directory again (move the link aside, "
+           "mkdir it, move the files back); for logs on another disk, link or mount the log directory itself, which is followed";
+}
+const char* const kRecreate = "the start creates the log as a regular file, and so does the next reopen of a log already open";
+
+// open_below_log_dir and, with `probe`, its read-only twin: nothing made, nothing handed over, a missing
+// log or sites/ (which the start makes) and a directory this account may not enter answered kProbeFine.
+int walk_below(const LogPlacement& where, const std::string& path, int flags, unsigned mode, std::string& why, bool probe) noexcept {
 #ifdef _WIN32
     (void)where;
     (void)flags;
     (void)mode;
+    (void)probe;
     errno = EINVAL;
     why = path + ": not on this platform";
     return -1;
@@ -81,12 +96,14 @@ int open_below_log_dir(const LogPlacement& where, const std::string& path, int f
         real = fs::canonical(dir, ec);
     }
     if (ec) {
+        if (probe && (ec == std::errc::no_such_file_or_directory || ec == std::errc::permission_denied)) return kProbeFine;
         errno = ec.value();
         why = dir + ": " + ec.message();
         return -1;
     }
     int cur = ::open(real.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (cur < 0) {
+        if (probe && errno == EACCES) return kProbeFine;
         why = dir + ": " + std::strerror(errno);
         return -1;
     }
@@ -111,11 +128,13 @@ int open_below_log_dir(const LogPlacement& where, const std::string& path, int f
             int e = errno;
             ::close(cur);
             if (fd < 0) {
+                if (probe && (e == ENOENT || e == EACCES)) return kProbeFine;
                 errno = e;
                 // A link gives ELOOP, or ENOTDIR when a directory was asked for; a FIFO without a reader ENXIO.
-                if (e == ELOOP || (directory && e == ENOTDIR))
-                    why = path + ": a symbolic link" + (directory ? " or not a directory" : "") + "; below the log directory " + dir + " every path is opened without following a link";
-                else if (e == ENXIO) why = path + ": a FIFO or a device, not a regular file (below the log directory nothing else is opened)";
+                if (directory && (e == ELOOP || e == ENOTDIR)) why = path + ": a symbolic link or not a directory" + dir_link_fix(dir);
+                else if (e == ELOOP)
+                    why = path + ": a symbolic link; below the log directory " + dir + " every path is opened without following a link, and a log is a regular file: remove the link; " + kRecreate;
+                else if (e == ENXIO) why = path + ": a FIFO or a device, not a regular file (below the log directory nothing else is opened): remove it; " + kRecreate;
                 else if (e == EACCES) why = path + ": " + std::strerror(e) + " (this account cannot create it in " + walked + ")";
                 else why = path + ": " + std::strerror(e);
                 return -1;
@@ -131,19 +150,22 @@ int open_below_log_dir(const LogPlacement& where, const std::string& path, int f
             if (directory ? !S_ISDIR(st.st_mode) : !S_ISREG(st.st_mode)) {
                 ::close(fd);
                 errno = EINVAL;
-                why = path + ": not a " + (directory ? "directory" : "regular file") + " (below the log directory nothing else is opened)";
+                const char* kind = S_ISFIFO(st.st_mode) ? "a FIFO, " : S_ISDIR(st.st_mode) ? "a directory, " : S_ISSOCK(st.st_mode) ? "a socket, "
+                                   : (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode))                    ? "a device, " : "";
+                why = path + ": " + (directory ? "not a directory" : std::string(kind) + "not a regular file") + " (below the log directory nothing else is opened)" +
+                      (directory ? dir_link_fix(dir) : std::string(": move it aside; ") + kRecreate);
                 return -1;
             }
             if (!directory && st.st_nlink > 1) {  // a hard link to another file (fs.protected_hardlinks off): not written, not handed over
                 ::close(fd);
                 errno = EINVAL;
-                why = path + ": has " + std::to_string(st.st_nlink) + " names (a hard link); below the log directory a log has one";
+                why = path + ": has " + std::to_string(st.st_nlink) + " names (a hard link); below the log directory a log has one: remove this name (the file it shares keeps its other); " + kRecreate;
                 return -1;
             }
             if (!directory && st.st_uid != 0 && where.uid >= 0 && st.st_uid != static_cast<uid_t>(where.uid) && ::geteuid() != st.st_uid) {
                 ::close(fd);
                 errno = EINVAL;
-                why = path + ": owned by uid " + std::to_string(st.st_uid) + ", neither root's nor the server account's: not written";
+                why = path + ": owned by uid " + std::to_string(st.st_uid) + ", neither root's nor the server account's: not written; give it to the server's account, or remove it: " + kRecreate;
                 return -1;
             }
             if (!directory) {  // O_NONBLOCK served against a FIFO; a regular file's writes ignore it, but keep the descriptor plain
@@ -160,14 +182,24 @@ int open_below_log_dir(const LogPlacement& where, const std::string& path, int f
         int e = errno;
         ::close(cur);
         if (next < 0) {
+            if (probe && e == EACCES) return kProbeFine;
+            if (probe && e == ENOENT && sites) {
+                // The start makes sites/; a log directly in it is then made too, anything deeper is not.
+                const std::string rest = rel.substr(pos);
+                const std::size_t s2 = rest.find('/');
+                if (s2 == std::string::npos) return kProbeFine;
+                errno = ENOENT;
+                why = path + ": the directory " + walked + "/sites/" + rest.substr(0, s2) + " does not exist; below the log directory agensio makes only sites/";
+                return -1;
+            }
             errno = e;
             if (e == ELOOP || e == ENOTDIR)  // a link to a directory is ENOTDIR to an O_DIRECTORY open without following
-                why = walked + "/" + part + ": a symbolic link or not a directory; below the log directory " + dir + " every path is opened without following a link";
+                why = walked + "/" + part + ": a symbolic link or not a directory" + dir_link_fix(dir);
             else if (e == ENOENT) why = path + ": the directory " + walked + "/" + part + " does not exist; below the log directory agensio makes only sites/";
             else why = walked + "/" + part + ": " + std::strerror(e);
             return -1;
         }
-        if (sites && where.uid >= 0 && ::geteuid() == 0) {
+        if (!probe && sites && where.uid >= 0 && ::geteuid() == 0) {
             // sites/ is the server account's: it creates a site's log there on a reload, after the
             // privilege drop (the package makes it so; a start before 0.1.0-alpha.129 made it root's).
             struct stat st {};
@@ -180,6 +212,24 @@ int open_below_log_dir(const LogPlacement& where, const std::string& path, int f
         first = false;
     }
 #endif
+}
+
+}  // namespace
+
+int open_below_log_dir(const LogPlacement& where, const std::string& path, int flags, unsigned mode, std::string& why) noexcept {
+    return walk_below(where, path, flags, mode, why, false);
+}
+
+std::string probe_below_log_dir(const LogPlacement& where, const std::string& path) noexcept {
+    std::string why;
+    const int fd = walk_below(where, path, O_RDONLY, 0, why, true);
+    if (fd >= 0) {
+#ifndef _WIN32
+        ::close(fd);
+#endif
+        return {};
+    }
+    return fd == kProbeFine ? std::string() : why;
 }
 
 namespace {
@@ -389,9 +439,11 @@ bool LogRegistry::open_all(std::string& error) noexcept {
     return false;
 }
 
-void LogRegistry::reopen_all() noexcept {
+std::vector<LogRegistry::Failure> LogRegistry::reopen_all() noexcept {
+    std::vector<Failure> failed;
     for (auto& s : sinks_)
-        if (s->wanted()) s->reopen(where_);  // a failed reopen keeps writing to the previous descriptor
+        if (s->wanted() && !s->reopen(where_)) failed.push_back({s->path(), s->error(), s->errno_of()});  // the previous descriptor stays
+    return failed;
 }
 
 // ---- WorkerLogs ----

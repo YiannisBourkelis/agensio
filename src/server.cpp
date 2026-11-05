@@ -254,6 +254,28 @@ bool Server::isolate_logs(Config& cfg, const Config* running, std::string& error
     return true;
 }
 
+json::Value Server::reopen_and_report(std::string_view how) {
+    const std::vector<LogRegistry::Failure> failed = logs_.reopen_all();
+    json::Value out = json::Value::array();
+    const Config& cfg = gen_->cfg;
+    for (const auto& f : failed) {
+        // Who writes the file: the server's own logs by their keys, then the sites.
+        std::string writers;
+        auto add = [&](const std::string& w) { writers += (writers.empty() ? "" : ", ") + w; };
+        if (f.path == cfg.log.error) add("[log] error");
+        if (f.path == cfg.log.access) add("[log] access");
+        if (f.path == cfg.control.audit) add("[control] audit");
+        for (const auto& site : cfg.sites)
+            if (site.access_log == f.path && f.path != cfg.log.access && !site.server_names.empty()) add(site.server_names.front());
+        error_log_.error("cannot reopen log file (" + std::string(how) + ") for " + (writers.empty() ? std::string("?") : writers) + ": " + f.why +
+                         "; its lines go on into the file opened before, which logrotate's next run compresses and removes, until a reopen opens it");
+        out.push(json::Value::object().set("path", f.path).set("writers", writers).set("error", f.why));
+    }
+    std::lock_guard<std::mutex> lock(reopen_mutex_);
+    reopen_failed_ = out;
+    return out;
+}
+
 void Server::own_logs(const Config& cfg) {
 #ifndef _WIN32
     const HostFacts facts = system_facts();
@@ -1185,6 +1207,18 @@ json::Value Server::health_with(const std::vector<control::Finding>& more) {
         std::lock_guard<std::mutex> lock(log_expiry_mutex_);
         for (const auto& f : log_expiry_failed_.items()) extra.push_back(control::log_keep_finding(f));
     }
+    // The last reopen's files that did not open again (the alpha.129 report, P3): their lines go into
+    // the rotated file, then nowhere once logrotate compresses it.
+    {
+        std::lock_guard<std::mutex> lock(reopen_mutex_);
+        for (const auto& f : reopen_failed_.items())
+            extra.push_back(control::Finding{"error", "log_reopen_failed", "",
+                                             "the last reopen could not open " + std::string(f.get("path")) + " again (" + std::string(f.get("error")) + "): the lines of " +
+                                                 std::string(f.get("writers")) + " go on into the file opened before, which logrotate's next run compresses and removes, "
+                                                 "after which they are lost",
+                                             "the error names what stands at the path and what to do; then logs_reopen (agensio ctl logs-reopen), and this goes once "
+                                             "a reopen opens the file"});
+    }
     // Host protection (docs/configuration.md 18): whether the kernel's firewall limits the web
     // ports per address and a fail2ban jail reads the access logs, through the helper (nft and
     // fail2ban's socket are root's), never waited for; nothing for loopback-only listeners.
@@ -1758,8 +1792,7 @@ void Server::run() {
     std::function<void(const asio::error_code&, int)> on_reopen;
     on_reopen = [this, &reopen, &on_reopen](const asio::error_code& ec, int) {
         if (ec) return;
-        logs_.reopen_all();
-        error_log_.info("log files reopened (SIGUSR1)");
+        if (reopen_and_report("SIGUSR1").items().empty()) error_log_.info("log files reopened (SIGUSR1)");
         reopen.async_wait(on_reopen);
     };
     reopen.async_wait(on_reopen);

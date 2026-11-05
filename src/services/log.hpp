@@ -61,6 +61,11 @@ bool below_log_dir(const std::string& directory, const std::string& path) noexce
 // is made. -1 with `why` and errno (ELOOP for a link, ENOENT for a directory it does not make, EACCES
 // when the account cannot create the file, EINVAL for a path it does not walk).
 int open_below_log_dir(const LogPlacement& where, const std::string& path, int flags, unsigned mode, std::string& why) noexcept;
+// The same walk, read-only, for -t, the reload's notices and health (the alpha.129 report, P2: -t passed
+// what the start then refused): nothing made, nothing handed over, the file opened for reading and closed.
+// "" when the start would open `path` (a missing log, sites/ or log directory, which it makes) or when this
+// account may not look (a -t not run as root); else the start's refusal, with its fix.
+std::string probe_below_log_dir(const LogPlacement& where, const std::string& path) noexcept;
 
 class LogFile {
 public:
@@ -125,7 +130,10 @@ public:
     void open_wanted(std::vector<Failure>& failed) noexcept;
     // open_wanted for one error: false naming the first path that did not open in `error`.
     bool open_all(std::string& error) noexcept;
-    void reopen_all() noexcept;
+    // Every wanted sink opened again (SIGUSR1, logs_reopen); a file that does not open keeps its
+    // previous descriptor, so its lines go on into the file opened before: each such one in the answer
+    // (the alpha.129 report, P3: it was said nowhere).
+    std::vector<Failure> reopen_all() noexcept;
 
 private:
     std::vector<std::unique_ptr<LogFile>> sinks_;

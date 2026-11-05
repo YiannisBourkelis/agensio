@@ -80,7 +80,9 @@ struct ControlBackend {
     // An automatic certificate: an order started (`message` says so). A site with its own files
     // (step T3): they are loaded now, `message` saying what happened; false when they could not be.
     virtual bool renew_certificate(std::string_view site, std::string& error, std::string& message) = 0;
-    virtual void reopen_logs() = 0;
+    // Every log reopened: the files that did not open again, [{path, writers, error}] (their lines go on into the
+    // file opened before), [] when all did.
+    virtual json::Value reopen_logs() = 0;
     virtual const Config& running() = 0;
     // The restart-only keys the running configuration has other values for than the server
     // started with (control::restart_needed): kept until a restart.

@@ -128,15 +128,39 @@ chmod 644 "$R/sites.d/r.toml"
 "$BIN" -t -c "$R/agensio.toml" > "$R/t2.out" 2>&1; R2=$?
 check "a group-writable site file naming a log outside sites/ is set aside with the rule; the same file 0644 is the owner's word and loads" "0 yes 0 no" \
   "$R1 $(grep -q 'r.toml' "$R/t1.out" && grep -q 'names its access log in' "$R/t1.out" && echo yes) $R2 $(grep -q 'set aside' "$R/t2.out" && echo yes || echo no)"
-# A sites/ that is a link (the alpha.128 addendum, S3): -t says it first, naming the link and the sites
-# behind it, with the ways out; --strict fails on it, since the start or reload refuses the link by name.
+# A sites/ that is a link (the alpha.128 addendum, S3): -t walks the logs as the start does (the alpha.129
+# report, P2), so the site file behind it is set aside there with the link named and its fix; --strict
+# fails on it. A main-file site whose log is a FIFO fails -t, as it fails the start.
 mkdir -p "$T/elsewhere"; ln -s "$T/elsewhere" "$R/logs/sites"
 site k.test 18310 "$T/www/c" "access_log = \"$R/logs/sites/k.test.log\"" > "$R/sites.d/k.toml"
 "$BIN" -t -c "$R/agensio.toml" > "$R/t3.out" 2>&1; R3=$?
 "$BIN" -t --strict -c "$R/agensio.toml" > "$R/t4.out" 2>&1; R4=$?
-check "-t warns log_path_link for a sites/ that is a link, naming it, its target, the site behind it and the fix; --strict fails on it" "0 yes yes 1" \
-  "$R3 $(grep -q "warning: $R/logs/sites is a symbolic link (to $T/elsewhere): .*k.test.*set aside at the next start or reload" "$R/t3.out" && echo yes) $(grep -q 'fix: make it a directory' "$R/t3.out" && echo yes) $R4"
+check "-t sets aside the site file whose log lies behind a linked sites/, naming the link and the fix; --strict fails on it" "0 yes yes 1" \
+  "$R3 $(grep -q "warning: $R/sites.d/k.toml set aside, its sites not loaded: cannot open the access log of k.test: $R/logs/sites: a symbolic link or not a directory" "$R/t3.out" && echo yes) $(grep -q 'make it a directory again' "$R/t3.out" && echo yes) $R4"
 rm -f "$R/logs/sites" "$R/sites.d/k.toml"
+mkdir -p "$R/logs/sites"; mkfifo "$R/logs/sites/m.test.log"
+cp "$R/agensio.toml" "$R/agensio.toml.keep"
+site m.test 18311 "$T/www/c" "access_log = \"$R/logs/sites/m.test.log\"" >> "$R/agensio.toml"
+"$BIN" -t -c "$R/agensio.toml" > "$R/t5.out" 2>&1; R5=$?
+check "-t fails for a main-file site whose log is a FIFO, as the start would, naming the kind and the fix" "1 yes" \
+  "$R5 $(grep -q "configuration error: cannot open the access log of m.test: $R/logs/sites/m.test.log: a FIFO, not a regular file.*move it aside" "$R/t5.out" && echo yes)"
+mv "$R/agensio.toml.keep" "$R/agensio.toml"; rm -f "$R/logs/sites/m.test.log"
+
+# A reopen that cannot open a log again (the alpha.129 report, P3): logrotate's rename, then a FIFO at the
+# path. The answer names it (exit 1), the error log says who writes it, health says log_reopen_failed, and
+# the lines go on into the rotated file; the FIFO gone, the next reopen opens the log and the finding goes.
+site o.test 18312 "$T/www/c" "access_log = \"$T/logs/sites/o.test.log\"" > "$T/sites.d/o.toml"; reload
+curl -sS -o /dev/null -H 'Host: o.test' http://127.0.0.1:18312/; sleep 1.2
+mv "$T/logs/sites/o.test.log" "$T/logs/sites/o.test.log.1"; mkfifo "$T/logs/sites/o.test.log"
+"$BIN" ctl logs-reopen --yes --reason rotation --socket "$CS" > "$T/reopen.out" 2>&1; RO=$?
+curl -sS -o /dev/null -H 'Host: o.test' "http://127.0.0.1:18312/?after"; sleep 1.2
+check "a reopen that meets a FIFO: answered under failed (exit 1), the error log names o.test, health log_reopen_failed, the lines go on into the rotated file" "1 yes yes yes 1" \
+  "$RO $(grep -q '"failed"' "$T/reopen.out" && grep -q 'o.test.log' "$T/reopen.out" && echo yes) $(grep -q 'cannot reopen log file (logs_reopen) for o.test: .*FIFO' "$T/logs/error.log" && echo yes) $(health | grep -q '"code":"log_reopen_failed"' && echo yes) $(grep -c '?after' "$T/logs/sites/o.test.log.1")"
+rm -f "$T/logs/sites/o.test.log"
+"$BIN" ctl logs-reopen --yes --reason rotation --socket "$CS" > /dev/null 2>&1; RO2=$?
+check "the FIFO gone: the reopen opens the log, health is clear of it" "0 yes no" \
+  "$RO2 $([ -f "$T/logs/sites/o.test.log" ] && [ ! -p "$T/logs/sites/o.test.log" ] && echo yes) $(health | grep -q '"code":"log_reopen_failed"' && echo yes || echo no)"
+rm -f "$T/sites.d/o.toml"; reload
 
 # The control plane: a site-create whose file would be set aside (its alias claims a running
 # site's name on the same address) is refused and its file removed, never reported as done.

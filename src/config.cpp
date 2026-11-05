@@ -4186,17 +4186,29 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
     // X-XSS-Protection turned on.
     for (const auto& site : cfg.sites)
         for (const auto& [code, text] : site.header_notes) out.push_back({code, "warning", site.server_names.front(), text});
-    // A symbolic link below the log directory on the way to a log (docs/configuration.md 8c; the alpha.128
-    // report's addendum, S3): the start and every reload refuse it by name and set the sites behind it
-    // aside, and the packaged unit runs -t before the start, so it is said here first. The log directory
-    // itself a link is the system's layout, followed. One notice per link, naming who logs behind it.
+    // What the next start refuses below the log directory (docs/configuration.md 8c), said at load: -t, the
+    // reload's error-log lines, health. A symbolic link on the way (log_path_link, the alpha.128 addendum, S3),
+    // one notice per link naming who logs behind it; anything else the start's walk refuses (a FIFO, a hard
+    // link, a file of another account, a directory it does not make: log_path_refused, the alpha.129 report,
+    // P2), read through the same walk without changing anything. A reload keeps a log it has open (S1), so
+    // both say "the next start". The log directory itself a link is the system's layout, followed.
 #ifndef _WIN32
     {
         const std::string dir = log_directory(cfg);
-        std::vector<std::pair<std::string, std::vector<std::string>>> links;  // the link -> who logs behind it, in load order
-        std::map<std::string, std::string> targets;
-        bool own_file = false;  // one of the server's own files behind a link: the start or reload is refused
-        auto walk = [&](const std::string& log, const std::string& who, bool own) {
+        LogPlacement where{dir, -1, -1};
+        {
+            unsigned uid = 0, gid = 0;
+            if (!cfg.user.empty() && system_facts().user(cfg.user, uid, gid)) where.uid = static_cast<long>(uid);
+        }
+        struct Link {
+            std::string path, target;
+            bool directory = false;  // a directory on the way for some log, not the log itself
+            std::vector<std::string> who;
+            bool fatal = false;      // the server's own file or a main-file site behind it: the start is refused
+        };
+        std::vector<Link> links;
+        const std::string main_file = cfg.config_path.string();
+        auto look = [&](const std::string& log, const std::string& who, bool fatal) {
             if (log.empty() || log == "stderr" || log == "off" || !below_log_dir(dir, log)) return;
             std::string path = dir;
             std::string_view rest = std::string_view(log).substr(dir.size() + 1);
@@ -4205,42 +4217,46 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                 path += "/" + std::string(rest.substr(0, slash));
                 rest = slash == std::string_view::npos ? std::string_view() : rest.substr(slash + 1);
                 struct stat st {};
-                if (::lstat(path.c_str(), &st) != 0) return;  // not there: made by the start (sites/) or refused at the open
+                if (::lstat(path.c_str(), &st) != 0) break;  // not there: the probe below says whether the start makes it
                 if (!S_ISLNK(st.st_mode)) continue;
-                auto it = std::find_if(links.begin(), links.end(), [&](const auto& l) { return l.first == path; });
+                auto it = std::find_if(links.begin(), links.end(), [&](const Link& l) { return l.path == path; });
                 if (it == links.end()) {
                     char buf[4096];
                     const ssize_t n = ::readlink(path.c_str(), buf, sizeof buf - 1);
-                    targets[path] = n > 0 ? std::string(buf, static_cast<std::size_t>(n)) : std::string();
-                    links.push_back({path, {}});
+                    links.push_back({path, n > 0 ? std::string(buf, static_cast<std::size_t>(n)) : std::string(), false, {}, false});
                     it = links.end() - 1;
                 }
-                if (std::find(it->second.begin(), it->second.end(), who) == it->second.end()) it->second.push_back(who);
-                own_file = own_file || own;
+                it->directory = it->directory || !rest.empty();
+                if (std::find(it->who.begin(), it->who.end(), who) == it->who.end()) it->who.push_back(who);
+                it->fatal = it->fatal || fatal;
                 return;
             }
+            // No link on the way: the start's own walk, read-only.
+            if (const std::string why = probe_below_log_dir(where, log); !why.empty())
+                out.push_back({"log_path_refused", "warning", fatal ? std::string() : who,
+                               (fatal ? "the next start is refused: " : "the next start sets " + who + " aside (a reload keeps a log it has open): ") +
+                                   std::string("cannot open ") + (fatal ? who + "'s log: " : "its access log: ") + why,
+                               ""});
         };
-        walk(cfg.log.access, "[log] access", true);
-        walk(cfg.log.error, "[log] error", true);
-        walk(cfg.control.audit, "[control] audit", true);
+        look(cfg.log.access, "[log] access", true);
+        look(cfg.log.error, "[log] error", true);
+        look(cfg.control.audit, "[control] audit", true);
         for (const auto& site : cfg.sites)
-            if (!site.server_names.empty() && site.access_log != cfg.log.access) walk(site.access_log, site.server_names.front(), false);
-        for (const auto& [link, who] : links) {
+            if (!site.server_names.empty() && site.access_log != cfg.log.access) look(site.access_log, site.server_names.front(), site.source.empty() || site.source == main_file);
+        for (const Link& l : links) {
             std::string names;
-            std::size_t sites = 0;
-            for (const auto& w : who) {
-                names += (names.empty() ? "" : ", ") + w;
-                if (w.front() != '[') ++sites;
-            }
-            const std::string& target = targets[link];
-            const std::string what = sites && sites == who.size() ? (sites == 1 ? "the site logging there (" + names + ") is set aside at the next start or reload"
-                                                                              : "the " + std::to_string(sites) + " sites logging there (" + names + ") are set aside at the next start or reload")
-                                                                 : "the start or reload is refused for " + names + (sites ? ", the sites among them set aside" : "");
+            for (const auto& w : l.who) names += (names.empty() ? "" : ", ") + w;
+            const std::string what = l.fatal ? "the next start is refused (" + names + " behind it)"
+                                             : (l.who.size() == 1 ? "the site logging there (" + names + ") is set aside at the next start"
+                                                                  : "the " + std::to_string(l.who.size()) + " sites logging there (" + names + ") are set aside at the next start") +
+                                                   std::string(" (a reload keeps a log it has open; one it would open there sets its site aside)");
             out.push_back({"log_path_link", "warning", "",
-                           link + " is a symbolic link" + (target.empty() ? "" : " (to " + target + ")") + ": below the log directory " + dir +
+                           l.path + " is a symbolic link" + (l.target.empty() ? "" : " (to " + l.target + ")") + ": below the log directory " + dir +
                                " agensio never follows one, so " + what,
-                           "make it a directory again (move the link aside, mkdir it, move the files back), or set [log] access to a file in the directory it points to, "
-                           "which makes that the log directory; a link at or above the log directory itself is followed"});
+                           l.directory ? "make it a directory again (move the link aside, mkdir it, move the files back); for logs on another disk, link or mount the "
+                                         "log directory itself, which is followed"
+                                       : "remove the link: the start creates the log as a regular file there, and so does the next reopen (logs_reopen) of a log "
+                                         "already open; or put the regular file back in its place"});
         }
     }
 #endif
@@ -5951,28 +5967,37 @@ std::string check_log_exclusions(const SiteConfig& site) {
     for (const auto& l : site.login_paths)
         if (std::find(login.begin(), login.end(), l) == login.end()) login.push_back(l);
     const std::string front = front_controller_of(site);  // "/index.php" where missing paths are routed to it
+    // The scripts a login is also reached through, as the login jail counts it (control/protection.cpp
+    // spelling_regex, the alpha.129 report, P1): on a PHP site /index.php before any login path, and alone
+    // for a query login on "/" (/index.php?_task=login), whatever the site's try_files; the site's own front
+    // controller too.
+    std::vector<std::string> fronts;
+    if (!front.empty()) fronts.push_back(front);
+    if (php_app(site.app) && std::none_of(fronts.begin(), fronts.end(), [&](const std::string& f) { return same(f, "/index.php"); })) fronts.push_back("/index.php");
+    const auto is_script = [&](std::string_view f) { return f.size() > 4 && same(f.substr(f.size() - 4), ".php"); };
     for (const std::string& p : site.access_log_exclude) {
         // Through the front controller (the alpha.128 report, P1): /index.php and /index.php/ take every
-        // request the application routes, its login form among them; /index.php/login is /login to the
-        // application (PATH_INFO), and the login jail's filter reads it so, so that form is judged too.
-        std::vector<std::string> forms{p};
-        if (!front.empty()) {
-            if (same(p, front) || same(p, front + "/"))
-                return "\"" + p + "\" covers the front controller " + front + ", which runs every path the application routes, its login form among them (a request for " +
-                       front + "/login runs as /login); exclude the application's paths by their own names";
-            if (access::iequal_prefix(p, front) && p.size() > front.size() + 1 && p[front.size()] == '/') forms.push_back(p.substr(front.size()));
-        }
+        // request the application routes, its login form among them.
+        if (!front.empty() && (same(p, front) || same(p, front + "/")))
+            return "\"" + p + "\" covers the front controller " + front + ", which runs every path the application routes, its login form among them (a request for " +
+                   front + "/login runs as /login); exclude the application's paths by their own names";
         for (const std::string& l : login) {
             const std::size_t q = l.find('?');
-            const std::string_view lp = std::string_view(l).substr(0, q);
-            // The exclusion covers the login path, or one without a query covers the exclusion
-            // (/wp-login.php/x runs /wp-login.php; a login with a query is that path with it alone).
-            for (const std::string& form : forms) {
-                const bool covers = below(form, lp);
-                if (covers || (q == std::string::npos && below(lp, form)))
-                    return "\"" + p + "\" " + (covers ? "covers" : "lies under") + " the login path " + l +
-                           (form != p ? " through the front controller " + front + " (the application runs " + p + " as " + form + ")" : "") +
-                           " (the fail2ban jail counts attempts there); a login path stays in the access log";
+            const std::string lp(std::string_view(l).substr(0, q));
+            // Every form the login is reached in: its path, and each front before it (the front alone for
+            // the root). The exclusion covers a form; or lies under one without a query (/login/x); or lies
+            // under a .php script's form, any query (PHP runs /ucp.php/x?mode=login and
+            // /index.php/x?_task=login as the login itself).
+            std::vector<std::pair<std::string, std::string>> forms{{lp, ""}};  // the form, the front it is reached through
+            for (const std::string& f : fronts) forms.push_back({lp == "/" ? f : f + lp, f});
+            for (const auto& [form, through] : forms) {
+                const bool covers = below(p, form);
+                if (!covers && !((q == std::string::npos || is_script(form)) && below(form, p))) continue;
+                std::string how;
+                if (through == front && !through.empty()) how = " through the front controller " + front + " (the application runs " + form + " as " + lp + ")";
+                else if (!through.empty()) how = " as " + form + (q == std::string::npos ? "" : l.substr(q)) + ", which the login jail counts too (PHP runs it as the same login)";
+                return "\"" + p + "\" " + (covers ? "covers" : "lies under") + " the login path " + l + how +
+                       " (the fail2ban jail counts attempts there); a login path stays in the access log";
             }
         }
         // An address rule: the rule deciding the path itself (the longest covering it, the rules being
@@ -6007,6 +6032,36 @@ std::string check_log_exclusions(const SiteConfig& site) {
 std::string log_directory(const Config& cfg) {
     if (cfg.log.access.empty()) return "/var/log/agensio";
     return fs::path(cfg.log.access).parent_path().string();
+}
+
+std::vector<std::string> isolate_log_paths(Config& cfg) {
+#ifndef _WIN32
+    const std::string dir = log_directory(cfg);
+    LogPlacement where{dir, -1, -1};
+    {
+        unsigned uid = 0, gid = 0;
+        if (!cfg.user.empty() && system_facts().user(cfg.user, uid, gid)) where.uid = static_cast<long>(uid);
+    }
+    std::vector<std::string> fatal;
+    for (const auto& [key, path] : {std::pair<const char*, std::string>{"[log] access", cfg.log.access}, {"[log] error", cfg.log.error}, {"[control] audit", cfg.control.audit}})
+        if (below_log_dir(dir, path))
+            if (const std::string why = probe_below_log_dir(where, path); !why.empty()) fatal.push_back("the start cannot open " + std::string(key) + " " + path + ": " + why);
+    if (!fatal.empty()) return fatal;
+    std::map<std::string, std::string> judged;  // a log path -> the probe's answer, once per file
+    set_aside_until_clean(cfg, nullptr, [&](const Config& c) -> std::optional<SiteConflict> {
+        for (std::size_t i = 0; i < c.sites.size(); ++i) {
+            const SiteConfig& site = c.sites[i];
+            if (site.access_log.empty() || site.access_log == c.log.access || !below_log_dir(dir, site.access_log) || site.server_names.empty()) continue;
+            auto it = judged.find(site.access_log);
+            if (it == judged.end()) it = judged.emplace(site.access_log, probe_below_log_dir(where, site.access_log)).first;
+            if (!it->second.empty()) return SiteConflict{i, SiteConflict::npos, "cannot open the access log of " + site.server_names.front() + ": " + it->second};
+        }
+        return std::nullopt;
+    });
+#else
+    (void)cfg;
+#endif
+    return {};
 }
 
 bool site_log_name(const std::string& path, const Config& cfg, std::string* name) {

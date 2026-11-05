@@ -1681,6 +1681,10 @@ int main(int argc, char** argv) {
     try {
         cfg = agensio::load_config(config_path, nullptr, true);  // the record of the files served ranks conflicts as at the last reload
         if (!pools) hosting_errors = agensio::isolate_hosting(cfg, agensio::system_facts(), nullptr);
+        // The logs as the start opens them (docs/configuration.md 8c; the alpha.129 report, P2), before the
+        // certificates as in the server; not for a reload, which keeps the files it has open.
+        if (!pools && (test_only || explain) && !reload)
+            for (auto& e : agensio::isolate_log_paths(cfg)) hosting_errors.push_back(std::move(e));
         if (!pools && (test_only || explain || reload)) certificate_notes = agensio::check_certificates(cfg);
     } catch (const std::exception& e) {
         std::cerr << "configuration error: " << e.what() << "\n";
@@ -1755,13 +1759,13 @@ int main(int argc, char** argv) {
         for (const auto& o : cfg.orphan_additions)
             std::cerr << "warning: " << o.file << " holds root additions for site " << o.site
                       << ", which is not in the configuration (disabled or deleted): ignored\n";
-        bool link_on_the_way = false;  // log_path_link: the start or reload refuses it by name, so --strict fails here first
+        bool log_refused = false;  // log_path_link, log_path_refused: the next start refuses it by name, so --strict fails here first
         for (const auto& n : agensio::access_notices(cfg)) {
             std::cerr << (n.severity == "warning" ? "warning: " : "note: ") << n.text << (n.fix.empty() ? "" : "; fix: " + n.fix) << "\n";
-            link_on_the_way = link_on_the_way || n.code == "log_path_link";
+            log_refused = log_refused || n.code == "log_path_link" || n.code == "log_path_refused";
         }
-        if (strict && link_on_the_way) {
-            std::cerr << "configuration error: a symbolic link below the log directory on the way to a log (--strict)\n";
+        if (strict && log_refused) {
+            std::cerr << "configuration error: a log below the log directory the next start refuses (--strict)\n";
             return 1;
         }
         std::cout << "configuration " << cfg.config_path.string() << " is OK (" << cfg.sites.size() << " site(s)"

@@ -276,6 +276,12 @@ private:
     std::chrono::seconds log_expiry_interval_{3600};
     mutable std::mutex log_expiry_mutex_;
     json::Value log_expiry_failed_;
+    // The last reopen's files that did not open again (SIGUSR1, logs_reopen; the alpha.129 report, P3), each
+    // {path, writers, error}: their lines go on into the file opened before. Health's log_reopen_failed.
+    mutable std::mutex reopen_mutex_;
+    json::Value reopen_failed_ = json::Value::array();
+    // Every log reopened; each one that did not, said in the error log; the failures kept for health and answered.
+    json::Value reopen_and_report(std::string_view how);
     // What the watch has done, for status and health's certificate_watch_stalled; worker 0's, as the
     // timer is. `armed` is the start (the first run is due an interval later), `last` {} before it.
     struct CertWatchRecord {
@@ -365,7 +371,7 @@ private:
         return out;
     }
     bool renew_certificate(std::string_view site, std::string& error, std::string& message) override;
-    void reopen_logs() override { logs_.reopen_all(); }
+    json::Value reopen_logs() override { return reopen_and_report("logs_reopen"); }
     const Config& running() override { return gen_->cfg; }
     bool provision_available() override { return provisioner_.available(); }
     json::Value provision(const json::Value& req) override { return provisioner_.request(req); }

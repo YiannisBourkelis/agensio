@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.1.0-alpha.130
+
+- **Fix (security): a query login on `/` could be excluded through `/index.php`** (the alpha.129 report,
+  P1; security row 58). On a PHP site without a front controller (`app = "php"`, Roundcube's
+  `/?_task=login`, Kanboard's `/?controller=AuthController&action=check`), `access_log_exclude_paths =
+  ["/index.php"]` or `["/index.php/"]` loaded, though PHP runs `/index.php?_task=login` as the login and
+  the login jail counts that form: unlimited guessing with no line for the login or the `-post` jail. The
+  check now judges a login in every form the login jail counts (`/index.php` before any login path on a PHP
+  site, alone for a query login on `/`, the site's own front controller too), and path info below a `.php`
+  script's form whatever the query (`/ucp.php/x?mode=login`, `/index.php/x?_task=login`).
+- **Fix: `-t` passed what the start then refused** (P2). The packaged unit runs `agensio -t` before the
+  start; alpha.129's `-t` judged links alone, so a main-file site whose log was a FIFO, a hard link, a
+  directory or under a missing subdirectory, or a server file behind a link, passed `-t` and then ended
+  the start, and the same for a site file's log set the site aside unannounced. `-t` now walks every log
+  below the log directory as the start does, read-only (`probe_below_log_dir`, `isolate_log_paths`): a
+  site file's log the start cannot open sets that file aside in `-t` too (a warning; `--strict` fails), and
+  a main-file site's or a server file's makes `-t` fail. While the server runs, the reload's lines and
+  health say it before the next start: `log_path_link` for a link, `log_path_refused` for anything else.
+- **Fix: a reopen that could not open a file again said nothing** (P3). A FIFO or a link at a log's path
+  after logrotate's rename left `SIGUSR1` and `logs_reopen` answering ok, the site's lines going on into the
+  rotated file, which logrotate's next run compresses and removes. Each such file is now an error-log line
+  naming who writes it and why, the `logs_reopen` answer's `failed` with status 409, and health's error
+  `log_reopen_failed` until a reopen opens it.
+- The log path notices say "the next start" (S1: a reload keeps a log it has open), and each refusal
+  carries the fix for what stands there (S2): a link standing for a directory is made a directory again,
+  logs on another disk link or mount the log directory itself; a link, FIFO or hard link standing for the
+  log is removed and the start creates the log. The advice to move `[log] access`, which set aside every
+  managed site file, is gone. `access_log_keep_failed` says "the next start" too.
+- `config_reference` gives `access_log` as a key of the site file, section 8c (S3; it said `site-create`,
+  whose request has had no such field since alpha.129).
+
 ## 0.1.0-alpha.129 (2026-11-05)
 
 - **Security: where root opens the logs** (`docs/configuration.md` 8c, `docs/security-control-plane.md`

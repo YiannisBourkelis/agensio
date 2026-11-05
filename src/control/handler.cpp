@@ -881,9 +881,18 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         return can_wait;
     }
     if (path == "/v1/logs/reopen") {
-        backend_->reopen_logs();
-        audit_peer(s, what, "ok");
-        reply(s, 200, json::Value::object().set("ok", true));
+        const json::Value failed = backend_->reopen_logs();
+        if (failed.items().empty()) {
+            audit_peer(s, what, "ok");
+            reply(s, 200, json::Value::object().set("ok", true));
+            return false;
+        }
+        // A file that did not open again keeps its previous descriptor (the alpha.129 report, P3: answered
+        // ok): its lines go on into the rotated file, which the next rotation compresses and removes.
+        audit_peer(s, what, std::to_string(failed.items().size()) + " file(s) not reopened");
+        reply(s, 409, json::Value::object().set("ok", false).set("failed", failed)
+                          .set("error", "some log files did not open again; their lines go on into the files opened before (the rotated ones), "
+                                        "which logrotate's next run compresses and removes; health says log_reopen_failed until a reopen opens them"));
         return false;
     }
     if (trash_path || path == "/v1/trash/expire") {

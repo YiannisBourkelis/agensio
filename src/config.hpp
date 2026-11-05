@@ -996,6 +996,12 @@ std::string log_directory(const Config& cfg);
 // <log directory>/sites/<name>.log, the one site log every site file may name (docs/configuration.md
 // 8c): `name` set when `path` has that form, whatever its characters.
 bool site_log_name(const std::string& path, const Config& cfg, std::string* name = nullptr);
+// What the start does with the logs below the log directory, judged read-only (services/log.hpp
+// probe_below_log_dir) for -t, which the packaged unit runs before the start (the alpha.129 report, P2: -t
+// passed what the start then refused): a site file whose log the start cannot open is set aside as the start
+// sets it aside; a main-file site's throws, as at the start; the server's own files are returned, each a
+// refusal of the start ("" none).
+std::vector<std::string> isolate_log_paths(Config& cfg);
 // Where a site's access_log may be (docs/configuration.md 8c, security row 59): "" when `log` (resolved,
 // or "" for none) may be named by a site file that is the main configuration owner's word
 // (`owner_file`: any path, as nginx's and Apache's configuration names any) or by any other file (sites/
