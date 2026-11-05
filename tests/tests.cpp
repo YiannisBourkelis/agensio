@@ -14936,6 +14936,10 @@ static void test_access_log_privacy() {
         const json::Value r3 = log_retention::expire({log_retention::Keep{"v.test", (dir / "logs2" / "sites" / "v.log").string(), 3, (dir / "logs2").string()}}, now);
         CHECK(r3["removed"].items().empty() && r3["failed"].items().size() == 1 && fs::exists(dir / "elsewhere" / "v.log.3") &&
               std::string(r3["failed"].items()[0].get("error")).find("without following a link") != std::string::npos);
+        // Health's fix names the link, not the directory's rights (the alpha.128 report's addendum, S3).
+        const control::Finding linked = control::log_keep_finding(r3["failed"].items()[0]);
+        CHECK(linked.code == "access_log_keep_failed" && linked.fix.find("symbolic link") != std::string::npos && linked.fix.find("make it a directory") != std::string::npos &&
+              linked.fix.find("root helper") == std::string::npos);
         // A log not below the walk's start is refused, whatever its name.
         const json::Value r4 = log_retention::expire({log_retention::Keep{"v.test", (dir / "elsewhere" / "v.log").string(), 3, (dir / "logs2").string()}}, now);
         CHECK(r4["removed"].items().empty() && r4["failed"].items().size() == 1 && fs::exists(dir / "elsewhere" / "v.log.3"));

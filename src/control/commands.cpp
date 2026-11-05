@@ -602,11 +602,17 @@ Finding log_keep_finding(const json::Value& failed) {
     if (log.empty())
         return Finding{"warn", "access_log_keep_failed", site, "the sites' rotated access logs were not checked for access_log_keep_days: " + error,
                        "the next hourly run tries again; this goes once one succeeds"};
+    // The fix by the cause (the alpha.128 report's addendum, S3: a link got the access rights' answer):
+    // a link on the way, which the walk never follows, or the rights of the directory.
+    const bool link = error.find("without following a link") != std::string::npos;
     return Finding{"warn", "access_log_keep_failed", site,
                    "a rotated file of " + log + " could not be deleted (" + error + "), so it keeps lines older than the site's access_log_keep_days (" +
                        std::to_string(static_cast<int>(failed["days"].num())) + ")",
-                   "agensio deletes them through its root helper, which runs when the server is started as root (the packaged service is): "
-                   "started otherwise, its account needs write access to the log's directory. The next hourly run tries again; this goes once one succeeds"};
+                   link ? "the path holds a symbolic link, which agensio never follows below the log directory: not for these deletes, and since "
+                          "0.1.0-alpha.129 not to open a log, so a site whose log lies behind one is set aside at the next reload (docs/configuration.md 8c); "
+                          "make it a directory and move the files into it. The next hourly run tries again; this goes once one succeeds"
+                        : "agensio deletes them through its root helper, which runs when the server is started as root (the packaged service is): "
+                          "started otherwise, its account needs write access to the log's directory. The next hourly run tries again; this goes once one succeeds"};
 }
 
 std::string h3_bind_words(const H3BindProblem& p) {

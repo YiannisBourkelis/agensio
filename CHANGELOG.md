@@ -56,6 +56,10 @@
   the person had spent a code and with the rest of the approval batch skipped. The request now runs the
   loader's coverage check on the rules as the file would hold them (`log_view_of`) and the own-log rule,
   so the dry run says it and nothing waits for a code only to fail.
+- Health's `access_log_keep_failed` names its cause (the alpha.128 report's addendum, S3): when the hourly
+  deletes met a symbolic link below the log directory, the fix told the administrator about the directory's
+  access rights; it now says the link is never followed, that a site whose log lies behind one is set aside
+  at the next reload, and to make it a directory.
 
 ## 0.1.0-alpha.128 (2026-11-05)
 
