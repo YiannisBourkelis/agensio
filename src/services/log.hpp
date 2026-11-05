@@ -64,8 +64,9 @@ int open_below_log_dir(const LogPlacement& where, const std::string& path, int f
 // The same walk, read-only, for -t, the reload's notices and health (the alpha.129 report, P2: -t passed
 // what the start then refused): nothing made, nothing handed over, the file opened for reading and closed.
 // "" when the start would open `path` (a missing log, sites/ or log directory, which it makes) or when this
-// account may not look (a -t not run as root); else the start's refusal, with its fix.
-std::string probe_below_log_dir(const LogPlacement& where, const std::string& path) noexcept;
+// account may not look (a -t not run as root); else the start's refusal, with its fix, or without it when
+// `fix` is given, which then holds the fix alone.
+std::string probe_below_log_dir(const LogPlacement& where, const std::string& path, std::string* fix = nullptr) noexcept;
 
 class LogFile {
 public:
@@ -134,6 +135,8 @@ public:
     // previous descriptor, so its lines go on into the file opened before: each such one in the answer
     // (the alpha.129 report, P3: it was said nowhere).
     std::vector<Failure> reopen_all() noexcept;
+    // Whether a sink for `path` is open: a reload keeps it as it is (validate judges as the reload does).
+    bool is_open(const std::string& path) const noexcept;
 
 private:
     std::vector<std::unique_ptr<LogFile>> sinks_;

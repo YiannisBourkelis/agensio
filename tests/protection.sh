@@ -138,7 +138,8 @@ check "a second site on another port with its own login paths (one through the q
 : > $T/spell.log; i=0
 for p in '/?controller=AuthController&action=check' '/index.php?controller=AuthController&action=check' '/?controller=Auth%43ontroller&action=check' '/?action=check&controller=AuthController' \
          '/?controller=AuthController&action=check&csrf=1' '/?controller=%61uthController&action=%43HECK' '/LOGIN' '//login' '/./login' '/x/../login' '/x/%2e%2e/login' '/%4Cogin' '/%2Flogin' \
-         '/login?next=/' '/index.php/login' '/signin/' '/%73ignin'; do
+         '/login?next=/' '/index.php/login' '/signin/' '/%73ignin' '/index.php/x?controller=AuthController&action=check' '/index.php/?controller=AuthController&action=check' \
+         '/index.php/api/notices/?action=check&controller=AuthController'; do
   i=$((i+1)); printf '203.0.113.9 - - [02/Oct/2026:10:00:%02d +0000] "POST %s HTTP/1.1" 302 0 "-" "x"\n' $i "$p" >> $T/spell.log; done
 for p in '/login.html' '/login/x' '/signinx' '/?controller=TaskController&action=save' '/signin/reset' '/index.php' '/index.php?option=com_content&task=article.save' '/index.php?controller=BoardAjaxController&action=save'; do
   i=$((i+1)); printf '203.0.113.9 - - [02/Oct/2026:10:00:%02d +0000] "POST %s HTTP/1.1" 302 0 "-" "x"\n' $i "$p" >> $T/spell.log; done
@@ -148,7 +149,7 @@ printf 'one.test:18880 203.0.113.9 - - [02/Oct/2026:10:00:41 +0000] "POST /login
 printf '[2001:db8::1]:443 2001:db8::9 - - [02/Oct/2026:10:00:42 +0000] "POST /signin HTTP/1.1" 302 0 "-" "x"\n' >> $T/spell.log
 printf -- '-:80 198.51.100.4 - - [02/Oct/2026:10:00:43 +0000] "GET /login HTTP/1.0" 421 0 "-" "x"\n' >> $T/spell.log  # printf -- : a line starting with - is no option
 PATHS=$(ctl protection --jail | sed -n 's/^filter    = agensio-login\[paths="\(.*\)"\]$/\1/p' | head -1)
-check "the rendered login filter matches all seventeen spellings of the sites' logins (percent-encoding in either case, encoded slashes and dots, repeated slashes, dot segments, case, trailing slash, the PHP front controller before the path, query order and extra parameters), and two vhost_combined lines (a name, an IPv6 literal, in front), and none of the ten that are not logins (a format suffix or path info on a plain path, index.php alone or with another query, a GET with the prefix)" "19 matched, 10 missed" "$(fail2ban-regex $T/spell.log "agensio-login[paths=\"$PATHS\"]" 2>&1 | sed -n 's/^Lines: [0-9]* lines, [0-9]* ignored, \([0-9]* matched, [0-9]* missed\)$/\1/p')"
+check "the rendered login filter matches all twenty spellings of the sites' logins (percent-encoding in either case, encoded slashes and dots, repeated slashes, dot segments, case, trailing slash, the PHP front controller before the path, the front controller with path info before a query login (the alpha.130 report, F1), query order and extra parameters), and two vhost_combined lines (a name, an IPv6 literal, in front), and none of the ten that are not logins (a format suffix or path info on a plain path, index.php alone or with another query, a GET with the prefix)" "22 matched, 10 missed" "$(fail2ban-regex $T/spell.log "agensio-login[paths=\"$PATHS\"]" 2>&1 | sed -n 's/^Lines: [0-9]* lines, [0-9]* ignored, \([0-9]* matched, [0-9]* missed\)$/\1/p')"
 # The alpha.45 report's pathological lines: "./" repeated to 4, 8 and 16 KB and "a/../" to 16 KB before
 # the login path; the grammar is unambiguous, so all four match within the time limit (2.3 s and worse before).
 python3 - "$T/slow.log" <<'PYT'
@@ -156,11 +157,13 @@ import sys
 lines = ["/" + "./" * 2048 + "login", "/" + "./" * 4096 + "login", "/" + "./" * 8192 + "login", "/" + "a/../" * 3277 + "login",
          # the alpha.46 report: the query login's root run against a line of slashes, with and without a query
          "/" + "%2F" * 3200 + "x", "/" * 3200 + "x", "/" + "./" * 8000 + "x", "/" + "%2F" * 1600 + "?controller=AuthController&action=check",
-         "/" * 3200 + "?action=check&controller=AuthController&x=1", "/" + "./" * 8000 + "?controller=AuthController&action=check&" + "a=b&" * 2000]
+         "/" * 3200 + "?action=check&controller=AuthController&x=1", "/" + "./" * 8000 + "?controller=AuthController&action=check&" + "a=b&" * 2000,
+         # the alpha.130 report, F1: path info after the front controller, against 16 KB of slashes and segments
+         "/index.php" + "/" * 16000 + "?controller=AuthController&action=nope", "/index.php/" + "a/" * 8000 + "?controller=AuthController&action=check"]
 with open(sys.argv[1], "w") as f:
     for i, p in enumerate(lines): f.write('203.0.113.9 - - [02/Oct/2026:10:01:%02d +0000] "POST %s HTTP/1.1" 302 0 "-" "x"\n' % (i, p))
 PYT
-check "ten request lines of up to 16 KB of slashes and dot segments, with and without the query login's parameters, are decided within 5 s, linear time (the alpha.45 grammar took seconds, the alpha.46 one minutes for the query login)" "7 matched, 3 missed" "$(timeout 5 fail2ban-regex $T/slow.log "agensio-login[paths=\"$PATHS\"]" 2>&1 | sed -n 's/^Lines: [0-9]* lines, [0-9]* ignored, \([0-9]* matched, [0-9]* missed\)$/\1/p')"
+check "twelve request lines of up to 16 KB of slashes and dot segments, with and without the query login's parameters, the front controller's path info among them, are decided within 5 s, linear time (the alpha.45 grammar took seconds, the alpha.46 one minutes for the query login)" "8 matched, 4 missed" "$(timeout 5 fail2ban-regex $T/slow.log "agensio-login[paths=\"$PATHS\"]" 2>&1 | sed -n 's/^Lines: [0-9]* lines, [0-9]* ignored, \([0-9]* matched, [0-9]* missed\)$/\1/p')"
 # The alpha.111 report: a trial over a kept ruleset (the file covers 18880, the rendering 18880 and
 # 18881) loads a file of its own, and the undo its timer runs, the trial's last command after
 # systemd-run's options, puts the kept table back, never no table; the kept file is not touched.

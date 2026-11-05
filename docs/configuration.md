@@ -1776,7 +1776,9 @@ write must not be able to make root open, create or hand over a file anywhere.
   server runs, the reload's error-log lines and health say the same before the next start: `log_path_link`
   (a link on the way, naming its target and who logs behind it) and `log_path_refused` (anything else).
   A reload keeps a log it has open, so a link or a FIFO planted over an open log changes nothing until
-  the next start; one a reload would open sets its site aside at that reload.
+  the next start; one a reload would open sets its site aside at that reload. `validate` (`agensio ctl
+  validate`, MCP `config_validate`) judges the logs as that reload does: the logs the server has open
+  kept, any other walked, a site whose log the reload cannot open in `held_back` (0.1.0-alpha.131).
 - **Rotation.** `SIGUSR1` and `logs_reopen` open every log again through the same walk. A file that
   does not open again keeps its previous descriptor, so its lines go on into the rotated file, which
   logrotate's next run compresses and removes: each such file is an error-log line naming who writes it

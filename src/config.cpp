@@ -4230,12 +4230,13 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                 it->fatal = it->fatal || fatal;
                 return;
             }
-            // No link on the way: the start's own walk, read-only.
-            if (const std::string why = probe_below_log_dir(where, log); !why.empty())
+            // No link on the way: the start's own walk, read-only, its fix apart (the alpha.130 report, F3a).
+            std::string fix;
+            if (const std::string why = probe_below_log_dir(where, log, &fix); !why.empty())
                 out.push_back({"log_path_refused", "warning", fatal ? std::string() : who,
                                (fatal ? "the next start is refused: " : "the next start sets " + who + " aside (a reload keeps a log it has open): ") +
                                    std::string("cannot open ") + (fatal ? who + "'s log: " : "its access log: ") + why,
-                               ""});
+                               std::move(fix)});
         };
         look(cfg.log.access, "[log] access", true);
         look(cfg.log.error, "[log] error", true);
@@ -4249,7 +4250,8 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                                              : (l.who.size() == 1 ? "the site logging there (" + names + ") is set aside at the next start"
                                                                   : "the " + std::to_string(l.who.size()) + " sites logging there (" + names + ") are set aside at the next start") +
                                                    std::string(" (a reload keeps a log it has open; one it would open there sets its site aside)");
-            out.push_back({"log_path_link", "warning", "",
+            // One site behind it: the notice is that site's (F3b), as log_path_refused is.
+            out.push_back({"log_path_link", "warning", !l.fatal && l.who.size() == 1 ? l.who.front() : std::string(),
                            l.path + " is a symbolic link" + (l.target.empty() ? "" : " (to " + l.target + ")") + ": below the log directory " + dir +
                                " agensio never follows one, so " + what,
                            l.directory ? "make it a directory again (move the link aside, mkdir it, move the files back); for logs on another disk, link or mount the "
@@ -5994,7 +5996,11 @@ std::string check_log_exclusions(const SiteConfig& site) {
                 if (!covers && !((q == std::string::npos || is_script(form)) && below(form, p))) continue;
                 std::string how;
                 if (through == front && !through.empty()) how = " through the front controller " + front + " (the application runs " + form + " as " + lp + ")";
-                else if (!through.empty()) how = " as " + form + (q == std::string::npos ? "" : l.substr(q)) + ", which the login jail counts too (PHP runs it as the same login)";
+                else if (!through.empty())  // what PHP runs there, said as it is (the alpha.130 report, F3e: /index.php/ucp.php is not phpBB's login)
+                    how = " as " + form + (q == std::string::npos ? "" : l.substr(q)) + ", which the login jail counts too" +
+                          (lp == "/" ? " (PHP runs it as the same login: " + through + " is the directory's index)"
+                           : is_script(lp) ? " (the jail takes " + through + " before any login path; PHP runs " + through + " there, with " + lp + " as its path info)"
+                                           : " (" + through + " runs with " + lp + " as its path info, which an application routing by path info answers as " + lp + ")");
                 return "\"" + p + "\" " + (covers ? "covers" : "lies under") + " the login path " + l + how +
                        " (the fail2ban jail counts attempts there); a login path stays in the access log";
             }
@@ -6055,8 +6061,9 @@ void set_aside_for_logs(Config& cfg, const Config* running, const std::function<
                     carried = true;
                     break;
                 }
-        cfg.held_back.push_back({main_file, why, carried, false, false, name});
+        cfg.held_back.push_back({main_file, why, carried, false, false, name, true});
     }
+    const std::size_t before = cfg.held_back.size();
     set_aside_until_clean(cfg, running, [&](const Config& c) -> std::optional<SiteConflict> {
         for (std::size_t i = 0; i < c.sites.size(); ++i) {
             if (in_main(c.sites[i])) continue;  // judged above
@@ -6064,30 +6071,48 @@ void set_aside_for_logs(Config& cfg, const Config* running, const std::function<
         }
         return std::nullopt;
     });
+    for (std::size_t i = before; i < cfg.held_back.size(); ++i) cfg.held_back[i].log = true;  // each set aside here for its log alone
 }
 
-std::vector<std::string> isolate_log_paths(Config& cfg) {
+std::vector<std::string> isolate_log_paths(Config& cfg, const Config* running, const std::function<bool(const std::string&)>& kept) {
 #ifndef _WIN32
     const std::string dir = log_directory(cfg);
+    const auto open_already = [&](const std::string& path) { return kept && kept(path); };
     LogPlacement where{dir, -1, -1};
     {
         unsigned uid = 0, gid = 0;
         if (!cfg.user.empty() && system_facts().user(cfg.user, uid, gid)) where.uid = static_cast<long>(uid);
     }
+    // The probe judges what the start, as root, would open, so a missing log is fine. A reload runs as the
+    // server's account: one it would create where that account may not write it cannot open (the reload's
+    // EACCES, with root's install line), so validate says so too. A missing directory is the probe's.
+    const auto judge = [&](const std::string& path) {
+        if (std::string why = probe_below_log_dir(where, path); !why.empty() || !kept || ::geteuid() == 0) return why;
+        struct stat st {};
+        if (::lstat(path.c_str(), &st) == 0) return std::string();  // there: the probe judged it
+        const std::string parent = fs::path(path).parent_path().string();
+        if (::access(parent.c_str(), W_OK) == 0 || errno != EACCES) return std::string();
+        return path + ": " + std::strerror(EACCES) + " (this account cannot create it in " + parent + "; a restart, as root, creates it)";
+    };
     std::vector<std::string> fatal;
     for (const auto& [key, path] : {std::pair<const char*, std::string>{"[log] access", cfg.log.access}, {"[log] error", cfg.log.error}, {"[control] audit", cfg.control.audit}})
-        if (below_log_dir(dir, path))
-            if (const std::string why = probe_below_log_dir(where, path); !why.empty()) fatal.push_back("the start cannot open " + std::string(key) + " " + path + ": " + why);
+        if (below_log_dir(dir, path) && !open_already(path))
+            if (const std::string why = judge(path); !why.empty())
+                fatal.push_back(std::string(kept ? "the reload cannot open " : "the start cannot open ") + key + " " + path + ": " + why);
     if (!fatal.empty()) return fatal;
     std::map<std::string, std::string> judged;  // a log path -> the probe's answer, once per file
-    set_aside_for_logs(cfg, nullptr, [&](const SiteConfig& site) -> std::string {
-        if (site.access_log.empty() || site.access_log == cfg.log.access || !below_log_dir(dir, site.access_log) || site.server_names.empty()) return {};
+    set_aside_for_logs(cfg, running, [&](const SiteConfig& site) -> std::string {
+        if (site.access_log.empty() || site.access_log == cfg.log.access || !below_log_dir(dir, site.access_log) || site.server_names.empty() ||
+            open_already(site.access_log))
+            return {};
         auto it = judged.find(site.access_log);
-        if (it == judged.end()) it = judged.emplace(site.access_log, probe_below_log_dir(where, site.access_log)).first;
+        if (it == judged.end()) it = judged.emplace(site.access_log, judge(site.access_log)).first;
         return it->second.empty() ? std::string() : "cannot open the access log of " + site.server_names.front() + ": " + it->second;
     });
 #else
     (void)cfg;
+    (void)running;
+    (void)kept;
 #endif
     return {};
 }

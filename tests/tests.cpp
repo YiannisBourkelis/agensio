@@ -7528,19 +7528,21 @@ static void test_protection() {
         const std::string sep_text = sl + "(?:(?:" + dot + sl + "|[^/?\\s.\\x25][^/?\\s\\x25]*" + sl + dot + dot + sl + "))*";
         const std::string sep = "<sep>";  // the filter's variable; fail2ban substitutes it in the jail's parameter too
         const std::string x = "(?:x|\\x25[57]8)";
+        const std::string pi = "(?:(?:/|\\x252F)[^?\\s]*)?";  // path info: one slash, then the class (linear on a run of slashes)
         // A letter under both cases' codes; the front controller only before a PHP preset's path,
         // never alone; the format suffix only for Rails; path info only after a .php file.
         CHECK(spelling_regex({"/x", true, false}) == "(?:" + sep + "index" + dot + "php)?" + sep + x + "(?:/|\\x252F)*(?:[?&]\\S*)?");
         CHECK(spelling_regex({"/x", false, true}) == sep + x + "(?:" + dot + "[a-z0-9]{1,8})?(?:/|\\x252F)*(?:[?&]\\S*)?");
-        CHECK(spelling_regex({"/x.php", true, false}) == "(?:" + sep + "index" + dot + "php)?" + sep + x + dot + "(?:p|\\x25[57]0)(?:h|\\x25[46]8)(?:p|\\x25[57]0)(?:" + sl + "[^?\\s]*)?(?:[?&]\\S*)?");
+        CHECK(spelling_regex({"/x.php", true, false}) == "(?:" + sep + "index" + dot + "php)?" + sep + x + dot + "(?:p|\\x25[57]0)(?:h|\\x25[46]8)(?:p|\\x25[57]0)" + pi + "(?:[?&]\\S*)?");
         // A query login (the alpha.46 report): the root's run with nothing after it, the literal
-        // '?' before the parameters' lookaheads, each anchored after it.
+        // '?' before the parameters' lookaheads, each anchored after it; the front controller with
+        // path info, which PHP runs as the same script (the alpha.130 report, F1).
         const std::string kbr = spelling_regex({"/?controller=Auth&a=1", true, false});
-        CHECK(kbr.starts_with("(?:" + sep + "index" + dot + "php|" + sep + ")\\?(?=(?:\\S*&)?(?:c|\\x25[46]3)") &&
+        CHECK(kbr.starts_with("(?:" + sep + "index" + dot + "php" + pi + "|" + sep + ")\\?(?=(?:\\S*&)?(?:c|\\x25[46]3)") &&
               kbr.find("=(?:A|\\x25[46]1)(?:u|\\x25[57]5)(?:t|\\x25[57]4)(?:h|\\x25[46]8)(?:[&\\s]|$))") != std::string::npos &&
               kbr.ends_with("(?=(?:\\S*&)?(?:a|\\x25[46]1)=(?:1|\\x2531)(?:[&\\s]|$))\\S*") && kbr.find('%') == std::string::npos && kbr.find("(?:/|\\x252F)*") == std::string::npos);
         CHECK(spelling_regex({"/?x=1", false, false}).starts_with(sep + "\\?(?=(?:\\S*&)?") && spelling_regex({"/a/b", false, false}) == sep + "(?:a|\\x25[46]1)" + sep + "(?:b|\\x25[46]2)(?:/|\\x252F)*(?:[?&]\\S*)?");
-        CHECK(spelling_regex({"/ucp.php?mode=login", true, false}).find("(?:" + sl + "[^?\\s]*)?\\?(?=(?:\\S*&)?(?:m|\\x25[46]D)") != std::string::npos);
+        CHECK(spelling_regex({"/ucp.php?mode=login", true, false}).find(pi + "\\?(?=(?:\\S*&)?(?:m|\\x25[46]D)") != std::string::npos);
         // The filter carries the separator once; a path's entry stays around a hundred characters.
         CHECK(protection_filters()[0].text.find("\nsep = " + sep_text + "\n") != std::string::npos && spelling_regex({"/wp-login.php", true, false}).size() < 260 &&
               spelling_regex({"/wp-login.php", true, false}).find(sep_text) == std::string::npos);
@@ -14649,7 +14651,10 @@ static void test_log_placement() {
     CHECK(failure_of((logs / "sites" / "sub" / "c.log").string()).find("makes only sites/") != npos && !fs::exists(logs / "sites" / "sub"));
     CHECK(failure_of((logs / "sites" / ".." / "x.log").string()).find("not a plain path") != npos && !fs::exists(logs / "x.log"));
     CHECK(::mkfifo((logs / "sites" / "fifo.test.log").c_str(), 0600) == 0);
-    CHECK(failure_of((logs / "sites" / "fifo.test.log").string()).find("a FIFO or a device") != npos);  // and the open did not wait for a reader
+    // and the open did not wait for a reader; named and answered as the probe names it (the alpha.130 report, F3d)
+    CHECK(failure_of((logs / "sites" / "fifo.test.log").string()).find("a FIFO, not a regular file (below the log directory nothing else is opened): move it aside;") != npos);
+    fs::create_directories(logs / "sites" / "dir.test.log");
+    CHECK(failure_of((logs / "sites" / "dir.test.log").string()).find("a directory, not a regular file (below the log directory nothing else is opened): move it aside;") != npos);
     std::ofstream(logs / "sites" / "two.test.log") << "";
     fs::create_hard_link(logs / "sites" / "two.test.log", logs / "sites" / "other.test.log");
     CHECK(failure_of((logs / "sites" / "two.test.log").string()).find("hard link") != npos);
@@ -14730,7 +14735,7 @@ static void test_log_placement() {
         std::vector<AccessNotice> links;
         for (const auto& x : access_notices(c))
             if (x.code == "log_path_link") links.push_back(x);
-        CHECK(links.size() == 1 && links[0].severity == "warning" && links[0].text.find((n / "logs" / "sites").string() + " is a symbolic link (to " + (dir / "elsewhere").string() + ")") != npos &&
+        CHECK(links.size() == 1 && links[0].severity == "warning" && links[0].site.empty() && links[0].text.find((n / "logs" / "sites").string() + " is a symbolic link (to " + (dir / "elsewhere").string() + ")") != npos &&
               links[0].text.find("k.test, l.test") != npos && links[0].text.find("m.test") == npos && links[0].text.find("set aside at the next start (a reload keeps a log it has open") != npos &&
               links[0].fix.find("make it a directory") != npos && links[0].fix.find("log directory itself") != npos && links[0].fix.find("[log] access") == npos);
         // A link standing for the log itself: its fix is to remove it, never "make it a directory" (the alpha.129 report, S2).
@@ -14742,7 +14747,8 @@ static void test_log_placement() {
             std::optional<AccessNotice> file_link;  // a copy: the notices are a temporary
             for (const auto& x : access_notices(cf))
                 if (x.code == "log_path_link" && x.text.find((n / "logs" / "m.log").string() + " is a symbolic link") != npos) file_link = x;
-            CHECK(file_link && file_link->fix.starts_with("remove the link") && file_link->fix.find("make it a directory") == npos);
+            // One site behind it: the notice is that site's (the alpha.130 report, F3b).
+            CHECK(file_link && file_link->fix.starts_with("remove the link") && file_link->fix.find("make it a directory") == npos && file_link->site == "m.test");
         }
         fs::remove(n / "logs" / "m.log");
         // The server's own file behind one: the start or reload refused, said so.
@@ -14780,6 +14786,14 @@ static void test_log_placement() {
         CHECK(probe_below_log_dir(at, (pr / "logs" / "sites" / "sub" / "a.log").string()).find("makes only sites/") != npos);
         CHECK(::mkfifo((pr / "logs" / "sites" / "f.test.log").c_str(), 0600) == 0);
         CHECK(probe_below_log_dir(at, (pr / "logs" / "sites" / "f.test.log").string()).find("not a regular file") != npos);
+        {
+            // Its fix apart when asked (the alpha.130 report, F3a), the problem then alone; the start's text is the two joined.
+            std::string fx;
+            const std::string why = probe_below_log_dir(at, (pr / "logs" / "sites" / "f.test.log").string(), &fx);
+            CHECK(why.ends_with("a FIFO, not a regular file (below the log directory nothing else is opened)") && fx.starts_with("move it aside; the start creates the log") &&
+                  probe_below_log_dir(at, (pr / "logs" / "sites" / "f.test.log").string()) == why + ": " + fx);
+            CHECK(probe_below_log_dir(at, (pr / "logs" / "sites" / "sub" / "a.log").string(), &fx).find("mkdir") == npos && fx.starts_with("mkdir it as root, or name "));
+        }
         std::ofstream(pr / "logs" / "sites" / "h.test.log") << "";
         fs::create_hard_link(pr / "logs" / "sites" / "h.test.log", pr / "logs" / "h2.log");
         CHECK(probe_below_log_dir(at, (pr / "logs" / "sites" / "h.test.log").string()).find("hard link") != npos);
@@ -14791,9 +14805,33 @@ static void test_log_placement() {
         Config cp = load_config(pr / "agensio.toml");
         bool refused = false;
         for (const auto& x : access_notices(cp))
-            refused = refused || (x.code == "log_path_refused" && x.site == "f.test" && x.text.find("the next start sets f.test aside") != npos && x.text.find("a FIFO, not a regular file") != npos);
+            refused = refused || (x.code == "log_path_refused" && x.site == "f.test" && x.text.find("the next start sets f.test aside") != npos && x.text.find("a FIFO, not a regular file") != npos &&
+                                  x.text.find("move it aside") == npos && x.fix.starts_with("move it aside"));
         CHECK(refused);
-        CHECK(isolate_log_paths(cp).empty() && cp.held((pr / "sites.d" / "f.toml").string()) && cp.held((pr / "sites.d" / "f.toml").string())->error.find("cannot open the access log of f.test") != npos);
+        {
+            // validate judges as the reload (the alpha.130 report, F2): a log the server has open is kept, not walked.
+            Config kept = load_config(pr / "agensio.toml");
+            CHECK(isolate_log_paths(kept, nullptr, [&](const std::string& p) { return p == (pr / "logs" / "sites" / "f.test.log").string(); }).empty() &&
+                  kept.held_back.empty() && kept.sites.size() == 2);
+        }
+        CHECK(isolate_log_paths(cp).empty() && cp.held((pr / "sites.d" / "f.toml").string()) && cp.held((pr / "sites.d" / "f.toml").string())->error.find("cannot open the access log of f.test") != npos &&
+              cp.held((pr / "sites.d" / "f.toml").string())->log);
+        {
+            // And through control::validate, as the server calls it: the FIFO's site file held back, unless its log is open.
+            const Config running = load_config(pr / "agensio.toml");
+            const json::Value v = control::validate(pr / "agensio.toml", running, &running, [](const std::string&) { return false; });
+            const json::Value open = control::validate(pr / "agensio.toml", running, &running, [](const std::string&) { return true; });
+            CHECK(v["ok"].boolean() && v["held_back"].items().size() == 1 && v["held_back"].items()[0].get("file") == (pr / "sites.d" / "f.toml").string() &&
+                  std::string(v["held_back"].items()[0].get("error")).find("a FIFO, not a regular file") != npos && open["held_back"].items().empty() &&
+                  control::validate(pr / "agensio.toml", running, &running)["held_back"].items().empty());
+            // Health's fix for it: nothing in the file is wrong (F3c).
+            Config shown = running;
+            shown.held_back = cp.held_back;
+            bool said = false;
+            for (const auto& f : control::health_findings(shown, shown, false, std::time(nullptr)))
+                said = said || (f.code == "site_file_held_back" && f.fix.find("nothing in f.toml is wrong") != npos && f.fix.find("agensio -t names the error") == npos);
+            CHECK(said);
+        }
         write(pr / "agensio.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\n[log]\naccess = \"" + (pr / "logs" / "access.log").string() + "\"\n" +
                                        site("m.test", (pr / "logs" / "sites" / "f.test.log").string()), rw_r);
         fs::remove(pr / "sites.d" / "f.toml");
@@ -14804,7 +14842,7 @@ static void test_log_placement() {
         // main file's other site is served, nothing thrown.
         CHECK(isolate_log_paths(cm).empty() && cm.sites.size() == 1 && cm.sites[0].server_names.front() == "n.test" && cm.held_back.size() == 1 &&
               cm.held_back[0].site == "m.test" && cm.held_back[0].file == (pr / "agensio.toml").string() &&
-              cm.held_back[0].error.find("cannot open the access log of m.test") != npos && !cm.held_back[0].carried);
+              cm.held_back[0].error.find("cannot open the access log of m.test") != npos && !cm.held_back[0].carried && cm.held_back[0].log);
         // On a reload its running version is carried, the log it has open kept.
         {
             const Config running = load_config(pr / "agensio.toml");  // both served before, as the running configuration has them
@@ -14815,6 +14853,20 @@ static void test_log_placement() {
                 if (x.server_names.front() == "m.test") m = &x;
             CHECK(m && m->carried && next.held_back.size() == 1 && next.held_back[0].carried && next.held_back[0].site == "m.test" && next.sites.size() == 2);
         }
+        if (::geteuid() != 0) {
+            // A log a reload would create where its account may not write: validate holds its site back, as the
+            // reload's EACCES does; the start, as root, creates it, so -t does not (the alpha.130 report, F2).
+            const fs::path rw = dir / "rw";
+            fs::create_directories(rw / "logs" / "ro");
+            write(rw / "agensio.toml", "[server]\nworkers = 1\n[log]\naccess = \"" + (rw / "logs" / "access.log").string() + "\"\n" +
+                                           site("a.test", (rw / "logs" / "ro" / "a.log").string()) + site("b.test", (rw / "logs" / "b.log").string()), rw_r);
+            fs::permissions(rw / "logs" / "ro", fs::perms::owner_read | fs::perms::owner_exec);
+            Config at_start = load_config(rw / "agensio.toml"), at_reload = load_config(rw / "agensio.toml");
+            CHECK(isolate_log_paths(at_start).empty() && at_start.held_back.empty());
+            CHECK(isolate_log_paths(at_reload, nullptr, [](const std::string&) { return false; }).empty() && at_reload.held_back.size() == 1 &&
+                  at_reload.held_back[0].site == "a.test" && at_reload.held_back[0].error.find("this account cannot create it in") != npos && at_reload.sites.size() == 1);
+            fs::permissions(rw / "logs" / "ro", fs::perms::owner_all);
+        }
         // A reopen that cannot open the file again keeps the old descriptor and says so (P3).
         LogRegistry reg;
         reg.set_placement(at);
@@ -14824,9 +14876,15 @@ static void test_log_placement() {
         fs::rename(pr / "logs" / "sites" / "r.test.log", pr / "logs" / "sites" / "r.test.log.1");
         CHECK(::mkfifo((pr / "logs" / "sites" / "r.test.log").c_str(), 0600) == 0);
         const std::vector<LogRegistry::Failure> failed = reg.reopen_all();
-        CHECK(failed.size() == 1 && failed[0].path == (pr / "logs" / "sites" / "r.test.log").string() && failed[0].why.find("FIFO") != npos);
+        CHECK(failed.size() == 1 && failed[0].path == (pr / "logs" / "sites" / "r.test.log").string() && failed[0].why.find("a FIFO, not a regular file") != npos);
+        CHECK(reg.is_open((pr / "logs" / "sites" / "r.test.log").string()) && !reg.is_open((pr / "logs" / "sites" / "other.log").string()));
         reg.sink(0).write("still here\n");
         CHECK(std::string(std::istreambuf_iterator<char>(std::ifstream(pr / "logs" / "sites" / "r.test.log.1").rdbuf()), {}) == "still here\n");
+        fs::remove(pr / "logs" / "sites" / "r.test.log");
+        // A directory there: the reopen names it as the start and the probe do (F3d: it said "Is a directory").
+        fs::create_directories(pr / "logs" / "sites" / "r.test.log");
+        const std::vector<LogRegistry::Failure> dir_failed = reg.reopen_all();
+        CHECK(dir_failed.size() == 1 && dir_failed[0].why.find("a directory, not a regular file (below the log directory nothing else is opened): move it aside;") != npos);
         fs::remove(pr / "logs" / "sites" / "r.test.log");
         CHECK(reg.reopen_all().empty() && fs::is_regular_file(pr / "logs" / "sites" / "r.test.log"));
     }
@@ -14934,6 +14992,11 @@ static void test_access_log_privacy() {
     refused(ph + "login_paths = [\"/?_task=login\"]\naccess_log_exclude_paths = [\"/index.php/healthz\"]\n", "lies under the login path /?_task=login");
     refused(ph + "login_paths = [\"/?controller=AuthController&action=check\"]\naccess_log_exclude_paths = [\"/INDEX.PHP\"]\n", "covers the login path /?controller=AuthController&action=check");
     refused(ph + "login_paths = [\"/ucp.php?mode=login\"]\naccess_log_exclude_paths = [\"/ucp.php/\"]\n", "lies under the login path /ucp.php?mode=login");
+    // What PHP runs there, said as it is (the alpha.130 report, F3e): the root's form is the directory's index, a
+    // script's behind /index.php is /index.php with path info, never "the same login".
+    refused(ph + "login_paths = [\"/?_task=login\"]\naccess_log_exclude_paths = [\"/index.php\"]\n", "PHP runs it as the same login: /index.php is the directory's index");
+    refused(ph + "login_paths = [\"/ucp.php?mode=login\"]\naccess_log_exclude_paths = [\"/index.php\"]\n", "PHP runs /index.php there, with /ucp.php as its path info");
+    refused(ph + "login_paths = [\"/login\"]\naccess_log_exclude_paths = [\"/index.php\"]\n", "/index.php runs with /login as its path info, which an application routing by path info answers as /login");
     CHECK(load(head + ph + "login_paths = [\"/?_task=login\"]\naccess_log_exclude_paths = [\"/healthz\", \"/api/\", \"/index.phpx\"]\n").has_value());
     {
         // A login with its query is that path with it alone; a path ["any"] reopens may be excluded.

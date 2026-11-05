@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.0-alpha.131
+
+- **Fix (security): the login jail missed `/index.php` with path info before a query login on `/`** (the
+  alpha.130 report, F1; security row 58). On `app = "php"` with Roundcube's `/?_task=login` or Kanboard's query
+  login, PHP runs `/index.php/x?_task=login` and `/index.php/?_task=login` as the login, and the loader refuses
+  to exclude them, but the jail's paths allowed nothing between `index.php` and the `?`: those posts met
+  `agensio-post` alone (120 in two minutes against the login jail's 10 in ten). The jail now takes path info
+  there as after a `.php` login. The path-info part is written so a 16 KB line costs linear time: the one after
+  a `.php` login (phpBB's `/ucp.php`) took 0.2 s on an 8 KB line of slashes, growing with the square. Health says
+  `fail2ban_jail_stale` until the jail is rendered again. `docs/fail2ban.md` 2 says what no access-log jail can
+  count: a login whose routing parameter is in the posted body (`_task=login`, phpBB's `mode`).
+- **Fix: `validate` did not walk the logs** (F2). `ctl validate` and MCP `config_validate` answered `held_back:
+  []` where the next reload set a site aside for what stood at its log's path. They now judge the logs as the
+  reload does: a log the server has open is kept, any other walked below the log directory read-only; a site
+  whose log the reload cannot open is in `held_back`, a server file's an error. That includes a new log in a
+  directory the server's account may not write, which the reload cannot create and a restart, as root, does.
+- **Fix: the log findings' fields** (F3). `log_path_refused` carries its fix in `fix` (it was inside the message
+  only); `log_path_link` names its site when one site logs behind the link, and `log_reopen_failed` when one
+  site writes the file (the `logs_reopen` answer's `failed` entries carry `site` too); a site file set aside for
+  its log says that nothing in the file is wrong, in place of "fix FILE (agensio -t names the error)" or a
+  managed file's `site-update`. The start, the reopen, `-t` and the reload word a refusal alike: a FIFO or a
+  directory at a log's path is named by its kind on every path ("a FIFO, not a regular file", "a directory, not
+  a regular file"; the reopen said "Is a directory"), each with "move it aside"; a missing subdirectory carries
+  its fix from the walk itself.
+- The exclusion refusal for a login behind `/index.php` says what PHP runs there (F3e): `/index.php/ucp.php` runs
+  `/index.php` with `/ucp.php` as its path info, not "the same login"; the refusal itself is unchanged.
+
 ## 0.1.0-alpha.130 (2026-11-05)
 
 - **Fix (security): a query login on `/` could be excluded through `/index.php`** (the alpha.129 report,

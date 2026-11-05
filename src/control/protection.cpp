@@ -105,19 +105,24 @@ std::string spelling_regex(const LoginPath& lp) {
     // A PHP preset's front controller may stand before the path (/index.php/user/login,
     // /index.php?controller=...), never alone: the path itself is what makes a login.
     const std::string index = kSep + "index" + kDot + "php";
+    // Path info after a .php script (PHP runs /ucp.php/x as /ucp.php), never across a '?', so the
+    // query starts where the first '?' is and the parameters are looked for once. One slash, then
+    // anything up to the '?': the run of slashes is the class's, so a line of 16 KB of slashes
+    // splits one way only and costs linear time.
+    const std::string path_info = "(?:(?:/|\\x252F)[^?\\s]*)?";
     std::string out;
     if (body.empty()) {
         // The root, a query login: the separator run is the whole path and nothing may follow
         // it but the query, so no trailing-slash quantifier after it (alpha.46 report: the run
         // split two ways against two lookaheads scanned before the '?' made a 10 KB line of
         // slashes cost minutes, with the GIL held, every jail of the daemon standing still).
-        out = lp.php ? "(?:" + index + "|" + kSep + ")" : kSep;
+        // The front controller takes path info as any script does: /index.php/x?_task=login is
+        // the login (the alpha.130 report, F1; the loader refuses to exclude it since alpha.130).
+        out = lp.php ? "(?:" + index + path_info + "|" + kSep + ")" : kSep;
     } else {
         out = (lp.php ? "(?:" + index + ")?" : std::string()) + body;
         if (lp.format) out += "(?:" + kDot + "[a-z0-9]{1,8})?";  // Rails' optional format
-        // Path info after a .php script, never across a '?', so the query starts where the
-        // first '?' is and the parameters are looked for once.
-        if (lp.php && path.size() > 4 && path.ends_with(".php")) out += "(?:" + kSlashes + "[^?\\s]*)?";
+        if (lp.php && path.size() > 4 && path.ends_with(".php")) out += path_info;
         else out += kSlashOpt;
     }
     if (q == std::string::npos) return out + "(?:[?&]\\S*)?";

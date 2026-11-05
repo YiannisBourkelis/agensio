@@ -121,7 +121,11 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
 // Loads `path` again and runs the hosting rules; never throws.
 // `current`: the configuration being served, so a site file set aside keeps its running version
 // as a reload would (design section 26).
-json::Value validate(const std::filesystem::path& path, const Config& running, const Config* current = nullptr);
+// `log_open` (the server's: whether it has a log open): the logs judged as the reload opens them (the
+// alpha.130 report, F2): one open kept, any other walked below the log directory read-only, a site whose
+// log the reload cannot open in held_back, a server file's an error. Without it the logs are not judged.
+json::Value validate(const std::filesystem::path& path, const Config& running, const Config* current = nullptr,
+                     const std::function<bool(const std::string&)>& log_open = {});
 // The restart-only settings that differ between the file on disk and the running server.
 std::vector<std::string> restart_needed(const Config& fresh, const Config& running);
 // Whether a PHP version's php-fpm.conf leaves process_control_timeout unset, without which its

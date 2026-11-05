@@ -157,6 +157,16 @@ mv "$T/logs/sites/o.test.log" "$T/logs/sites/o.test.log.1"; mkfifo "$T/logs/site
 curl -sS -o /dev/null -H 'Host: o.test' "http://127.0.0.1:18312/?after"; sleep 1.2
 check "a reopen that meets a FIFO: answered under failed (exit 1), the error log names o.test, health log_reopen_failed, the lines go on into the rotated file" "1 yes yes yes 1" \
   "$RO $(grep -q '"failed"' "$T/reopen.out" && grep -q 'o.test.log' "$T/reopen.out" && echo yes) $(grep -q 'cannot reopen log file (logs_reopen) for o.test: .*FIFO' "$T/logs/error.log" && echo yes) $(health | grep -q '"code":"log_reopen_failed"' && echo yes) $(grep -c '?after' "$T/logs/sites/o.test.log.1")"
+# validate judges the logs as the reload does (the alpha.130 report, F2: it walked none): o.test's log is open,
+# so the FIFO at its path waits for the next start; a new site file whose log is a FIFO is held back, as the
+# reload then holds it back, and health says nothing in the file is wrong (F3c) and names o.test (F3b).
+mkfifo "$T/logs/sites/v.test.log"
+site v.test 18313 "$T/www/c" "access_log = \"$T/logs/sites/v.test.log\"" > "$T/sites.d/v.toml"
+VAL=$("$BIN" ctl validate --socket "$CS" 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(sorted(h["file"].rsplit("/",1)[1] + ("+fifo" if "a FIFO, not a regular file" in h["error"] else "") for h in d["held_back"])) or "none")')
+reload
+check "validate holds back the new site file whose log is a FIFO, not o.test's open one; the reload holds it back too; health: nothing in v.toml is wrong, the reopen failure is o.test's" "v.toml+fifo none yes yes" \
+  "$VAL $(body v.test 18313) $(health | python3 -c 'import json,sys; d=json.load(sys.stdin)["findings"]; print("yes" if [f for f in d if f["code"]=="site_file_held_back" and "v.toml" in f["message"] and "nothing in v.toml is wrong" in f["fix"]] else "no")') $(health | python3 -c 'import json,sys; d=json.load(sys.stdin)["findings"]; print("yes" if [f for f in d if f["code"]=="log_reopen_failed" and f.get("site")=="o.test"] else "no")')"
+rm -f "$T/sites.d/v.toml" "$T/logs/sites/v.test.log"
 rm -f "$T/logs/sites/o.test.log"
 "$BIN" ctl logs-reopen --yes --reason rotation --socket "$CS" > /dev/null 2>&1; RO2=$?
 check "the FIFO gone: the reopen opens the log, health is clear of it" "0 yes no" \

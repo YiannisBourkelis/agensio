@@ -1429,7 +1429,7 @@ std::vector<std::string> restart_needed(const Config& fresh, const Config& runni
     return out;
 }
 
-json::Value validate(const fs::path& path, const Config& running, const Config* current) {
+json::Value validate(const fs::path& path, const Config& running, const Config* current, const std::function<bool(const std::string&)>& log_open) {
     json::Value v = json::Value::object().set("path", path.string());
     json::Value errors = json::Value::array();
     Config fresh;
@@ -1437,6 +1437,8 @@ json::Value validate(const fs::path& path, const Config& running, const Config* 
     try {
         fresh = load_config(path, current);
         hosting = isolate_hosting(fresh, system_facts(), current);  // a site breaking one is set aside (held_back)
+        if (log_open)  // and one whose log the reload cannot open (the alpha.130 report, F2: validate never walked them)
+            for (auto& e : isolate_log_paths(fresh, current, log_open)) hosting.push_back(std::move(e));
         check_certificates(fresh, current);  // and one whose certificate and key do not load, as the reload loads them
     } catch (const std::exception& e) {
         errors.push(e.what());
@@ -1742,6 +1744,15 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 "site " + h.site + " of " + h.file + " was not loaded: " + h.error + "; " +
                     (h.carried ? "the version loaded before keeps serving it" : "it is not served; the file's other sites are"),
                 "the error names what stands at the log's path and what to do; then reload (a site the start set aside) or restart");
+            return;
+        }
+        if (h.log && !h.hosting && !h.certificate) {  // a site file set aside for its log: nothing in the file is wrong (the alpha.130 report, F3c)
+            SiteSpec spec;
+            add("error", "site_file_held_back", read_managed(h.file, spec) ? spec.domain : std::string(),
+                h.file + (on_disk ? " is set aside at the next reload: " : " was not loaded: ") + h.error + "; " +
+                    (on_disk ? (h.carried ? "the next reload keeps serving the version running now" : "its sites are not served after the next reload")
+                             : (h.carried ? "the version loaded before keeps serving its sites" : "its sites are not served")),
+                "nothing in " + name + " is wrong: the error names what stands at the log's path and what to do; then reload; the other sites are not affected");
             return;
         }
         std::string msg = h.hosting ? h.error + "; " + h.file + (on_disk ? " is set aside at the next reload: " : " is set aside: ")

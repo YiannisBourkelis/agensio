@@ -98,8 +98,18 @@ login paths come from the preset (`wordpress`: `/wp-login.php` and `/xmlrpc.php`
 its login that way. Because the log holds the request as the client sent it, the rendered
 filter matches each path in every spelling the server and the applications accept:
 percent-encoding, repeated slashes, dot segments, case, a trailing slash, `/index.php`
-before a PHP application's path, a `.format` suffix on a Rails path, query parameters in any
-order. One canonical spelling in `login_paths` is enough. The server-wide access log gets
+before a PHP application's path, path info after a `.php` login and after `/index.php` before
+a query login on `/` (`/index.php/x?_task=login`, since 0.1.0-alpha.131), a `.format` suffix on a
+Rails path, query parameters in any order. One canonical spelling in `login_paths` is enough.
+
+What no access-log jail can count: a login whose routing parameter travels in the request body.
+Roundcube reads `_task` from the query or the posted form, and phpBB reads `mode` from either, so
+`POST /` with `_task=login` in the body is a login whose line shows only `POST /`. The access log
+never holds a body, so for those attempts only `agensio-post` applies (120 posts in two minutes).
+The application's own log of failed logins closes the gap, as for WordPress and Drupal: for
+Roundcube, fail2ban's `roundcube-auth` over the site's `logs/errors.log` (section 2b).
+
+The server-wide access log gets
 the jail `agensio-login`; a site with its own `access_log` gets `agensio-login-<site>` with
 its own paths, so one application's paths are never counted on another's log.
 

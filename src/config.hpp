@@ -684,6 +684,9 @@ struct Config {
         // main file is all or nothing, but an access log the start cannot open is the log directory's, which
         // the server's account can write, not the main file's (docs/configuration.md 8c); "" the whole file.
         std::string site;
+        // Set aside for what stands at its access log's path, not for anything in its file (the alpha.130
+        // report, F3c: health told the user to fix a file with nothing wrong in it).
+        bool log = false;
     };
     std::vector<HeldBack> held_back;
     // Credential files the hosting rules find readable by others or by a group not the site's
@@ -1002,10 +1005,12 @@ std::string log_directory(const Config& cfg);
 bool site_log_name(const std::string& path, const Config& cfg, std::string* name = nullptr);
 // What the start does with the logs below the log directory, judged read-only (services/log.hpp
 // probe_below_log_dir) for -t, which the packaged unit runs before the start (the alpha.129 report, P2: -t
-// passed what the start then refused): a site file whose log the start cannot open is set aside as the start
-// sets it aside; a main-file site's throws, as at the start; the server's own files are returned, each a
-// refusal of the start ("" none).
-std::vector<std::string> isolate_log_paths(Config& cfg);
+// passed what the start then refused): a site whose log the start cannot open is set aside as the start sets
+// it aside (set_aside_for_logs); the server's own files are returned, each a refusal of the start (none:
+// empty). For validate, what a reload does (the alpha.130 report, F2): `kept` names the logs the server has
+// open, which a reload keeps and neither walks nor sets aside, and `running` carries a set-aside site's
+// running version as the reload carries it.
+std::vector<std::string> isolate_log_paths(Config& cfg, const Config* running = nullptr, const std::function<bool(const std::string&)>& kept = {});
 // Sets aside every site whose access log `problem` refuses ("" fine; else why): a site file's with its file
 // (set_aside_until_clean, its running version carried on a reload), a main-file site alone (HeldBack::site),
 // its running version carried on a reload, the main file's other sites served. Shared by the start, the

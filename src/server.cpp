@@ -63,6 +63,16 @@ namespace agensio {
 
 namespace {
 
+// A notice as an error-log line: the log path ones with their fix, which they carry apart for health
+// (the alpha.130 report, F3a: the refusal's fix was inside its text before, so the line keeps it).
+std::string notice_line(const AccessNotice& n) {
+    return n.code.starts_with("log_path_") && !n.fix.empty() ? n.text + "; fix: " + n.fix : n.text;
+}
+
+}  // namespace
+
+namespace {
+
 #if defined(SO_REUSEPORT)
 using reuse_port_option = asio::detail::socket_option::boolean<SOL_SOCKET, SO_REUSEPORT>;
 constexpr bool kHasReusePort = true;
@@ -141,7 +151,7 @@ Server::Server(Config cfg)
         for (const auto& d : gen->cfg.order_decided) error_log_.warn(served_record_absence(gen->cfg) + ": load order decided: " + d);
     }
     for (const auto& n : access_notices(gen->cfg))  // the notes at level info (alpha.61 report, finding 2)
-        n.severity == "warning" ? error_log_.warn(n.text) : error_log_.info(n.text);
+        n.severity == "warning" ? error_log_.warn(notice_line(n)) : error_log_.info(notice_line(n));
     warm_response_tables();
     build_listeners(*gen);
     gen_ = std::move(gen);
@@ -226,17 +236,16 @@ bool Server::isolate_logs(Config& cfg, const Config* running, std::string& error
     std::vector<LogRegistry::Failure> failed;
     logs_.open_wanted(failed);
     if (failed.empty()) return true;
-    // What to do about it, by the errno: a link is named by the message itself; a file this account
-    // cannot create (a reload, after the privilege drop, in root's directory) root creates, or a
-    // restart does; a directory agensio does not make root makes.
+    // What to do about it, by the errno: the walk's refusals carry their fix (a link, a FIFO, a directory
+    // agensio does not make); a file this account cannot create (a reload, after the privilege drop, in
+    // root's directory) root creates, or a restart does.
     auto fix = [&](const LogRegistry::Failure& f, const SiteConfig* site) -> std::string {
         if (f.err == EACCES && ::geteuid() != 0) {
             const std::string user = cfg_.user.empty() ? std::string("agensio") : cfg_.user;
             const std::string group = site && !site->user.empty() ? (site->group.empty() ? site->user : site->group) : (cfg_.group.empty() ? user : cfg_.group);
             return "; as root: install -o " + user + " -g " + group + " -m 0640 /dev/null " + f.path + ", then reload; or restart agensio, which creates it as root";
         }
-        if (f.err == ENOENT) return "; mkdir it as root, or name " + log_directory(cfg) + "/sites/<name>.log";
-        return "";
+        return "";  // the walk's refusals carry their fix (a missing directory's too)
     };
     for (const std::string& own : {cfg.log.error, cfg.log.access, cfg.control.audit})
         for (const auto& f : failed)
@@ -262,16 +271,26 @@ json::Value Server::reopen_and_report(std::string_view how) {
     const Config& cfg = gen_->cfg;
     for (const auto& f : failed) {
         // Who writes the file: the server's own logs by their keys, then the sites.
-        std::string writers;
-        auto add = [&](const std::string& w) { writers += (writers.empty() ? "" : ", ") + w; };
-        if (f.path == cfg.log.error) add("[log] error");
-        if (f.path == cfg.log.access) add("[log] access");
-        if (f.path == cfg.control.audit) add("[control] audit");
+        std::string writers, site_name;  // site_name: the one site writing it alone, the finding's site (the alpha.130 report, F3b)
+        std::size_t count = 0;
+        bool server_file = false;
+        auto add = [&](const std::string& w, bool own) {
+            writers += (writers.empty() ? "" : ", ") + w;
+            ++count;
+            server_file = server_file || own;
+        };
+        if (f.path == cfg.log.error) add("[log] error", true);
+        if (f.path == cfg.log.access) add("[log] access", true);
+        if (f.path == cfg.control.audit) add("[control] audit", true);
         for (const auto& site : cfg.sites)
-            if (site.access_log == f.path && f.path != cfg.log.access && !site.server_names.empty()) add(site.server_names.front());
+            if (site.access_log == f.path && f.path != cfg.log.access && !site.server_names.empty()) {
+                add(site.server_names.front(), false);
+                site_name = site.server_names.front();
+            }
+        if (server_file || count != 1) site_name.clear();
         error_log_.error("cannot reopen log file (" + std::string(how) + ") for " + (writers.empty() ? std::string("?") : writers) + ": " + f.why +
                          "; its lines go on into the file opened before, which logrotate's next run compresses and removes, until a reopen opens it");
-        out.push(json::Value::object().set("path", f.path).set("writers", writers).set("error", f.why));
+        out.push(json::Value::object().set("path", f.path).set("writers", writers).set("site", site_name.empty() ? json::Value() : json::Value(site_name)).set("error", f.why));
     }
     std::lock_guard<std::mutex> lock(reopen_mutex_);
     reopen_failed_ = out;
@@ -1084,7 +1103,10 @@ json::Value Server::site(std::string_view name, bool& found) {
     return control::site(gen_->cfg, *s, std::time(nullptr), &tls);
 }
 
-json::Value Server::validate() { return control::validate(cfg_.config_path, cfg_, &gen_->cfg); }
+json::Value Server::validate() {
+    // The logs as the reload judges them (the alpha.130 report, F2): one open is kept, any other walked.
+    return control::validate(cfg_.config_path, cfg_, &gen_->cfg, [this](const std::string& path) { return logs_.is_open(path); });
+}
 
 // The query of a logs request (the request target with its query string).
 static control::LogQuery log_query(std::string_view target) {
@@ -1214,7 +1236,7 @@ json::Value Server::health_with(const std::vector<control::Finding>& more) {
     {
         std::lock_guard<std::mutex> lock(reopen_mutex_);
         for (const auto& f : reopen_failed_.items())
-            extra.push_back(control::Finding{"error", "log_reopen_failed", "",
+            extra.push_back(control::Finding{"error", "log_reopen_failed", f["site"].is_string() ? f["site"].str() : std::string(),
                                              "the last reopen could not open " + std::string(f.get("path")) + " again (" + std::string(f.get("error")) + "): the lines of " +
                                                  std::string(f.get("writers")) + " go on into the file opened before, which logrotate's next run compresses and removes, "
                                                  "after which they are lost",
@@ -2586,7 +2608,7 @@ bool Server::commit_reload(const std::shared_ptr<Generation>& gen, std::string& 
     for (const auto& o : gen->cfg.orphan_additions)
         error_log_.warn(o.file + " holds root additions for site " + o.site + ", which is not in the configuration (disabled or deleted): ignored");
     for (const auto& n : access_notices(gen->cfg))  // the notes at level info (alpha.61 report, finding 2)
-        n.severity == "warning" ? error_log_.warn(n.text) : error_log_.info(n.text);
+        n.severity == "warning" ? error_log_.warn(notice_line(n)) : error_log_.info(notice_line(n));
     return true;
 }
 
