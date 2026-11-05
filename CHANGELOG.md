@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.131
+## 0.1.0-alpha.131 (2026-11-06)
 
 - **Fix (security): the login jail missed `/index.php` with path info before a query login on `/`** (the
   alpha.130 report, F1; security row 58). On `app = "php"` with Roundcube's `/?_task=login` or Kanboard's query
