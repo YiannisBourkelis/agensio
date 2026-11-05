@@ -97,6 +97,11 @@ struct SiteSpec {
     // (0.1.0-alpha.100, docs/configuration.md 6c): judged by load_mime_types, at most 64.
     MimeTypes mime_types;
     std::string access_log;  // a site with a user gets its own (rule: nothing shared between users)
+    // access_log_exclude_paths and access_log_keep_days (0.1.0-alpha.128, docs/configuration.md 8b): the
+    // paths kept out of the logs, the list given whole (check_log_exclude_path, at most 16); the days the
+    // rotated lines of the site's own log are kept, 1 to 14, 0 for logrotate's. Judged again by the load.
+    std::vector<std::string> access_log_exclude_paths;
+    int access_log_keep_days = 0;
     // The site's own addresses, "" for the server's ([server] listen_plain / listen_tls, docs/configuration.md
     // 1c; the default since 2026-11-03, before it "0.0.0.0:80" and "0.0.0.0:443" written into every file).
     std::string listen_plain;

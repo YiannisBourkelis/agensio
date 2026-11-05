@@ -36,6 +36,7 @@
 #include "control/protection.hpp"
 #include "control/sql_scan.hpp"
 #include "core/strings.hpp"
+#include "core/log_exclude.hpp"
 #include "control/reference.hpp"
 #include "control/mcp.hpp"
 #include "control/settings.hpp"
@@ -49,6 +50,7 @@
 #include "services/approvers.hpp"
 #include "services/files.hpp"
 #include "services/history.hpp"
+#include "services/log_retention.hpp"
 #include "services/tasks.hpp"
 #include "services/totp.hpp"
 #include "http/request_assembly.hpp"
@@ -14589,6 +14591,287 @@ static void test_strict_hosts() {
     CHECK(!control::listener_has_catch_all(cfg, "0.0.0.0:80") && control::listener_has_catch_all(cfg, "0.0.0.0:443"));
 }
 
+// access_log_exclude_paths and access_log_keep_days (0.1.0-alpha.128, docs/configuration.md 8b): the
+// matcher on the cleaned path, the loader's checks against what the fail2ban jails count, the rotated
+// files deleted, the managed fields, the approval gate and health.
+static void test_access_log_privacy() {
+    namespace fs = std::filesystem;
+    // The matcher: whole segments, the capitalisation written, the cleaned path.
+    CHECK(log_exclude::covers("/healthz", "/healthz") && log_exclude::covers("/healthz", "/healthz/live") && !log_exclude::covers("/healthz", "/healthzx"));
+    CHECK(log_exclude::covers("/api/notices/", "/api/notices/1.json") && log_exclude::covers("/api/notices/", "/api/notices/") &&
+          !log_exclude::covers("/api/notices/", "/api/notices") && !log_exclude::covers("/api/notices/", "/API/notices/1.json"));
+    {
+        SiteConfig site;
+        site.access_log_exclude = {"/api/notices/", "/healthz"};
+        std::string scratch;
+        CHECK(log_exclude::excluded(&site, "/api/notices/1.json?v=2", scratch) && log_exclude::excluded(&site, "/api//notices/./1.json", scratch));
+        CHECK(log_exclude::excluded(&site, "/api/%6Eotices/1.json", scratch) && log_exclude::excluded(&site, "/healthz", scratch));
+        // A path that leaves the prefix once cleaned is the path it names: a login attempt stays logged.
+        CHECK(!log_exclude::excluded(&site, "/api/notices/../../wp-login.php", scratch) && !log_exclude::excluded(&site, "/api/notices/%2E%2E/%2E%2E/wp-login.php", scratch));
+        CHECK(!log_exclude::excluded(&site, "/healthzx", scratch) && !log_exclude::excluded(&site, "/../x", scratch) && !log_exclude::excluded(nullptr, "/healthz", scratch));
+        SiteConfig none;
+        CHECK(!log_exclude::excluded(&none, "/api/notices/1.json", scratch));
+    }
+
+    const fs::path dir = fs::temp_directory_path() / ("agensio-logkeep-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir / "www");
+    fs::create_directories(dir / "logs" / "sites");
+    const std::string head = "[log]\naccess = \"logs/access.log\"\n[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18761\"]\nroot = \"www\"\n";
+    auto load = [&](const std::string& text, std::string* error = nullptr) -> std::optional<Config> {
+        std::ofstream(dir / "a.toml") << text;
+        try {
+            return load_config(dir / "a.toml");
+        } catch (const std::exception& e) {
+            if (error) *error = e.what();
+            return std::nullopt;
+        }
+    };
+    {
+        const auto cfg = load(head + "access_log = \"logs/sites/a.test.log\"\naccess_log_exclude_paths = [\"/api/notices/\", \"/healthz\", \"/healthz\"]\naccess_log_keep_days = 7\n");
+        CHECK(cfg && (cfg->sites[0].access_log_exclude == std::vector<std::string>{"/api/notices/", "/healthz"}) && cfg->sites[0].access_log_keep_days == 7);
+        if (cfg) {
+            std::ostringstream ex;
+            explain_config(*cfg, ex);
+            CHECK(ex.str().find("access_log_exclude_paths = [\"/api/notices/\", \"/healthz\"]\naccess_log_keep_days = 7\n") != std::string::npos);
+            // Health names the paths; site_show shows both.
+            bool named = false;
+            for (const auto& f : control::health_findings(*cfg, *cfg, false, std::time(nullptr)))
+                named = named || (f.code == "access_log_excluded" && f.severity == "info" && f.message.find("/api/notices/, /healthz") != std::string::npos &&
+                                  f.fix.find("the site file's access_log_exclude_paths") != std::string::npos);
+            CHECK(named);
+            const json::Value shown = control::site(*cfg, cfg->sites[0], std::time(nullptr));
+            CHECK(shown["access_log_exclude_paths"].items().size() == 2 && shown["access_log_keep_days"].num() == 7);
+        }
+    }
+    {
+        // A site under its own directory of sites/ is fine too, as logrotate's second glob names it.
+        const auto cfg = load(head + "access_log = \"logs/sites/a.test/access.log\"\naccess_log_keep_days = 1\n");
+        CHECK(cfg && cfg->sites[0].access_log_keep_days == 1);
+    }
+    auto refused = [&](const std::string& lines, const char* needle) {
+        std::string error;
+        const bool loaded = load(head + lines, &error).has_value();
+        if (loaded || error.find(needle) == std::string::npos) std::printf("access log keys: %s -> %s\n", lines.c_str(), loaded ? "loaded" : error.c_str());
+        CHECK(!loaded && error.find(needle) != std::string::npos);
+    };
+    refused("access_log_exclude_paths = [\"/\"]\n", "would exclude the whole site");
+    refused("access_log_exclude_paths = [\"/a?b=1\"]\n", "holds a query");
+    refused("access_log_exclude_paths = [\"api\"]\n", "must start with '/'");
+    refused("access_log_exclude_paths = [\"/a/../b\"]\n", "normalised path");
+    refused("access_log_exclude_paths = \"/api/\"\n", "must be a list of URL paths");
+    {
+        std::string many = "access_log_exclude_paths = [";
+        for (int i = 0; i < 17; ++i) many += (i ? ", " : "") + std::string("\"/p") + std::to_string(i) + "\"";
+        refused(many + "]\n", "at most 16 paths");
+    }
+    // What the jails count stays in the logs: a login path either way, an address rule's path.
+    refused("app = \"wordpress\"\nphp = { socket = \"unix:/run/php/x.sock\" }\naccess_log_exclude_paths = [\"/wp-login.php\"]\n", "covers the login path /wp-login.php");
+    refused("app = \"wordpress\"\nphp = { socket = \"unix:/run/php/x.sock\" }\naccess_log_exclude_paths = [\"/WP-LOGIN.PHP/x\"]\n", "lies under the login path /wp-login.php");
+    refused("login_paths = [\"/api/token\"]\naccess_log_exclude_paths = [\"/api/\"]\n", "covers the login path /api/token");
+    refused("access_log_exclude_paths = [\"/admin/x\"]\n[[site.access]]\npath = \"/admin\"\nallow = [\"10.0.0.0/8\"]\n", "the address rule on /admin restricts");
+    refused("access_log_exclude_paths = [\"/api/\"]\n[[site.access]]\npath = \"/api/keys\"\nallow = [\"10.0.0.0/8\"]\nmode = \"report\"\n", "its report lines name the clients");
+    refused("access_log_exclude_paths = [\"/api/notices/\"]\n[[site.access]]\npath = \"/\"\nallow = [\"10.0.0.0/8\"]\n", "the address rule on / restricts");
+    {
+        // A login with its query is that path with it alone; a path ["any"] reopens may be excluded.
+        CHECK(load(head + "login_paths = [\"/?_task=login\"]\naccess_log_exclude_paths = [\"/healthz\"]\n").has_value());
+        CHECK(load(head + "access_log_exclude_paths = [\"/api/notices/\"]\n[[site.access]]\npath = \"/\"\nallow = [\"10.0.0.0/8\"]\n"
+                          "[[site.access]]\npath = \"/api/notices\"\nallow = [\"any\"]\n").has_value());
+    }
+    {
+        // A password rule: the check on its own, the rules built by hand (a users file is root's).
+        SiteConfig s;
+        s.access_log_exclude = {"/staging/x"};
+        AuthRule r;
+        r.path = "/staging";
+        s.auth.push_back(r);
+        CHECK(check_log_exclusions(s).find("the password rule on /staging protects") != std::string::npos);
+        AuthRule open;
+        open.path = "/staging/x";
+        open.open = true;
+        s.auth.insert(s.auth.begin(), open);  // longest first, as finalize_site sorts them
+        CHECK(check_log_exclusions(s).empty());
+        s.access_log_exclude = {"/staging/"};
+        CHECK(!check_log_exclusions(s).empty());
+    }
+    // The days: whole, 1 to 14, the site's own file below sites/.
+    refused("access_log = \"logs/sites/a.test.log\"\naccess_log_keep_days = 0\n", "from 1 to 14");
+    refused("access_log = \"logs/sites/a.test.log\"\naccess_log_keep_days = 15\n", "from 1 to 14");
+    refused("access_log = \"logs/sites/a.test.log\"\naccess_log_keep_days = 7.5\n", "from 1 to 14");
+    refused("access_log = \"logs/sites/a.test.log\"\naccess_log_keep_days = \"7\"\n", "from 1 to 14");
+    refused("access_log = \"off\"\naccess_log_keep_days = 7\n", "writes no access log");
+    refused("access_log_keep_days = 7\n", "needs the site's own access_log: [log] access");
+    refused("access_log = \"logs/a.test.log\"\naccess_log_keep_days = 7\n", "logs/sites/, named *.log");
+    refused("access_log = \"logs/sites/a.test.txt\"\naccess_log_keep_days = 7\n", "named *.log");
+    refused("access_log = \"logs/sites/../error.log\"\naccess_log_keep_days = 7\n", "named *.log, where agensio deletes");
+    refused("access_log = \"logs/sites/a.test.log\"\naccess_log_keep_days = 7\n[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:18762\"]\nroot = \"www\"\n"
+            "access_log = \"logs/sites/a.test.log\"\n",
+            "write one access log");
+
+    // The rotated files deleted: logrotate's numbered names only, regular files only, judged by the
+    // oldest line at a file's start, else by the time of change less a day.
+    CHECK(log_retention::rotated_name("a.log", "a.log.1") && log_retention::rotated_name("a.log", "a.log.14.gz") && !log_retention::rotated_name("a.log", "a.log"));
+    CHECK(!log_retention::rotated_name("a.log", "a.log.0") && !log_retention::rotated_name("a.log", "a.log.1.bak") && !log_retention::rotated_name("a.log", "a.log.2026-11-01") &&
+          !log_retention::rotated_name("a.log", "b.log.1") && !log_retention::rotated_name("a.log", "a.log.gz") && !log_retention::rotated_name("a.log", "a.log.12345"));
+    const std::time_t now = std::time(nullptr);
+    constexpr std::time_t kDay = 24 * 60 * 60;
+    auto line_at = [](std::time_t t) {
+        char stamp[64];
+        std::tm tm{};
+        localtime_r(&t, &tm);
+        std::strftime(stamp, sizeof stamp, "%d/%b/%Y:%H:%M:%S %z", &tm);
+        return std::string("a.test:443 203.0.113.7 - - [") + stamp + "] \"GET / HTTP/1.1\" 200 5 \"-\" \"t\"\n";
+    };
+    CHECK(log_retention::oldest_line(line_at(now - 2 * kDay) + line_at(now - 4 * kDay) + line_at(now - 3 * kDay)) / 60 == (now - 4 * kDay) / 60);
+    CHECK(log_retention::oldest_line("not a log line\n" + line_at(now - kDay).substr(0, 20)) == 0);
+    const fs::path sites = dir / "logs" / "sites";
+    auto write = [](const fs::path& p, const std::string& text, std::time_t mtime = 0) {
+        std::ofstream(p, std::ios::binary) << text;
+        if (mtime) {
+            const struct timespec ts[2] = {{mtime, 0}, {mtime, 0}};
+            ::utimensat(AT_FDCWD, p.c_str(), ts, 0);
+        }
+    };
+    write(sites / "x.log", line_at(now - 9 * kDay));                         // the current file: logrotate's
+    write(sites / "x.log.1", line_at(now - kDay));                           // within the days: kept
+    write(sites / "x.log.3", "not a log line\n", now - 5 * kDay);            // unread: its time less a day
+    write(sites / "x.log.4", line_at(now - 2 * kDay) + line_at(now - 4 * kDay));  // the oldest of its start
+    write(sites / "x.log.bak", line_at(now - 9 * kDay));                     // not a rotation
+    write(sites / "x.log.2026-11-01", line_at(now - 9 * kDay));              // a date's name
+    write(sites / "y.log.1", line_at(now - 9 * kDay));                       // another log
+    write(dir / "victim", line_at(now - 9 * kDay));
+    fs::create_symlink(dir / "victim", sites / "x.log.5");                   // a link: never followed
+#ifdef AGENSIO_HAS_ZLIB
+    {
+        const std::string old = line_at(now - 5 * kDay);
+        gzFile g = gzopen((sites / "x.log.2.gz").c_str(), "wb");
+        gzwrite(g, old.data(), static_cast<unsigned>(old.size()));
+        gzclose(g);
+    }
+#endif
+    Config kc;
+    kc.log.access = (dir / "logs" / "access.log").string();
+    {
+        SiteConfig x;
+        x.server_names = {"x.test"};
+        x.access_log = (sites / "x.log").string();
+        x.access_log_keep_days = 3;
+        SiteConfig outside = x;
+        outside.server_names = {"o.test"};
+        outside.access_log = (dir / "o.log").string();
+        SiteConfig climbing = x;
+        climbing.server_names = {"c.test"};
+        climbing.access_log = (sites / ".." / "access.log").string();
+        kc.sites = {x, outside, climbing};
+    }
+    const auto keeps = log_retention::keeps_of(kc);
+    CHECK(keeps.size() == 1 && keeps[0].site == "x.test" && keeps[0].days == 3);
+    const json::Value r = log_retention::expire(keeps, now);
+    std::vector<std::string> gone;
+    for (const auto& n : r["removed"].items()) gone.push_back(fs::path(std::string(n.str())).filename().string());
+    std::sort(gone.begin(), gone.end());
+    CHECK(r["ok"].boolean() && r["failed"].items().empty());
+#ifdef AGENSIO_HAS_ZLIB
+    CHECK((gone == std::vector<std::string>{"x.log.2.gz", "x.log.3", "x.log.4"}) && !fs::exists(sites / "x.log.2.gz"));
+#else
+    CHECK((gone == std::vector<std::string>{"x.log.3", "x.log.4"}));
+#endif
+    CHECK(!fs::exists(sites / "x.log.3") && !fs::exists(sites / "x.log.4"));
+    CHECK(fs::exists(sites / "x.log") && fs::exists(sites / "x.log.1") && fs::exists(sites / "x.log.bak") && fs::exists(sites / "x.log.2026-11-01") &&
+          fs::exists(sites / "y.log.1") && fs::is_symlink(sites / "x.log.5") && fs::exists(dir / "victim"));
+    {
+        // The log directory is the server account's: a `sites` it replaced by a link (to /var/log, say)
+        // is never walked through, so root's deletes stay where the path says.
+        fs::create_directories(dir / "elsewhere");
+        fs::create_directories(dir / "logs2");
+        write(dir / "elsewhere" / "v.log.3", line_at(now - 9 * kDay));
+        fs::create_symlink(dir / "elsewhere", dir / "logs2" / "sites");
+        const json::Value r3 = log_retention::expire({log_retention::Keep{"v.test", (dir / "logs2" / "sites" / "v.log").string(), 3, (dir / "logs2").string()}}, now);
+        CHECK(r3["removed"].items().empty() && r3["failed"].items().size() == 1 && fs::exists(dir / "elsewhere" / "v.log.3") &&
+              std::string(r3["failed"].items()[0].get("error")).find("without following a link") != std::string::npos);
+        // A log not below the walk's start is refused, whatever its name.
+        const json::Value r4 = log_retention::expire({log_retention::Keep{"v.test", (dir / "elsewhere" / "v.log").string(), 3, (dir / "logs2").string()}}, now);
+        CHECK(r4["removed"].items().empty() && r4["failed"].items().size() == 1 && fs::exists(dir / "elsewhere" / "v.log.3"));
+    }
+    {
+        // A directory it cannot delete in: a failure named for health, the file kept.
+        write(sites / "x.log.6", line_at(now - 9 * kDay));
+        fs::permissions(sites, fs::perms::owner_read | fs::perms::owner_exec);
+        const json::Value r2 = log_retention::expire(keeps, now);
+        fs::permissions(sites, fs::perms::owner_all);
+        if (::geteuid() != 0) {
+            CHECK(r2["failed"].items().size() == 1 && fs::exists(sites / "x.log.6"));
+            const control::Finding f = control::log_keep_finding(r2["failed"].items()[0]);
+            CHECK(f.code == "access_log_keep_failed" && f.severity == "warn" && f.site == "x.test" && f.message.find("x.log.6") != std::string::npos &&
+                  f.message.find("access_log_keep_days (3)") != std::string::npos && f.fix.find("root helper") != std::string::npos);
+        }
+    }
+
+    // The managed fields: parsed, rendered, kept in the spec's JSON.
+    {
+        Config cfg;
+        control::SiteSpec spec;
+        spec.domain = "a.test";
+        spec.app = "static";
+        spec.root = "/srv/a";
+        spec.user = "a";
+        spec.access_log = "/var/log/agensio/sites/a.test.log";
+        json::Value body;
+        std::string err;
+        CHECK(json::parse(R"({"access_log_exclude_paths": ["/api/notices/", "/healthz"], "access_log_keep_days": 7})", body, err));
+        (void)control::apply_request(body, cfg, spec, err);
+        CHECK(err.empty() && (spec.access_log_exclude_paths == std::vector<std::string>{"/api/notices/", "/healthz"}) && spec.access_log_keep_days == 7);
+        const std::string text = control::render_site(spec, "now");
+        CHECK(text.find("\naccess_log_exclude_paths = [\"/api/notices/\", \"/healthz\"]   # no access-log line and no client address in the error log here\n") != std::string::npos);
+        CHECK(text.find("\naccess_log_keep_days = 7   # the site's rotated lines are deleted after 7 days (logrotate keeps 14)\n") != std::string::npos);
+        control::SiteSpec back;
+        CHECK(control::SiteSpec::from_json(spec.to_json(), back) && back.access_log_exclude_paths == spec.access_log_exclude_paths && back.access_log_keep_days == 7);
+        CHECK(json::parse(R"({"access_log_exclude_paths": null, "access_log_keep_days": null})", body, err));
+        (void)control::apply_request(body, cfg, spec, err);
+        const std::string cleared = control::render_site(spec, "now");
+        CHECK(err.empty() && spec.access_log_exclude_paths.empty() && spec.access_log_keep_days == 0 && cleared.find("access_log_exclude") == std::string::npos &&
+              cleared.find("access_log_keep") == std::string::npos && cleared.find("\naccess_log = ") != std::string::npos);
+        for (const char* bad : {R"({"access_log_keep_days": 15})", R"({"access_log_keep_days": 7.5})", R"({"access_log_keep_days": "7"})", R"({"access_log_exclude_paths": ["/"]})",
+                                R"({"access_log_exclude_paths": "/api/"})", R"({"access_log_exclude_paths": [7]})"}) {
+            control::SiteSpec copy = spec;
+            std::string e;
+            CHECK(json::parse(bad, body, e));
+            (void)control::apply_request(body, cfg, copy, e);
+            if (e.find("access_log_") == std::string::npos) std::printf("managed access log fields accepted %s\n", bad);
+            CHECK(e.find("access_log_") != std::string::npos);
+        }
+    }
+    // The approval gate: a path added or widened, the days set or lowered; never removing or raising.
+    {
+        control::SiteSpec cur;
+        cur.domain = "a.test";
+        cur.access_log_exclude_paths = {"/api/notices/"};
+        cur.access_log_keep_days = 7;
+        control::ApprovalContext ctx;
+        ctx.current = &cur;
+        auto reasons = [&](const char* text, const control::ApprovalContext& c) {
+            json::Value b;
+            std::string e;
+            CHECK(json::parse(text, b, e));
+            std::string all;
+            for (const auto& r : control::approval_reasons("/v1/sites/a.test", "", b, c)) all += r + " | ";
+            return all;
+        };
+        CHECK(reasons(R"({"access_log_exclude_paths": ["/api/notices/", "/api/notices/old/"]})", ctx).empty());
+        CHECK(reasons(R"({"access_log_exclude_paths": []})", ctx).empty() && reasons(R"({"access_log_keep_days": 10})", ctx).empty() &&
+              reasons(R"({"access_log_keep_days": null})", ctx).empty());
+        CHECK(reasons(R"({"access_log_exclude_paths": ["/api/"]})", ctx).find("keeps requests under /api/ out of the site's access log") != std::string::npos);
+        CHECK(reasons(R"({"access_log_keep_days": 3})", ctx).find("older than 3 days (7 until now): nothing brings them back") != std::string::npos);
+        cur.access_log_keep_days = 0;
+        CHECK(reasons(R"({"access_log_keep_days": 14})", ctx).find("(logrotate's 14 until now)") != std::string::npos);
+        json::Value b;
+        std::string e;
+        CHECK(json::parse(R"({"domain": "n.test", "access_log_exclude_paths": ["/healthz"], "access_log_keep_days": 1})", b, e));
+        CHECK(control::approval_reasons("/v1/sites", "", b).size() == 2);
+    }
+    fs::remove_all(dir);
+}
+
 int main() {
     test_path();
     test_parser();
@@ -14705,6 +14988,7 @@ int main() {
     test_drupal_php_rule();
     test_refusal_finding();
     test_protection();
+    test_access_log_privacy();
     test_install();
 #ifdef AGENSIO_HAS_TLS
     test_acme();

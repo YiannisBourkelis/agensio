@@ -25,6 +25,7 @@
 #include "core/body.hpp"
 #include "core/fields.hpp"
 #include "core/forwarded.hpp"
+#include "core/log_exclude.hpp"
 #include "core/stream.hpp"
 #include "core/worker_state.hpp"
 #include "handlers/dispatch.hpp"
@@ -161,7 +162,7 @@ public:
     // A body source failed or ended short: the client sees the stream cut, not a false end.
     void on_stream_failed(H2Stream& s) {
         if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
-            log->info("http2 " + remote_text() + " " + stream_text(s) + ": response body failed mid-stream");
+            log->info("http2 " + remote_for(&s) + " " + stream_text(s) + ": response body failed mid-stream");
         send_rst(s.id, ErrorCode::internal_error, "");
         log_request(s);
         close_stream(s);
@@ -520,7 +521,7 @@ private:
         const ErrorCode code = static_cast<ErrorCode>(read_u32(p));
         if (!s->responded) count_reset();  // cancelled before we answered: the Rapid Reset shape
         if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
-            log->info("http2 " + remote_text() + " " + stream_text(*s) + ": reset by the client (" + std::string(error_name(code)) + ")");
+            log->info("http2 " + remote_for(s) + " " + stream_text(*s) + ": reset by the client (" + std::string(error_name(code)) + ")");
         close_stream(*s);
         maybe_finish();
     }
@@ -774,7 +775,7 @@ private:
             if (s.length_known && s.content_length > s.body_limit) {
                 s.site = listener_->router.site(req.host);  // the 413 goes to the site's access log
                 if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn))
-                    log->warn(body_refused_text(s.site, remote_text(), s.content_length, s.body_limit));
+                    log->warn(body_refused_text(s.site, remote_for(&s), s.content_length, s.body_limit));
                 return fail_stream(s, 413);
             }
             // The receive window follows the body limit, so an upload runs at the consumer's pace.
@@ -997,7 +998,7 @@ private:
         if (s->body_received > s->body_limit) {
             if (!s->responded && !s->ready) {
                 if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn))
-                    log->warn(body_refused_text(s->site, remote_text(), s->body_received, s->body_limit, true));
+                    log->warn(body_refused_text(s->site, remote_for(s), s->body_received, s->body_limit, true));
                 fail_stream(*s, 413);
             }
             s->body_done = true;  // nothing more is taken from this request
@@ -1121,7 +1122,7 @@ private:
         writer_.control(f);
         if (!reason.empty())
             if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
-                log->info("http2 " + remote_text() + " " + (s ? stream_text(*s) : "stream " + std::to_string(id)) + ": RST_STREAM " +
+                log->info("http2 " + remote_for(s) + " " + (s ? stream_text(*s) : "stream " + std::to_string(id)) + ": RST_STREAM " +
                           std::string(error_name(code)) + ": " + std::string(reason));
     }
 
@@ -1341,7 +1342,7 @@ private:
                 }
                 if (cut) {
                     if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
-                        log->info("http2 " + remote_text() + " " + stream_text(s) + ": no progress, cancelled");
+                        log->info("http2 " + remote_for(&s) + " " + stream_text(s) + ": no progress, cancelled");
                     send_rst(s.id, ErrorCode::cancel, "");
                     count_reset();
                     close_stream(s);
@@ -1376,6 +1377,8 @@ private:
         const int sink = site ? site->access_log_sink : listener_->access_sink;  // no site took it: [log] access (alpha.70)
         if (sink < 0) return;
         const Request& req = s.stream.request;
+        // A path the site keeps out of its log (access_log_exclude_paths, core/log_exclude.hpp).
+        if (log_exclude::excluded(site, req.target, worker_.state.log_path)) return;
         AccessRecord rec;
         rec.remote = s.stream.conn.client_address.empty() ? std::string_view(remote_) : s.stream.conn.client_address;
         rec.host = req.host;
@@ -1400,6 +1403,13 @@ private:
     const asio::ip::address& peer_ip() override {
         if (remote_.empty()) (void)remote_text();
         return remote_addr_;
+    }
+
+    // The client's address for an error-log line about stream `s`: "-" for a path its site keeps out
+    // of its logs (access_log_exclude_paths, core/log_exclude.hpp), known once the stream is routed.
+    std::string remote_for(const H2Stream* s) {
+        if (s && log_exclude::excluded(s->site, s->stream.request.target, worker_.state.log_path)) return "-";
+        return remote_text();
     }
 
     std::string remote_text() {

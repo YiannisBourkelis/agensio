@@ -5,6 +5,7 @@
 #include "control/reference.hpp"
 
 #include "core/access.hpp"
+#include "core/log_exclude.hpp"
 #include "core/redirect.hpp"
 #include "core/refuse.hpp"
 #include "core/private_cache.hpp"
@@ -2937,6 +2938,32 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (auto a = t["access_log"].value<std::string>())
         site.access_log = (*a == "off" || a->empty()) ? std::string() : resolve(base_dir, *a).string();
     else site.access_log = cfg.log.access;
+    // What the site keeps out of its logs and for how long (0.1.0-alpha.128, docs/configuration.md 8b):
+    // the paths' overlap with what the fail2ban jails count is judged once the rules are final
+    // (check_log_exclusions, after finalize_site).
+    if (t.contains("access_log_exclude_paths")) {
+        if (!t["access_log_exclude_paths"].is_array())
+            fail(where + ".access_log_exclude_paths must be a list of URL paths ([\"/api/notices/\"]): requests under them write no access-log line");
+        for (const auto& p : string_list(t["access_log_exclude_paths"], (where + ".access_log_exclude_paths").c_str())) {
+            if (const std::string why = check_log_exclude_path(p); !why.empty()) fail(where + ".access_log_exclude_paths: " + why);
+            if (std::find(site.access_log_exclude.begin(), site.access_log_exclude.end(), p) == site.access_log_exclude.end()) site.access_log_exclude.push_back(p);
+        }
+        if (site.access_log_exclude.size() > log_exclude::kMaxPaths) fail(where + ".access_log_exclude_paths: at most 16 paths");
+    }
+    if (t.contains("access_log_keep_days")) {
+        const auto d = t["access_log_keep_days"].value<std::int64_t>();
+        if (!t["access_log_keep_days"].is_integer() || !d || *d < 1 || *d > 14)
+            fail(where + ".access_log_keep_days must be a whole number of days from 1 to 14: rotated lines older than that are deleted (the shipped logrotate keeps 14)");
+        if (site.access_log.empty()) fail(where + ".access_log_keep_days: the site writes no access log (access_log = \"off\")");
+        if (site.access_log == cfg.log.access)
+            fail(where + ".access_log_keep_days needs the site's own access_log: [log] access holds other sites' lines too");
+        const std::string sites_dir = (fs::path(log_directory(cfg)) / "sites").string();
+        const std::string& f = site.access_log;
+        if (!(f.size() > sites_dir.size() + 1 && f.compare(0, sites_dir.size(), sites_dir) == 0 && f[sites_dir.size()] == '/') || !f.ends_with(".log"))
+            fail(where + ".access_log_keep_days needs the site's access_log in " + sites_dir + "/, named *.log, where agensio deletes its rotated files (" + f +
+                 " is not); elsewhere logrotate's own settings decide");
+        site.access_log_keep_days = static_cast<int>(*d);
+    }
 
     if (auto arr = t["location"].as_array()) {
         std::size_t idx = 0;
@@ -3032,6 +3059,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         }
     }
     finalize_site(site);
+    if (const std::string why = check_log_exclusions(site); !why.empty()) fail(where + ".access_log_exclude_paths: " + why);
     // response_compression: the codings this site offers in its order (the chooser takes the first of
     // equals), built once here so routing pays one call and no lookup, and the copies of its cached
     // files are made for these alone.
@@ -3428,6 +3456,8 @@ void explain_config(const Config& cfg, std::ostream& out) {
         out << "hidden_files = " << (site.hidden_files ? "true" : "false") << "\nsymlinks = \""
             << (site.symlinks_deny ? "deny" : "allow") << "\"\n";
         out << "access_log = \"" << (site.access_log.empty() ? "off" : site.access_log) << "\"\n";
+        if (!site.access_log_exclude.empty()) print_list(out, "access_log_exclude_paths", site.access_log_exclude);
+        if (site.access_log_keep_days) out << "access_log_keep_days = " << site.access_log_keep_days << "\n";
         if (!site.login_paths.empty()) print_list(out, "login_paths", site.login_paths);
         if (!site.public_archives.empty()) print_list(out, "public_archives", site.public_archives);
         if (!site.mime_types.empty()) out << "mime_types = " << mime_types_toml(site.mime_types) << "   # over [mime_types] and the built-in table\n";
@@ -4496,6 +4526,13 @@ std::optional<SiteConflict> first_site_conflict(const Config& cfg) {
                                                   fs::path(sites[j].source).filename().string() + ", " + sites[i].server_names.front() + " in " +
                                                   fs::path(sites[i].source).filename().string() + "); an address has one" + why};
             }
+    // access_log_keep_days deletes the rotated files of the site's log (0.1.0-alpha.128): a file another
+    // site writes too would lose that site's lines with them.
+    for (std::size_t i = 0; i < sites.size(); ++i)
+        for (std::size_t j = 0; j < i; ++j)
+            if (!sites[i].access_log.empty() && sites[i].access_log == sites[j].access_log && (sites[i].access_log_keep_days || sites[j].access_log_keep_days))
+                return SiteConflict{j, i, "sites " + sites[j].server_names.front() + " and " + sites[i].server_names.front() + " write one access log, " +
+                                              sites[i].access_log + ", and access_log_keep_days deletes its rotated files: a site that keeps fewer days needs a file of its own"};
     // A pool per site (docs/design-php-versions.md 3): its sizes and version are its own. Sites of
     // different users never share a socket, whatever they say; two of one account whose domains give
     // the same 8 hex digits (a chance of one in 66,000 for 360 sites of one account) would share a pool's name.
@@ -5786,6 +5823,67 @@ std::string check_login_path(const std::string& p) {
     if (query.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~/=&+:-") != std::string::npos)
         return "'" + p + "': the query may hold letters, digits and ._~/=&+:- only (no second '?', no '%', spaces or quotes)";
     return "";
+}
+
+std::string check_log_exclude_path(const std::string& p) {
+    if (p.find('?') != std::string::npos) return "'" + p.substr(0, 80) + "' holds a query: a path is matched without its query";
+    if (p == "/") return "'/' would exclude the whole site; access_log = \"off\" writes no access log for it";
+    return check_login_path(p);
+}
+
+std::string check_log_exclusions(const SiteConfig& site) {
+    if (site.access_log_exclude.empty()) return "";
+    // `path` lies under `prefix` as core/log_exclude.hpp covers it, in any capitalisation: a jail's
+    // path in another case is still the jail's.
+    const auto below = [](std::string_view prefix, std::string_view path) {
+        if (!access::iequal_prefix(path, prefix)) return false;
+        return path.size() == prefix.size() || prefix.back() == '/' || path[prefix.size()] == '/';
+    };
+    std::vector<std::string> login = preset_login_paths(site.app);
+    for (const auto& l : site.login_paths)
+        if (std::find(login.begin(), login.end(), l) == login.end()) login.push_back(l);
+    for (const std::string& p : site.access_log_exclude) {
+        for (const std::string& l : login) {
+            const std::size_t q = l.find('?');
+            const std::string_view lp = std::string_view(l).substr(0, q);
+            // The exclusion covers the login path, or one without a query covers the exclusion
+            // (/wp-login.php/x runs /wp-login.php; a login with a query is that path with it alone).
+            const bool covers = below(p, lp);
+            if (covers || (q == std::string::npos && below(lp, p)))
+                return "\"" + p + "\" " + (covers ? "covers" : "lies under") + " the login path " + l +
+                       " (the fail2ban jail counts attempts there); a login path stays in the access log";
+        }
+        // An address rule: the prefix rule deciding the path itself (the longest covering it, the
+        // rules being sorted longest first), and every rule below it; ["any"] reopens, never restricts.
+        const AccessRule* restricting = nullptr;
+        for (const AccessRule& r : site.access)
+            if (!r.exact && access::covers(r, p)) {
+                if (!r.any) restricting = &r;
+                break;
+            }
+        for (const AccessRule& r : site.access)
+            if (!restricting && !r.any && below(p, r.path)) restricting = &r;
+        if (restricting)
+            return "\"" + p + "\" covers paths the address rule on " + restricting->path + " restricts (" +
+                   (restricting->report ? "its report lines name the clients" : "the fail2ban jail counts its 403s") + "); a restricted path stays in the logs";
+        const AuthRule* protecting = nullptr;
+        for (const AuthRule& r : site.auth)
+            if (!r.exact && access::covers(r, p)) {
+                if (!r.open) protecting = &r;
+                break;
+            }
+        for (const AuthRule& r : site.auth)
+            if (!protecting && !r.open && below(p, r.path)) protecting = &r;
+        if (protecting)
+            return "\"" + p + "\" covers paths the password rule on " + protecting->path +
+                   " protects (the fail2ban jail counts failed passwords by address); a protected path stays in the logs";
+    }
+    return "";
+}
+
+std::string log_directory(const Config& cfg) {
+    if (cfg.log.access.empty()) return "/var/log/agensio";
+    return fs::path(cfg.log.access).parent_path().string();
 }
 
 std::vector<std::string> app_presets() {

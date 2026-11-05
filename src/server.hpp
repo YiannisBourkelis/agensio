@@ -271,6 +271,11 @@ private:
     std::map<std::string, std::string> cert_stamps_;       // by pair: the files as last loaded (or tried)
     std::map<std::string, std::string> cert_load_errors_;  // by pair: why its files did not load, last time
     std::chrono::seconds cert_watch_interval_{3600};       // the watch's timer is declared after workers_
+    // access_log_keep_days's hourly run (AGENSIO_LOG_EXPIRE_SECONDS for the tests) and its last failures
+    // ({site, log, days, error}) for health, written by the run's thread.
+    std::chrono::seconds log_expiry_interval_{3600};
+    mutable std::mutex log_expiry_mutex_;
+    json::Value log_expiry_failed_;
     // What the watch has done, for status and health's certificate_watch_stalled; worker 0's, as the
     // timer is. `armed` is the start (the first run is due an interval later), `last` {} before it.
     struct CertWatchRecord {
@@ -393,6 +398,7 @@ private:
     Provisioner provisioner_;
     std::string uploads_dir_;
     void arm_trash_expiry();
+    void arm_log_expiry();
     std::vector<std::unique_ptr<Worker>> workers_;
     // Timers on worker 0's context. Declared after workers_, so they are destroyed first: a timer
     // destroyed after its context's timer service reads freed memory (2026-10-09, the sanitizer
@@ -400,6 +406,7 @@ private:
     // certificate watch's, declared above until then, at every exit of a server with TLS).
     std::unique_ptr<asio::steady_timer> trash_timer_;       // hourly: expired trash entries removed through the helper
     std::unique_ptr<asio::steady_timer> cert_watch_timer_;  // hourly: certificate files changed on disk (step T3)
+    std::unique_ptr<asio::steady_timer> log_expiry_timer_;  // hourly: access_log_keep_days's rotated files deleted
     // [[site.auth]]'s verification pool. Declared after workers_, so it is destroyed first: its
     // threads post results into the workers' contexts and must stop before those go. Only in a
     // build with authentication (core/auth.cpp is compiled only then).

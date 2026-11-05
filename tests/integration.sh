@@ -1374,7 +1374,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 246 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 248 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$(ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -3404,6 +3404,43 @@ check "access log: a client that resets mid-response is named in its line, over 
   "$(for a in plain tls v6; do grep -F "agensio-abort-$a" bench/tmp/dual/access.log | tail -1 | cut -d' ' -f2; done | tr '\n' ' ' | sed 's/ $//')"
 check "access log: a dual-stack listener records an IPv4 client as IPv4, an IPv6 one as IPv6; a mapped X-Forwarded-For entry unmapped" "127.0.0.1 ::1 198.51.100.8" "$(grep -F 'dual-v4' bench/tmp/dual/access.log | tail -1 | cut -d' ' -f2) $(grep -F 'dual-v6' bench/tmp/dual/access.log | tail -1 | cut -d' ' -f2) $(grep -F 'dual-xff' bench/tmp/access.log | tail -1 | cut -d' ' -f2)"
 check "an unknown method's error-log line names the client on a server that trusts no proxy (before, \"from  (405)\": the address was filled only on need)" "1" "$(grep -c "unrecognised method 'FROB' for /dual-frob from 127.0.0.1 (405)" bench/tmp/dual/error.log)"
+# Fewer records (0.1.0-alpha.128, docs/configuration.md 8b): a site's excluded paths write no access-log
+# line, on any method and over HTTP/1.1 and HTTP/2, and the error log's lines about them name no client;
+# a path that leaves the prefix once cleaned is logged; the site's rotated files past its days go
+# (AGENSIO_LOG_EXPIRE_SECONDS=1: the first run a second after the start), the newer one stays.
+LX=bench/tmp/logex
+rm -rf $LX; mkdir -p $LX/logs/sites $LX/www
+printf 'x\n' > $LX/www/index.html
+for d in 5 1; do
+  printf 'ex.test:18931 203.0.113.7 - - [%s] "GET /api/notices/1.json HTTP/1.1" 200 5 "-" "planted"\n' \
+    "$(python3 -c "import time; print(time.strftime('%d/%b/%Y:%H:%M:%S %z', time.localtime(time.time() - $d * 86400)))")" > $LX/logs/sites/ex.test.log.$((d == 5 ? 2 : 1))
+done
+printf '[server]\nworkers = 1\nprotocols = ["h2c", "h1"]\n[log]\naccess = "%s/%s/logs/access.log"\nerror = "%s/%s/logs/error.log"\nlevel = "info"\n[[site]]\nserver_name = ["ex.test"]\nlisten = ["127.0.0.1:18931"]\nroot = "%s/%s/www"\nmax_body_size = "1KB"\naccess_log = "logs/sites/ex.test.log"\naccess_log_exclude_paths = ["/api/notices/", "/healthz"]\naccess_log_keep_days = 3\n' \
+  "$ROOT" $LX "$ROOT" $LX "$ROOT" $LX > $LX/agensio.toml
+AGENSIO_LOG_EXPIRE_SECONDS=1 "$BIN" -c $LX/agensio.toml > $LX/server.out 2>&1 & LXPID=$!
+for _ in $(seq 1 50); do nc -z 127.0.0.1 18931 2>/dev/null && break; sleep 0.1; done
+LXS=http://127.0.0.1:18931
+lx() { command curl -sS -o /dev/null -H 'Host: ex.test' "$@"; }
+lx "$LXS/api/notices/1.json?lx-h1"
+lx -X POST -d a=1 "$LXS/api/notices/1.json?lx-post"
+lx -I "$LXS/healthz?lx-head"
+lx --http2-prior-knowledge "$LXS/api/notices/2.json?lx-h2"
+lx -X FROB "$LXS/api/notices/m?lx-frob"
+head -c 2048 /dev/zero | lx -H 'Content-Type: application/octet-stream' --data-binary @- "$LXS/api/notices/up?lx-413"
+lx --path-as-is "$LXS/api/notices/../../index.html?lx-climb"
+lx "$LXS/index.html?lx-kept"
+lx "$LXS/healthzx?lx-near"
+lx --http2-prior-knowledge "$LXS/index.html?lx-h2-kept"
+lx -X FROB "$LXS/m?lx-frob-kept"
+head -c 2048 /dev/zero | lx -H 'Content-Type: application/octet-stream' --data-binary @- "$LXS/up?lx-413-kept"
+sleep 2.2  # the access log's flush (a second) and the expiry's first run
+kill $LXPID 2>/dev/null; wait $LXPID 2>/dev/null
+check "access_log_exclude_paths: no line for an excluded path on any method or protocol, in the site's log or the server's; a path that leaves the prefix once cleaned, one beside it and the rest are logged" "0 6" \
+  "$(cat $LX/logs/access.log $LX/logs/sites/ex.test.log 2>/dev/null | grep -cE 'lx-(h1|post|head|h2|frob|413) HTTP') $(grep -cE 'lx-(climb|kept|near|h2-kept|frob-kept|413-kept) HTTP' $LX/logs/sites/ex.test.log)"
+check "access_log_exclude_paths: the error log's lines about an excluded request name no client (a 413, an unknown method), the same lines elsewhere do" "1 1 1 1" \
+  "$(grep -c 'site ex.test: a request body of 2 KB from - refused with 413' $LX/logs/error.log) $(grep -c 'site ex.test: a request body of 2 KB from 127.0.0.1 refused with 413' $LX/logs/error.log) $(grep -cF "for /api/notices/m?lx-frob from - (405)" $LX/logs/error.log) $(grep -cF "for /m?lx-frob-kept from 127.0.0.1 (405)" $LX/logs/error.log)"
+check "access_log_keep_days: the rotated file holding a line older than the site's days is deleted and said so, the newer one kept" "gone kept 1" \
+  "$([ -e $LX/logs/sites/ex.test.log.2 ] && echo there || echo gone) $(grep -q planted $LX/logs/sites/ex.test.log.1 && echo kept) $(grep -c 'access_log_keep_days: 1 rotated access log file(s) past their site.s days removed: .*/ex.test.log.2$' $LX/logs/error.log)"
 # ---- The server's addresses (docs/configuration.md 1c, 2026-11-03): named in the main file they are
 # open at start with no site on them, a site created without an address attaches by a reload, a site
 # with 0.0.0.0:P of its own beside the server's [::]:P is named, and without the keys a site on the

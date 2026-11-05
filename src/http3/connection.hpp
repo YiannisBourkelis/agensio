@@ -25,6 +25,7 @@
 #include "core/fields.hpp"
 #include "core/response_fields.hpp"
 #include "core/forwarded.hpp"
+#include "core/log_exclude.hpp"
 #include "handlers/dispatch.hpp"
 #include "http/request_assembly.hpp"
 #include "http/stream_pool.hpp"
@@ -355,7 +356,7 @@ private:
                         // learns the body ended in an error (its answer, if any, is dropped).
                         if (!s.responded) {
                             if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn))
-                                log->warn(body_refused_text(s.site, remote_.empty() ? std::string_view("-") : std::string_view(remote_), s.body_received, s.body_limit, true));
+                                log->warn(body_refused_text(s.site, remote_for(s), s.body_received, s.body_limit, true));
                             fail_stream(s, 413);
                         }
                         return deliver_error(s, make_error_code(BodyError::too_large));
@@ -445,7 +446,7 @@ private:
             if (s.length_known && s.content_length > s.body_limit) {
                 s.site = listener_->router.site(req.host);  // the 413 goes to the site's access log
                 if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn))
-                    log->warn(body_refused_text(s.site, remote_.empty() ? std::string_view("-") : std::string_view(remote_), s.content_length, s.body_limit));
+                    log->warn(body_refused_text(s.site, remote_for(s), s.content_length, s.body_limit));
                 return fail_stream(s, 413);
             }
             quic_.stream_window(q, std::min<std::uint64_t>(std::max<std::uint64_t>(s.body_limit, 1), kStreamWindowMax));
@@ -994,6 +995,13 @@ private:
         trusted_checked_ = false;  // trusted_proxies may have changed: ask again (2026-10-07)
     }
 
+    // The client's address for an error-log line about stream `s`: "-" for a path its site keeps out
+    // of its logs (access_log_exclude_paths, core/log_exclude.hpp), or when the address is not known.
+    std::string_view remote_for(const H3Stream& s) {
+        if (remote_.empty() || log_exclude::excluded(s.site, s.stream.request.target, worker_.state.log_path)) return "-";
+        return remote_;
+    }
+
     void log_request(H3Stream& s) {
         if (s.logged) return;
         s.logged = true;
@@ -1001,6 +1009,8 @@ private:
         const int sink = site ? site->access_log_sink : listener_->access_sink;  // no site took it: [log] access (alpha.70)
         if (sink < 0) return;
         const Request& req = s.stream.request;
+        // A path the site keeps out of its log (access_log_exclude_paths, core/log_exclude.hpp).
+        if (log_exclude::excluded(site, req.target, worker_.state.log_path)) return;
         AccessRecord rec;
         rec.remote = s.stream.conn.client_address.empty() ? std::string_view(remote_) : s.stream.conn.client_address;
         rec.host = req.host;

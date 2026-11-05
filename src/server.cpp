@@ -20,6 +20,7 @@
 #include "services/approvers.hpp"
 #include "services/files.hpp"
 #include "services/history.hpp"
+#include "services/log_retention.hpp"
 #ifdef AGENSIO_HAS_AUTH
 #include "services/authusers.hpp"
 #endif
@@ -96,6 +97,8 @@ Server::Server(Config cfg)
     // The certificate watch's period (step T3): an hour; shorter only for the tests.
     if (const char* w = std::getenv("AGENSIO_CERT_WATCH_SECONDS"))
         if (const long v = std::strtol(w, nullptr, 10); v >= 1) cert_watch_interval_ = std::chrono::seconds(v);
+    if (const char* w = std::getenv("AGENSIO_LOG_EXPIRE_SECONDS"))
+        if (const long v = std::strtol(w, nullptr, 10); v >= 1) log_expiry_interval_ = std::chrono::seconds(v);
 #ifdef AGENSIO_HAS_AUTH
     // A few threads for [[site.auth]]'s slow hashes, whatever the workers do: at most four,
     // a quarter of the machine's threads, never none.
@@ -1120,6 +1123,12 @@ json::Value Server::health_with(const std::vector<control::Finding>& more) {
     // shape of the refusals, so the fix follows from it: one address (the firewall's), idle
     // connections filling the workers (slow or stuck clients), or load (a higher limit).
     if (const control::RefusalReport rr = refusal_report(); rr.refused) extra.push_back(control::refusal_finding(rr));
+    // access_log_keep_days's last run (docs/configuration.md 8b): a rotated file it could not delete
+    // keeps lines past the site's days.
+    {
+        std::lock_guard<std::mutex> lock(log_expiry_mutex_);
+        for (const auto& f : log_expiry_failed_.items()) extra.push_back(control::log_keep_finding(f));
+    }
     // Host protection (docs/configuration.md 18): whether the kernel's firewall limits the web
     // ports per address and a fail2ban jail reads the access logs, through the helper (nft and
     // fail2ban's socket are root's), never waited for; nothing for loopback-only listeners.
@@ -1643,6 +1652,7 @@ void Server::run() {
     if (provisioner_.available() && !gen_->cfg.exposed_credentials.empty()) log_tightened(gen_->cfg, tighten_credentials(gen_->cfg), "start");
     for (auto& w : workers_) w->gen = gen_;
     arm_trash_expiry();
+    arm_log_expiry();
     arm_certificate_watch();
 #ifdef AGENSIO_HAS_TLS
     // Automatic certificates: orders run on the manager's thread, the result comes back
@@ -2075,6 +2085,45 @@ void Server::arm_trash_expiry() {
                 error_log_.warn("trash: expiry failed: " + std::string(r.get("error")));
             }
             asio::post(workers_[0]->ctx, [this] { arm_trash_expiry(); });
+        }).detach();
+    });
+}
+
+// access_log_keep_days (docs/configuration.md 8b): every hour (AGENSIO_LOG_EXPIRE_SECONDS for the
+// tests), the rotated files of each such site's log that hold a line older than its days, deleted
+// through the root helper (root's directory; the sites and days from the configuration on disk), else
+// by this process where its account may; on a thread, since the files are read and inflated.
+void Server::arm_log_expiry() {
+    if (!log_expiry_timer_) log_expiry_timer_ = std::make_unique<asio::steady_timer>(workers_[0]->ctx);
+    log_expiry_timer_->expires_after(log_expiry_interval_);
+    log_expiry_timer_->async_wait([this](const asio::error_code& ec) {
+        if (ec || stopping_) return;
+        std::vector<log_retention::Keep> keeps = log_retention::keeps_of(running());
+        if (keeps.empty()) {
+            {
+                std::lock_guard<std::mutex> lock(log_expiry_mutex_);
+                log_expiry_failed_ = json::Value();
+            }
+            arm_log_expiry();
+            return;
+        }
+        std::thread([this, keeps = std::move(keeps)] {
+            const json::Value r = provisioner_.available() ? provisioner_.try_request(json::Value::object().set("op", "log_expire"))
+                                                           : log_retention::expire(keeps, std::time(nullptr));
+            if (r["ok"].boolean()) {
+                std::string names;
+                for (const auto& n : r["removed"].items()) names += (names.empty() ? "" : ", ") + std::string(n.str());
+                if (!names.empty())
+                    error_log_.info("access_log_keep_days: " + std::to_string(r["removed"].items().size()) + " rotated access log file(s) past their site's days removed: " + names);
+                for (const auto& f : r["failed"].items()) error_log_.warn("access_log_keep_days: " + std::string(f.get("error")));
+                std::lock_guard<std::mutex> lock(log_expiry_mutex_);
+                log_expiry_failed_ = r["failed"];
+            } else if (!r["busy"].boolean()) {  // busy: a task holds the helper, the next run tries again
+                error_log_.warn("access_log_keep_days: the rotated access logs were not checked: " + std::string(r.get("error")));
+                std::lock_guard<std::mutex> lock(log_expiry_mutex_);
+                log_expiry_failed_ = json::Value::array().push(json::Value::object().set("site", "").set("log", "").set("error", std::string(r.get("error"))));
+            }
+            asio::post(workers_[0]->ctx, [this] { arm_log_expiry(); });
         }).detach();
     });
 }

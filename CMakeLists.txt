@@ -191,6 +191,7 @@ set(AGENSIO_CORE_SOURCES
   src/services/totp.cpp
   src/services/files.cpp
   src/services/history.cpp
+  src/services/log_retention.cpp
   src/services/approvers.cpp
   src/control/approvals.cpp
   src/control/handler.cpp

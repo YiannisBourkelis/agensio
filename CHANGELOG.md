@@ -2,6 +2,34 @@
 
 ## 0.1.0-alpha.128
 
+- **Fewer records of a site: `access_log_exclude_paths` and `access_log_keep_days`** (grabloop.app's
+  request, the owner's design; `docs/configuration.md` 8b). A site whose privacy notice promises that
+  some requests leave no record, or that its logs go after a week, says so in two site keys:
+  - `access_log_exclude_paths = ["/api/notices/", "/healthz"]`: a request under one of the paths
+    writes no access-log line, on every method and protocol, and the error log's lines about it
+    (a 413, an unknown method, an HTTP/2 or HTTP/3 stream reset, a tunnel's end) say `-` for the
+    client. Prefixes from `/` covering whole segments, in the capitalisation written, matched on the
+    cleaned path routing judges, so `/api/notices/../../wp-login.php` is still logged. Refused: `/`,
+    and every path the fail2ban jails count: a login path (the preset's and the site's), a path a
+    `[[site.auth]]` password protects or a `[[site.access]]` rule restricts. Asked when the line is
+    written: a site without the key pays the test of an empty list, a site whose access log is off
+    nothing at all (A/B against alpha.127 within noise with the log off and on,
+    `ab-20261105-030959.md`, `ab-20261105-031305.md`; a site with two paths 2.20 against 2.16 µs per
+    logged 1 KB request, `log-exclude-cost-20261105-030846.md`).
+  - `access_log_keep_days = 7` (1 to 14): every hour agensio deletes logrotate's numbered rotations
+    of the site's own log that hold a line older than that, judged by the lines at a file's start,
+    through the root helper's new `log_expire` (the sites and days from the configuration on disk,
+    nothing from the request; security row 58), since a log's directory may be root's. The site needs its own log
+    in `sites/` of agensio's log directory; a shared file is refused. logrotate cannot take the days
+    per site: a second entry for a file its glob names is an error there.
+
+  On a managed site both are fields of `site_create` and `site_update` (`ctl --access-log-exclude
+  PATH`, `--no-access-log-exclude`, `--access-log-keep-days N|none`); adding or widening a path, or
+  setting or lowering the days, waits for a person's approval (`docs/approvals.md`), removing or
+  raising does not. `site_show` lists both; health says `access_log_excluded` (info) for each site
+  with paths and `access_log_keep_failed` when a rotated file could not be deleted. Lines written
+  before a path was excluded stay until their file goes; agensio edits no log file (the request's
+  third item, left out by the owner).
 - **Fix: an unknown method's error-log line named no client** on a server without `trusted_proxies`,
   most hosts (`unrecognised method 'FROB' for /x from  (405)`): HTTP/1 fills the connection's
   address when something asks for it, and before routing nothing had. The line names the peer now,

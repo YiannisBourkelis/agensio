@@ -1656,6 +1656,73 @@ files are compressed in a build without zlib. Health's `recent_errors` reads the
 "last 24 hours" are 24 hours. Rotated files named by date (`dateext` set by hand on agensio's logs)
 are not read.
 
+## 8b. Fewer records: `access_log_exclude_paths`, `access_log_keep_days`
+
+Two site keys for a site that promises its visitors fewer records than a web server keeps, as a
+privacy notice may ("the server keeps no record of these requests"; under the GDPR an address in a
+log is personal data, kept only as long as needed). Both since 0.1.0-alpha.128.
+
+```toml
+[[site]]
+server_name = ["grabloop.app", "www.grabloop.app"]
+# ...
+access_log = "/var/log/agensio/sites/grabloop.app.log"
+access_log_exclude_paths = [
+    "/api/notices/",   # every copy of the app fetches it daily; the privacy notice promises no record
+    "/healthz",        # the load balancer's probe every 10 s
+]
+access_log_keep_days = 7   # rotated lines older than 7 days are deleted (logrotate keeps 14)
+```
+
+**`access_log_exclude_paths`.** A request under one of the paths writes no line in the site's access
+log, on every method and whatever its status, and the error log's lines about it (a body over the
+limit, an unknown method, an HTTP/2 or HTTP/3 stream reset, a tunnel's end) are still written but with
+`-` where the client's address would be, so a problem there is still seen. Lines written before the
+path is known keep the address: a TLS handshake that failed, a request line that did not parse, the
+connection's own HTTP/2 lines. A path is a prefix from `/` covering whole segments: `/healthz` covers
+`/healthz` and `/healthz/live`, never `/healthzx`; `/api/notices/` everything below it. It is matched
+in the capitalisation written, on the cleaned path, the one routing judges, never the raw request:
+`/api/notices/../../wp-login.php` is a request for `/wp-login.php` and is logged. At most 16; plain
+characters, no query.
+
+It is refused for `/` (`access_log = "off"` is that) and for every path the fail2ban jails count
+(section 18): a login path (the preset's and the site's `login_paths`), a path a `[[site.auth]]`
+password protects (the `agensio-auth` jail counts failed passwords by address) and one a
+`[[site.access]]` rule restricts, report mode included (the `-denied` jail counts its 403s, the report
+lines name the clients); a path `["any"]` reopens below a restricted one may be excluded. The
+`-scan` and `-post` jails go on counting everything else of the site. Health lists the paths
+(`access_log_excluded`, info) and `site_show` shows them; `logs_query` answers nothing for them. The
+application behind the site keeps whatever it logs itself (Laravel's `storage/logs`, an analytics
+tag): the key covers agensio's logs alone. The php-fpm pools agensio writes keep no access log.
+
+The check costs nothing on the request path of a site without the key, and nothing at all on a site
+whose access log is off: it is asked when the line is written, after the test of the log itself.
+
+**`access_log_keep_days`.** No rotated file of the site's access log that holds a line older than
+this many days is kept: every hour agensio deletes logrotate's numbered rotations of the file
+(`NAME.1`, `NAME.2.gz` and on, as `packaging/agensio.logrotate` names them) whose oldest line is
+older, judged by the lines at the file's start (inflated for a `.gz`), or, for one whose start does
+not read, by its time of change less a day. A ceiling, from 1 to 14: the shipped logrotate keeps 14
+days, which this cannot lengthen. The current file is logrotate's, rotated daily, so it holds up to a
+day and some hours. logrotate takes one `rotate` per file and refuses a second entry for a file its
+glob names already, so the days cannot be its setting per site.
+
+The site needs its own access log in `sites/` of agensio's log directory (the directory of `[log]
+access`, `/var/log/agensio` as packaged), named `*.log`, as `site_create` gives a site with its own
+account: a site writing `[log] access`, a file outside that directory or one another site writes too
+is refused (the other site would lose its lines). The log's directory may be root's (the start makes
+it, still root, when a site names a log there before the first start), so a server started as root
+deletes through its root helper, which reads the sites and days from the configuration on disk
+(`docs/security-control-plane.md` row 58); otherwise the server deletes what its account may. A file that could not be deleted is health's
+`access_log_keep_failed`. Rotated files named by date (`dateext` set by hand) are not touched.
+
+On a managed site both are fields of `site_update` (and `site_create`): `agensio ctl site-update NAME
+--access-log-exclude /api/notices/ --access-log-keep-days 7`. A change that adds or widens an
+excluded path, or sets or lowers the days, waits for a person's approval (`docs/approvals.md`):
+both leave less of a record, and deleted lines do not come back. Removing a path or raising the days
+does not wait. Lines written before a path was excluded stay until their rotated files go; agensio
+does not edit log files.
+
 ## 9. php-fpm in a container
 
 When php-fpm runs elsewhere (Docker, ddev), publish its port and tell agensio the docroot

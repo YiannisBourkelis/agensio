@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 
+#include "core/log_exclude.hpp"
 #include "services/dotenv.hpp"
 #include "services/tasks.hpp"
 
@@ -534,6 +535,24 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
             const std::string up(body["upstream"].str());
             if (update && (!cur || up != cur->upstream)) out.push_back("sends the site's visitors to another application: " + up + (upstream_off_host(up) ? ", off this host" : ""));
             else if (create && upstream_off_host(up)) out.push_back("sends the site's visitors to an application off this host: " + up);
+        }
+        // Records kept out of the logs, or deleted sooner (docs/configuration.md 8b): the paths a change
+        // adds or widens, the days it sets or lowers; removing a path or raising the days is free.
+        if (body["access_log_exclude_paths"].is_array()) {
+            const std::vector<std::string> was = cur ? cur->access_log_exclude_paths : std::vector<std::string>{};
+            for (const auto& e : body["access_log_exclude_paths"].items()) {
+                if (!e.is_string()) continue;
+                const std::string p(e.str());
+                if (std::any_of(was.begin(), was.end(), [&](const std::string& w) { return log_exclude::covers(w, p); })) continue;  // within one it had
+                out.push_back("keeps requests under " + p + " out of the site's access log, and their client address out of the error log: what happens there leaves no record");
+            }
+        }
+        if (body["access_log_keep_days"].type() == json::Value::Type::number && body["access_log_keep_days"].num() >= 1) {
+            const int days = static_cast<int>(body["access_log_keep_days"].num());
+            const int was = cur ? cur->access_log_keep_days : 0;
+            if (create || was == 0 || days < was)
+                out.push_back("deletes the site's rotated access-log lines older than " + std::to_string(days) + (days == 1 ? " day" : " days") + " (" +
+                              (was ? std::to_string(was) + " until now" : std::string("logrotate's 14 until now")) + "): nothing brings them back");
         }
         for (const auto& rule : body["redirects"].items()) {
             const std::string to(rule.get("to"));

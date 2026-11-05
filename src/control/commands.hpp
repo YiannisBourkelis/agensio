@@ -217,6 +217,9 @@ std::string h3_bind_words(const H3BindProblem& p);
 // `runs` of them since the start), is under a day old.
 std::optional<Finding> schedule_background_finding(const std::string& site, const std::string& command, const std::string& at, std::size_t runs,
                                                    std::time_t when, std::time_t now);
+// access_log_keep_days's run that could not delete a rotated file (Server::arm_log_expiry; one entry of
+// log_retention::expire's failed, {site, log, days, error}): access_log_keep_failed, a warning.
+Finding log_keep_finding(const json::Value& failed);
 // The refusals at the workers' connection ceiling since start (Server::refusal_report),
 // merged over the workers, for one health finding whose fix follows from their shape
 // (2026-10-02: an agent must tell an attack from a low ceiling from stuck clients).

@@ -93,6 +93,8 @@ void usage(std::ostream& out = std::cout) {
                  "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
                  "                      site-update NAME --login-path /login ... (where the fail2ban jail counts attempts)\n"
                  "                      site-update NAME --public-archive /data/world.sql.gz ... (a dump served on purpose)\n"
+                 "                      site-update NAME --access-log-exclude /api/notices/ ... [--access-log-keep-days N]\n"
+                 "                           (paths kept out of the logs, days the rotated lines stay; --no-access-log-exclude)\n"
                  "                      site-update NAME --redirect \"/blog /news 301\" --gone /old ... (path redirects)\n"
                  "                      site-update NAME --response-header \"/ set X-Frame-Options=SAMEORIGIN\" ...\n"
                  "                           [--response-header-remove \"/ X-Powered-By\"] [--response-headers-file F.json]\n"
@@ -632,6 +634,14 @@ int main(int argc, char** argv) {
                              "                    dump the site serves on purpose, as served from its root (a directory ending in /\n"
                              "                    for all below it); health's archives_in_root accepts it; given together they\n"
                              "                    replace the site's list; --no-public-archives clears\n"
+                             "        --access-log-exclude PATH (site-create and site-update, repeatable): requests under the\n"
+                             "                    path write no access-log line and no client address in the error log, on every\n"
+                             "                    method (never a login path, nor one a password or an address rule covers); given\n"
+                             "                    together they replace the site's list; --no-access-log-exclude clears; adding or\n"
+                             "                    widening one waits for approval\n"
+                             "        --access-log-keep-days N (site-create and site-update): the site's rotated access-log\n"
+                             "                    lines older than N days (1 to 14) are deleted, hourly; none for logrotate's own\n"
+                             "                    (14 days as shipped); setting or lowering it waits for approval\n"
                              "        --mime-type ENDING=TYPE or PATH=TYPE (site-create and site-update, repeatable): the\n"
                              "                    Content-Type of the files the site serves with that ending (sh, js.gzip) or at that\n"
                              "                    path (/.well-known/apple-app-site-association), over [mime_types] and the built-in\n"
@@ -956,6 +966,18 @@ int main(int argc, char** argv) {
                     list.push(v);
                     body.set("public_archives", list);
                 } else if (b == "--no-public-archives") body.set("public_archives", agensio::json::Value::array());
+                else if (b == "--access-log-exclude") {  // kept out of the logs; given together they replace the list
+                    std::string v; value(v);
+                    agensio::json::Value list = body["access_log_exclude_paths"].is_array() ? body["access_log_exclude_paths"] : agensio::json::Value::array();
+                    list.push(v);
+                    body.set("access_log_exclude_paths", list);
+                } else if (b == "--no-access-log-exclude") body.set("access_log_exclude_paths", agensio::json::Value::array());
+                else if (b == "--access-log-keep-days") {  // N, or none for logrotate's; anything else the server refuses
+                    std::string v; value(v);
+                    if (v == "none") body.set("access_log_keep_days", agensio::json::Value(nullptr));
+                    else if (!v.empty() && v.size() <= 3 && v.find_first_not_of("0123456789") == std::string::npos) body.set("access_log_keep_days", std::atoi(v.c_str()));
+                    else body.set("access_log_keep_days", v);
+                }
                 else if (b == "--mime-type") {  // KEY=TYPE[; encoding=gzip]; given together they replace the table
                     std::string v; value(v);
                     const std::size_t eq = v.find('=');

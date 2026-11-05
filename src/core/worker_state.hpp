@@ -42,6 +42,7 @@ struct WorkerState {
     std::string h2_date_insert;    // HTTP/2: the date field as an inserting literal, refreshed per second
     std::time_t h2_date_time = 0;
     std::string path;     // normalised request path
+    std::string log_path; // the cleaned path a log line is judged by (core/log_exclude.hpp): `path` is the request routed last
     bool encoded_separator = false;  // the target spelled a '/' or '\\' as a percent escape (%2F, %5C): filesystem handlers answer 404
     std::string fs_path;  // filesystem path being served
     const void* site = nullptr;  // the SiteConfig chosen for the current request (for the access log)

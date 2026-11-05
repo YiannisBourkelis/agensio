@@ -1030,6 +1030,74 @@ with the package's main file. The format stays in the main file, root's.
 [Hosting: one user per site](../configuration.md#11-hosting-one-user-per-site),
 [fail2ban](../fail2ban.md).
 
+## Requests kept out of the log, and fewer days kept
+
+**When:** the site promises its visitors that some requests leave no record (a privacy notice: "the
+server keeps no record of these requests"), or that its logs are gone after a week; or a monitor's
+probe fills the log with lines nobody reads.
+
+```toml
+# /etc/agensio/agensio.toml: the main file, root's (once per host)
+include = ["sites.d/*.toml"]
+
+[server]
+acme = { email = "admin@example.com" }
+
+[log]
+access = "/var/log/agensio/access.log"   # its directory's sites/ holds the sites' own logs
+```
+
+```toml
+# /etc/agensio/sites.d/grabloop.app.toml
+[[site]]
+server_name = ["grabloop.app", "www.grabloop.app"]
+root = "/var/www/grabloop.app/web"
+tls = "auto"
+access_log = "/var/log/agensio/sites/grabloop.app.log"
+access_log_exclude_paths = [
+    "/api/notices/",   # every copy of the app fetches it daily; the privacy notice promises no record
+    "/healthz",        # the load balancer's probe every 10 s
+]
+access_log_keep_days = 7   # rotated lines older than 7 days are deleted (logrotate keeps 14)
+```
+
+**What it does.** A request under `/api/notices/` or `/healthz` (and `/healthz/live`, never
+`/healthzx`) writes no access-log line, on every method, and the error log's lines about it say `-`
+where the client's address would be. The paths are matched on the cleaned path, the one routing
+judges, so `/api/notices/../../wp-login.php` is logged as the login attempt it is. A login path, a
+path behind a `[[site.auth]]` password and one an `[[site.access]]` rule restricts cannot be
+excluded: the fail2ban jails count those, and the load says which rule is in the way. Every hour
+agensio deletes the site's rotated files that hold a line older than 7 days (`grabloop.app.log.7.gz`
+and older); the current file is logrotate's, rotated daily. The days need the site's own log in
+`sites/` beside `[log] access`, as a managed site with its own account has. The application keeps
+whatever it logs itself; agensio's keys cover agensio's logs. Lines written before a path was
+excluded stay until their file goes.
+
+**Check it.**
+
+```sh
+curl -s -o /dev/null https://grabloop.app/api/notices/1.json
+sleep 1; grep -c '/api/notices/' /var/log/agensio/sites/grabloop.app.log   # 0: no line for it
+agensio ctl path-check grabloop.app /api/notices/1.json                   # what answers it: unchanged
+agensio ctl health                                                         # access_log_excluded names the paths
+ls /var/log/agensio/sites/grabloop.app.log*                                # within the hour: nothing past .6.gz
+```
+
+**On a managed site.** Both are fields of `site-update` (and `site-create`); adding or widening a
+path, or setting or lowering the days, waits for a person's approval, since less is kept and deleted
+lines do not come back:
+
+```sh
+agensio ctl site-update grabloop.app --access-log-exclude /api/notices/ --access-log-exclude /healthz --access-log-keep-days 7 --yes --reason "privacy notice"
+agensio ctl site-update grabloop.app --no-access-log-exclude --access-log-keep-days none --yes --reason "logs as before"   # does not wait
+```
+
+**MCP:** `site_update` with `access_log_exclude_paths` (the list sent whole) and
+`access_log_keep_days`, then `approvals_ask`; `site_show` lists both.
+
+**Reference:** [Fewer records](../configuration.md#8b-fewer-records-access_log_exclude_paths-access_log_keep_days),
+[Logging](../configuration.md#8-logging), [Approvals](../approvals.md).
+
 ## Larger uploads for one site
 
 **When:** one site takes large uploads (a media library, attachments) and the rest of the host

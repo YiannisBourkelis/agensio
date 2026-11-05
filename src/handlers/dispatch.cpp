@@ -7,6 +7,7 @@
 #include "response.hpp"
 
 #include "core/access.hpp"
+#include "core/log_exclude.hpp"
 #include "core/redirect.hpp"
 #include "core/refuse.hpp"
 #include "core/site_notices.hpp"
@@ -744,8 +745,11 @@ bool Dispatcher::check_method(Stream& s, const LocationConfig& loc, WorkerState&
             else { char h[5]; std::snprintf(h, sizeof h, "\\x%02x", c); line += h; }
         }
         // The peer as the connection knows it: HTTP/1 fills remote_address on need, and on a server
-        // without trusted_proxies nothing had asked yet, so the line said "from  (405)".
-        const std::string from = !s.conn.remote_address.empty() ? std::string(s.conn.remote_address)
+        // without trusted_proxies nothing had asked yet, so the line said "from  (405)". No client
+        // address for a path the site keeps out of its logs (access_log_exclude_paths).
+        const bool unlogged = log_exclude::excluded(static_cast<const SiteConfig*>(ws.site), req.target, ws.log_path);
+        const std::string from = unlogged ? std::string("-")
+                                 : !s.conn.remote_address.empty() ? std::string(s.conn.remote_address)
                                  : s.conn.peer ? s.conn.peer->peer_ip().to_string()
                                                : std::string("-");
         log_->warn("unrecognised method '" + line + "' for " + std::string(req.target) + " from " + from + " (405)");

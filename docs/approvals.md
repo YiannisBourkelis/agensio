@@ -24,9 +24,11 @@ after it was queued.
 | the site's environment: `site_env_set` (the preview names the variables, never a value) and `site_env` with `reveal` (the values are handed out once, by id) | 0.1.0-alpha.120 |
 | a `site_update` that makes other files run (`app`, `root`, `served_dir`, `rules.entry_points`, `rules.front_controller`), sends visitors elsewhere (`upstream`, a redirect to a host that is none of the site's names) or removes or widens a password or address rule (a rule gone, an allow list or `skip_for` grown, `open`, report mode, the password over plain HTTP); the preview is the managed file's diff. A `site_create` whose root already holds PHP files, whose upstream is off this host, or with a redirect to another host | 0.1.0-alpha.120 |
 | `site_auth_user_set`: who may log in; a generated password is handed out once, by id | 0.1.0-alpha.120 |
+| fewer records of a site (`site_update` or `site_create`): an `access_log_exclude_paths` entry added or widened (requests there leave no access-log line and no client address in the error log) and `access_log_keep_days` set or lowered (the rotated lines past it are deleted); removing a path or raising the days does not wait (docs/configuration.md 8b) | 0.1.0-alpha.128 |
 | `trash_delete`, `trash_expire`: nothing brings the files back | 0.1.0-alpha.120 |
 
-That is the whole list of `docs/design-site-operations.md` 27.2. Everything else is made at once with
+That is the whole list of `docs/design-site-operations.md` 27.2, and the fewer records the owner added
+to it on 2026-11-05. Everything else is made at once with
 the caller's `confirm`: HSTS, response headers, compression, `canonical`, redirects within the site,
 `login_paths`, MIME types, limits, a protection added or narrowed, disable and enable, reload,
 `cert-renew`, `site_delete` (to the trash), the other site tasks, and a new site into an empty

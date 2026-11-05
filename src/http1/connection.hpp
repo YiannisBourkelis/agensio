@@ -38,6 +38,7 @@
 #include "http1/writer.hpp"
 #include "http2/connection.hpp"
 #include "core/forwarded.hpp"
+#include "core/log_exclude.hpp"
 #include "server.hpp"
 #include "services/log.hpp"
 
@@ -176,6 +177,9 @@ public:
         const bool keep_alive = stream_.response.keep_alive;
         log_request();
         if (peer_) {
+            // Judged while the upgrade's request is still there: the tunnel's error-log line names
+            // no client for a path the site keeps out of its logs.
+            tunnel_unlogged_ = log_exclude::excluded(site_, stream_.request.target, worker_.state.log_path);
             const std::uint32_t idle_s = stream_.response.tunnel_timeout_s;
             const std::uint32_t send_ms = stream_.response.tunnel_send_ms;
             stream_.reset();
@@ -346,6 +350,9 @@ private:
         // an address probing by IP is in the log the jails read (alpha.70; before, in no log).
         const int sink = site ? site->access_log_sink : listener_->access_sink;
         if (sink < 0) return;
+        // A path the site keeps out of its log (access_log_exclude_paths): a site without one pays the
+        // test of an empty list, a site that logs nothing never gets here.
+        if (log_exclude::excluded(site, stream_.request.target, worker_.state.log_path)) return;
         ensure_remote();
         const Request& req = stream_.request;
         AccessRecord rec;
@@ -752,7 +759,7 @@ private:
             if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info)) {
                 fill_connection_info();
                 const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(tunnel_send_limit_).count();
-                log->info("tunnel of " + (site_ && !site_->server_names.empty() ? site_->server_names.front() : std::string("-")) + " for " + remote_ +
+                log->info("tunnel of " + (site_ && !site_->server_names.empty() ? site_->server_names.front() : std::string("-")) + " for " + (tunnel_unlogged_ ? std::string("-") : remote_) +
                           " closed: a write of " + std::to_string(to_client ? tunnel_to_client_bytes_ : tunnel_to_peer_bytes_) + " bytes to the " +
                           (to_client ? "client" : "origin") + " did not finish within " +
                           (ms % 1000 == 0 ? std::to_string(ms / 1000) + " s" : std::to_string(ms) + " ms") + " (proxy.send_timeout)");
@@ -953,7 +960,9 @@ private:
     void log_body_refused(const SiteConfig* site, std::uint64_t bytes, bool at_least) {
         if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn)) {
             fill_connection_info();
-            log->warn(body_refused_text(site, remote_, bytes, body_limit_, at_least));
+            // No client address for a path the site keeps out of its logs (access_log_exclude_paths).
+            const bool unlogged = log_exclude::excluded(site, stream_.request.target, worker_.state.log_path);
+            log->warn(body_refused_text(site, unlogged ? std::string_view("-") : std::string_view(remote_), bytes, body_limit_, at_least));
         }
     }
     // A chunked body that passed the limit while the handler read it (a declared one is
@@ -1157,6 +1166,7 @@ private:
     std::chrono::steady_clock::time_point tunnel_to_client_since_{}, tunnel_to_peer_since_{};
     std::size_t tunnel_to_client_bytes_ = 0, tunnel_to_peer_bytes_ = 0;
     bool tunnel_timer_ = false;  // the timer waits for one of the tunnel's limits
+    bool tunnel_unlogged_ = false;  // the upgrade's path is one the site keeps out of its logs
     Stream stream_;
     Http1Writer<Socket, Http1Connection> writer_;  // last: it references socket_ and *this
 };

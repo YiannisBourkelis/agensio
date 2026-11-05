@@ -44,6 +44,7 @@
 #include "services/files.hpp"
 #include "services/history.hpp"
 #include "services/install.hpp"
+#include "services/log_retention.hpp"
 #include "services/pools.hpp"
 #include "services/dotenv.hpp"
 #include "services/tasks.hpp"
@@ -56,10 +57,7 @@ namespace provision {
 
 std::string sites_root(const Config& cfg) { return cfg.control.sites_root.empty() ? std::string("/var/www") : cfg.control.sites_root; }
 
-std::string logs_root(const Config& cfg) {
-    if (cfg.log.access.empty() || cfg.log.access == "off") return "/var/log/agensio";
-    return fs::path(cfg.log.access).parent_path().string();
-}
+std::string logs_root(const Config& cfg) { return log_directory(cfg); }
 
 std::string uploads_dir(const Config& cfg) { return cfg.state_dir + "/uploads"; }
 std::string trash_dir(const Config& cfg) { return sites_root(cfg) + "/.trash"; }
@@ -269,8 +267,8 @@ std::string validate(const json::Value& req, const Config& cfg) {
         if (code.size() != 6 || code.find_first_not_of("0123456789") != std::string::npos) return "approval_check: code is six digits";
         return "";
     }
-    if (op == "ping" || op == "env_check" || op == "app_check" || op == "trash_list" ||
-        op == "trash_expire" || op == "host_protection" || op == "php_runtimes" || op == "approvers_list")
+    if (op == "ping" || op == "env_check" || op == "app_check" || op == "trash_list" || op == "trash_expire" || op == "log_expire" ||
+        op == "host_protection" || op == "php_runtimes" || op == "approvers_list")
         return "";
     return "unknown operation '" + op + "'";
 }
@@ -2247,6 +2245,16 @@ void close_all_but(int keep) {
                     reply = trash_delete(req, cfg);
                 } else if (op == "trash_expire") {
                     reply = trash_expire(cfg);
+                } else if (op == "log_expire") {
+                    // access_log_keep_days (docs/configuration.md 8b, security row 58): the sites, their
+                    // logs and days from the configuration on disk, nothing from the request; only the
+                    // numbered rotations of logs below the log directory's sites/ (log_retention).
+                    try {
+                        const Config fresh = load_config(cfg.config_path);
+                        reply = log_retention::expire(log_retention::keeps_of(fresh), std::time(nullptr));
+                    } catch (const std::exception& e) {
+                        reply = json::Value::object().set("ok", false).set("error", e.what());
+                    }
                 } else if (op == "env_check") {
                     // Health's read-only pass over the sites' environment files (appenv::inspect),
                     // the sites from the configuration on disk; no value leaves the helper.

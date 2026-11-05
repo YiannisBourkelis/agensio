@@ -460,6 +460,13 @@ struct SiteConfig {
     MimeTypes mime_types;
     std::string access_log;    // absolute path, or "" for no access log (site `access_log`, default [log] access)
     int access_log_sink = -1;  // set by the Server: index into its log registry
+    // access_log_exclude_paths (0.1.0-alpha.128, core/log_exclude.hpp): prefixes as written, "/"-rooted,
+    // at most 16; a request under one writes no access-log line and no client address in the error log.
+    std::vector<std::string> access_log_exclude;
+    // access_log_keep_days (0.1.0-alpha.128, services/log_retention.*): 1 to 14, the rotated files of the
+    // site's own access_log (below <log directory>/sites/) that hold a line older than this are deleted
+    // hourly; 0, logrotate alone decides (14 days as shipped).
+    int access_log_keep_days = 0;
     // [[site.access]], longest path first (an exact rule before a prefix of the same path);
     // empty, a request pays one test. `access_first` has a bit per byte that follows the
     // leading '/' of a rule's path (bit 0 for "/" itself, every bit for a rule on "/"), so a
@@ -963,6 +970,16 @@ std::vector<AdminPath> preset_admin_paths(const std::string& app);
 std::string nearest_name(std::string_view key, const std::vector<std::string_view>& known);
 // A `login_paths` entry: "/"-rooted, plain characters, no "..", no "//", at most 255; "" or why not.
 std::string check_login_path(const std::string& path);
+// An `access_log_exclude_paths` entry: a login path's alphabet without a query, not "/" alone; "" or why not.
+std::string check_log_exclude_path(const std::string& path);
+// What keeps the site's exclusions out of the paths the fail2ban jails count (core/log_exclude.hpp):
+// a login path (the preset's and the site's), a path a password rule protects or an address rule
+// restricts (report mode included); "" when none, else the refusal. Called by the loader once the
+// site's rules are final, by the control plane's checks too.
+std::string check_log_exclusions(const SiteConfig& site);
+// agensio's log directory: the [log] access file's, else /var/log/agensio (what the shipped logrotate
+// configuration covers). access_log_keep_days needs the site's access_log below its sites/.
+std::string log_directory(const Config& cfg);
 // An `public_archives` entry: a path as served from the site's root ("/downloads/world.sql.gz") or
 // a directory ending in "/", any character but a control one or a wildcard ('*', '?', '['), no empty,
 // "." or ".." segment, not "/" alone, at most 1024 bytes; "" or why not.

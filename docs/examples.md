@@ -63,6 +63,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [Fields by kind of file](examples/basics.md#fields-by-kind-of-file): `endings` on a rule, the files agensio serves by their ending (an SVG that runs no script, fonts for another origin), never a page PHP makes.
 - [A single-page application](examples/basics.md#a-single-page-application): `try_files` to the shell, with missing assets still answered 404.
 - [An access log per site, and JSON logs](examples/basics.md#an-access-log-per-site-and-json-logs): `access_log`, `[log] format`, log rotation, and why JSON costs you fail2ban.
+- [Requests kept out of the log, and fewer days kept](examples/basics.md#requests-kept-out-of-the-log-and-fewer-days-kept): `access_log_exclude_paths` and `access_log_keep_days`, for a privacy notice's promise.
 - [Larger uploads for one site](examples/basics.md#larger-uploads-for-one-site): a site's own `max_body_size`, the 413 and its error-log line, and the PHP pool's upload limits.
 - [Pre-compressed files for clients that accept them](examples/basics.md#pre-compressed-files-for-clients-that-accept-them): `.br` and `.gz` copies beside a file, and `[cache] precompressed`.
 - [Content types the built-in table gets wrong](examples/basics.md#content-types-the-built-in-table-gets-wrong): `[mime_types]` and a site's `mime_types`, by ending or exact path, with a coding for files stored compressed.

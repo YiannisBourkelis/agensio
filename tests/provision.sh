@@ -34,6 +34,21 @@ fpm_start() {  # CONF PIDFILE: a master, started and listening (its notes in CON
 fpm_restart() { local p; p=$(cat "$2" 2>/dev/null); [ -n "$p" ] && kill "$p" 2>/dev/null; for _ in $(seq 1 50); do [ -n "$p" ] && kill -0 "$p" 2>/dev/null || break; sleep 0.1; done; rm -f "$2"; fpm_start "$1" "$2"; }
 fpm_start $T/fpm.conf $T/fpm.pid
 fpm_start $T/fpm99.conf $T/fpm99.pid
+# access_log_keep_days (docs/configuration.md 8b, security row 58): a site's log in a directory root made
+# (as the start does for a log configured before it; logrotate's sites/*/*.log), which the server's account
+# cannot write, so only the helper can delete there; the rotated files stay the server account's, as
+# logrotate keeps their owner. One rotation past the site's days, one within. sites/ itself is the
+# server's, as on a host whose first site log came from site-create.
+mkdir -p $T/logs/sites/keep.test; chown agensio:agensio $T/logs/sites
+for d in 5 1; do
+  printf 'keep.test:18199 203.0.113.7 - - [%s] "GET / HTTP/1.1" 200 5 "-" "planted"\n' \
+    "$(python3 -c "import time; print(time.strftime('%d/%b/%Y:%H:%M:%S %z', time.localtime(time.time() - $d * 86400)))")" > $T/logs/sites/keep.test/access.log.$((d == 5 ? 2 : 1))
+done
+# The current file too, the server's as logrotate's create and a hand-over leave it: one the start made
+# as root would refuse every later reload (a site without a user gets no hand-over; reported 2026-11-05).
+: > $T/logs/sites/keep.test/access.log
+chown agensio:agensio $T/logs/sites/keep.test/access.log*; chmod 640 $T/logs/sites/keep.test/access.log*
+printf '[[site]]\nserver_name = ["keep.test"]\nlisten = ["127.0.0.1:18199"]\nroot = "%s/www"\naccess_log = "%s/logs/sites/keep.test/access.log"\naccess_log_keep_days = 3\n' "$T" "$T" > $T/sites.d/keep.test.toml
 cat > $T/agensio.toml <<CFG
 include = ["sites.d/*.toml"]
 [server]
@@ -65,10 +80,13 @@ server_name = ["*"]
 listen = ["127.0.0.1:18197"]
 root = "$T/www"
 CFG
-"$BIN" -c $T/agensio.toml > $T/server.out 2>&1 & for _ in $(seq 1 50); do [ -S $T/run/control.sock ] && break; sleep 0.1; done; sleep 0.2
+AGENSIO_LOG_EXPIRE_SECONDS=3 "$BIN" -c $T/agensio.toml > $T/server.out 2>&1 & for _ in $(seq 1 50); do [ -S $T/run/control.sock ] && break; sleep 0.1; done; sleep 0.2
 source "$(dirname "$0")/approve-lib.sh"; gated_setup "$BIN" $T/agensio.toml $T/run/control.sock   # a gated command is approved with a fresh approver's code
 check "the helper started before the privilege drop, the server runs as agensio" "yes agensio" "$(grep -q 'provisioning helper started' $T/logs/error.log && echo yes) $(ps -o user= -p $(cat $T/agensio.pid) | tr -d ' ')"
 HP=$(pgrep -P $(cat $T/agensio.pid) | head -1)
+sleep 3.5  # the first log expiry (AGENSIO_LOG_EXPIRE_SECONDS=3)
+check "access_log_keep_days: the root helper deletes the rotated file past the site's days from a root directory below sites/, which the server's account cannot write; the newer one stays" "gone kept root 755 1" \
+  "$([ -e $T/logs/sites/keep.test/access.log.2 ] && echo there || echo gone) $(grep -q planted $T/logs/sites/keep.test/access.log.1 && echo kept) $(stat -c '%U %a' $T/logs/sites/keep.test) $(grep -c 'access_log_keep_days: 1 rotated access log file(s) past their site.s days removed: .*/keep.test/access.log.2$' $T/logs/error.log)"
 check "the helper is a root child of the server holding one socket and no listener" "root 1 devnull" "$(ps -o user= -p $HP | tr -d ' ') $(ls -l /proc/$HP/fd | grep -c 'socket:') $(readlink /proc/$HP/fd/0 | grep -q null && echo devnull)"
 
 # One call: account, layout, site, log, pool.

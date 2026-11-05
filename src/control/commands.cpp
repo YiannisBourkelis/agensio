@@ -597,6 +597,18 @@ std::optional<Finding> schedule_background_finding(const std::string& site, cons
                    "goes a day after the last run that started one; site_service_status " + site + " shows the runs"};
 }
 
+Finding log_keep_finding(const json::Value& failed) {
+    const std::string site(failed.get("site")), log(failed.get("log")), error(failed.get("error"));
+    if (log.empty())
+        return Finding{"warn", "access_log_keep_failed", site, "the sites' rotated access logs were not checked for access_log_keep_days: " + error,
+                       "the next hourly run tries again; this goes once one succeeds"};
+    return Finding{"warn", "access_log_keep_failed", site,
+                   "a rotated file of " + log + " could not be deleted (" + error + "), so it keeps lines older than the site's access_log_keep_days (" +
+                       std::to_string(static_cast<int>(failed["days"].num())) + ")",
+                   "agensio deletes them through its root helper, which runs when the server is started as root (the packaged service is): "
+                   "started otherwise, its account needs write access to the log's directory. The next hourly run tries again; this goes once one succeeds"};
+}
+
 std::string h3_bind_words(const H3BindProblem& p) {
     return p.error + (p.cause.empty() ? std::string() : " (" + p.cause + ")") + "; the listener serves HTTP/2 and HTTP/1 meanwhile and advertises no HTTP/3";
 }
@@ -1254,6 +1266,9 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
     // The archives and dumps served on purpose, so an agent changing the list sees what it replaces
     // (the alpha.97 report).
     if (!s.public_archives.empty()) v.set("public_archives", strings(s.public_archives));
+    // What the site keeps out of its logs and how long its rotated lines stay (docs/configuration.md 8b).
+    if (!s.access_log_exclude.empty()) v.set("access_log_exclude_paths", strings(s.access_log_exclude));
+    if (s.access_log_keep_days) v.set("access_log_keep_days", s.access_log_keep_days);
     if (!s.mime_types.empty()) v.set("mime_types", mime_types_json(s.mime_types));
     // The locations a managed site's rules render are hand-written to the loader; labelled
     // "rules" here, beside preset:<app> and root:<file>, so an agent can tell them apart
@@ -2281,6 +2296,18 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
             "every .php file under " + s.root + " runs, wherever it sits: one a user manages to upload into a directory of the site would run too",
             "name the scripts that run in rules.entry_points (site_update; at most 16, the front controller among them), or refuse PHP where the "
             "application stores uploads (rules.refuse, \"/uploads/**/*.php\"); an application that lets nobody write under its served directory needs neither");
+    }
+    // What a site keeps out of its logs (access_log_exclude_paths, docs/configuration.md 8b): said, so an
+    // agent reading the logs knows why requests there leave no line.
+    for (const auto& s : running.sites) {
+        if (s.access_log_exclude.empty() || s.server_names.empty()) continue;
+        std::string paths;
+        for (const auto& p : s.access_log_exclude) paths += (paths.empty() ? "" : ", ") + p;
+        add("info", "access_log_excluded", s.server_names.front(),
+            "requests under " + paths + " write no access-log line and no client address in the error log (access_log_exclude_paths): logs_query "
+            "answers nothing for them and the fail2ban jails do not see them",
+            std::string("nothing to do while the site means it (a privacy notice's promise); ") +
+                (s.managed ? "site_update's access_log_exclude_paths changes the list" : "the site file's access_log_exclude_paths line changes it, then agensio reload"));
     }
     // Backup archives and database dumps inside a served tree, each judged by what a request for it gets
     // today (2026-10-17, the alpha.97 discussion): served to anyone, a warning; kept by the preset's

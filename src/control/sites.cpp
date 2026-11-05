@@ -104,6 +104,8 @@ json::Value SiteSpec::to_json() const {
     if (!public_archives.empty()) v.set("public_archives", strings(public_archives));
     if (!mime_types.empty()) v.set("mime_types", mime_types_json(mime_types));
     if (!access_log.empty()) v.set("access_log", access_log);
+    if (!access_log_exclude_paths.empty()) v.set("access_log_exclude_paths", strings(access_log_exclude_paths));
+    if (access_log_keep_days) v.set("access_log_keep_days", access_log_keep_days);
     if (!listen_plain.empty()) v.set("listen_plain", listen_plain);
     if (!listen_tls.empty()) v.set("listen_tls", listen_tls);
     return v;
@@ -164,6 +166,8 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     if (v["mime_types"].type() == json::Value::Type::object) (void)load_mime_types(v["mime_types"], out.mime_types, true);  // the TOML below is judged by the load
     if (out.settings["children"].type() == json::Value::Type::number) out.php_children = static_cast<int>(out.settings["children"].num());
     out.access_log = v.get("access_log");
+    out.access_log_exclude_paths = string_list(v["access_log_exclude_paths"]);
+    out.access_log_keep_days = static_cast<int>(v["access_log_keep_days"].num());
     if (has_key(v, "listen_plain")) out.listen_plain = v.get("listen_plain");
     if (has_key(v, "listen_tls")) out.listen_tls = v.get("listen_tls");
     return true;
@@ -766,7 +770,7 @@ const std::vector<std::string_view>& site_request_fields() {
         "domain", "aliases", "canonical", "https", "redirect_http", "hsts", "encoded_slashes", "app", "root", "served_dir", "env_file", "upstream", "project", "entry", "user",
         "no_user", "group", "php_socket", "php_children", "php_version", "settings", "rules", "redirects", "response_headers",
         "response_headers_baseline", "response_headers_offer_declined", "response_compression", "login_paths", "public_archives", "mime_types", "trusted_proxies", "access_log",
-        "listen_plain", "listen_tls", "confirm", "reason", "dry_run", "cut_requests", "ignore_requirements"};
+        "access_log_exclude_paths", "access_log_keep_days", "listen_plain", "listen_tls", "confirm", "reason", "dry_run", "cut_requests", "ignore_requirements"};
     return fields;
 }
 
@@ -1244,6 +1248,41 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         }
     }
     if (has_key(body, "access_log")) spec.access_log = body.get("access_log");
+    // What the site keeps out of its logs (0.1.0-alpha.128, docs/configuration.md 8b): given whole, each
+    // a plain path from / (never / itself, no query), at most 16, [] or null clears them; the overlap
+    // with the paths the fail2ban jails count is the load's (check_log_exclusions), which knows the rules.
+    if (given(body, "access_log_exclude_paths") && body["access_log_exclude_paths"].is_null()) spec.access_log_exclude_paths.clear();
+    else if (has_key(body, "access_log_exclude_paths")) {
+        const json::Value& list = body["access_log_exclude_paths"];
+        if (!list.is_array() || list.items().size() > 16) {
+            error = "access_log_exclude_paths must be a list of at most 16 URL paths: [\"/api/notices/\"] ([] clears them)";
+            return needs;
+        }
+        std::vector<std::string> ex;
+        for (const auto& p : list.items()) {
+            if (!p.is_string()) {
+                error = "access_log_exclude_paths: each entry is a string path (\"/api/notices/\")";
+                return needs;
+            }
+            if (const std::string why = check_log_exclude_path(std::string(p.str())); !why.empty()) {
+                error = "access_log_exclude_paths: " + why;
+                return needs;
+            }
+            if (std::find(ex.begin(), ex.end(), std::string(p.str())) == ex.end()) ex.emplace_back(p.str());
+        }
+        spec.access_log_exclude_paths = ex;
+    }
+    // The days the rotated lines of the site's own log are kept: 1 to 14, null or 0 for logrotate's own.
+    if (given(body, "access_log_keep_days")) {
+        const json::Value& d = body["access_log_keep_days"];
+        if (d.is_null()) spec.access_log_keep_days = 0;
+        else if (d.type() != json::Value::Type::number || d.num() != static_cast<double>(static_cast<int>(d.num())) || d.num() < 0 || d.num() > 14) {
+            error = "access_log_keep_days must be a whole number of days from 1 to 14 (null or 0: logrotate's own, 14 as shipped)";
+            return needs;
+        } else {
+            spec.access_log_keep_days = static_cast<int>(d.num());
+        }
+    }
     // One address each, as the loader stores it, checked here so a dry run says what the real call
     // would and nothing that did not parse reaches a warning or listen_unbound's run_as_root (the
     // alpha.123 report: "nonsense" passed the dry run, and "[::]:443,203.0.113.5:443" was written into
@@ -1447,6 +1486,11 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (!spec.user.empty()) s += "user = " + toml_string(spec.user) + "\n";
         if (!spec.group.empty()) s += "group = " + toml_string(spec.group) + "\n";
         if (!spec.user.empty() && !spec.access_log.empty()) s += "access_log = " + toml_string(spec.access_log) + "\n";
+        if (!spec.access_log_exclude_paths.empty())
+            s += "access_log_exclude_paths = " + toml_list(spec.access_log_exclude_paths) + "   # no access-log line and no client address in the error log here\n";
+        if (spec.access_log_keep_days)
+            s += "access_log_keep_days = " + std::to_string(spec.access_log_keep_days) + "   # the site's rotated lines are deleted after " +
+                 std::to_string(spec.access_log_keep_days) + (spec.access_log_keep_days == 1 ? " day" : " days") + " (logrotate keeps 14)\n";
         if (!spec.login_paths.empty()) s += "login_paths = " + toml_list(spec.login_paths) + "   # fail2ban counts login attempts here (agensio ctl protection)\n";
         if (!spec.public_archives.empty())
             s += "public_archives = " + toml_list(spec.public_archives) + "   # served on purpose: health's archives_in_root accepts them\n";
