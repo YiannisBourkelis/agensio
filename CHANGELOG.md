@@ -2,6 +2,10 @@
 
 ## 0.1.0-alpha.128
 
+- **Fix: an unknown method's error-log line named no client** on a server without `trusted_proxies`,
+  most hosts (`unrecognised method 'FROB' for /x from  (405)`): HTTP/1 fills the connection's
+  address when something asks for it, and before routing nothing had. The line names the peer now,
+  as it did over HTTP/2 and HTTP/3 and behind trusted proxies.
 - **Health warns `site_schedule_background`** (the alpha.127 report, S3, the owner's decision): a
   scheduled run that started a command with `runInBackground()`, which agensio ends the moment
   `schedule:run` exits, was named only by `site_service_status`; the run was quiet and ok, so the

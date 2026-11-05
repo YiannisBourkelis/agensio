@@ -743,7 +743,12 @@ bool Dispatcher::check_method(Stream& s, const LocationConfig& loc, WorkerState&
             if (c >= 0x20 && c < 0x7f && c != '\\') line.push_back(static_cast<char>(c));
             else { char h[5]; std::snprintf(h, sizeof h, "\\x%02x", c); line += h; }
         }
-        log_->warn("unrecognised method '" + line + "' for " + std::string(req.target) + " from " + std::string(s.conn.remote_address) + " (405)");
+        // The peer as the connection knows it: HTTP/1 fills remote_address on need, and on a server
+        // without trusted_proxies nothing had asked yet, so the line said "from  (405)".
+        const std::string from = !s.conn.remote_address.empty() ? std::string(s.conn.remote_address)
+                                 : s.conn.peer ? s.conn.peer->peer_ip().to_string()
+                                               : std::string("-");
+        log_->warn("unrecognised method '" + line + "' for " + std::string(req.target) + " from " + from + " (405)");
     }
     static_.error(s, 405, req.keep_alive, loc.allow);
     return false;

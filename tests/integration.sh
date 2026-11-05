@@ -3362,7 +3362,7 @@ check "access log: an X-Forwarded-For entry with a port is the address without i
 # and an IPv6 client as itself; a mapped X-Forwarded-For entry is unmapped too.
 # A server of its own, because a listener on [::] is public and the main configuration's
 # protection checks hold it to loopback.
-mkdir -p bench/tmp/dual; rm -f bench/tmp/dual/access.log
+mkdir -p bench/tmp/dual; rm -f bench/tmp/dual/access.log bench/tmp/dual/error.log
 # It trusts no proxy, as most hosts do, so nothing asks for a client's address before the log
 # line; the TLS listener is for the aborts below.
 printf '[server]\nworkers = 1\n[log]\naccess = "%s/bench/tmp/dual/access.log"\nerror = "%s/bench/tmp/dual/error.log"\n[[site]]\nlisten = ["[::]:8101"]\nroot = "%s/bench/www"\n[[site]]\nlisten = ["127.0.0.1:18921"]\nroot = "%s/bench/www"\ntls = { cert = "%s/bench/certs/cert.pem", key = "%s/bench/certs/key.pem" }\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" > bench/tmp/dual/agensio.toml
@@ -3371,6 +3371,7 @@ for _ in $(seq 1 50); do nc -z 127.0.0.1 8101 2>/dev/null && nc -z 127.0.0.1 189
 curl -sS -o /dev/null 'http://127.0.0.1:8101/style.css?dual-v4'
 curl -sS -o /dev/null -g 'http://[::1]:8101/style.css?dual-v6'
 curl -sS -o /dev/null -H 'X-Forwarded-For: ::ffff:198.51.100.8' 'http://127.0.0.1:8080/style.css?dual-xff'
+curl -sS -o /dev/null -X FROB 'http://127.0.0.1:8101/dual-frob'
 # A client that goes away mid-response (alpha.57 report, finding 2): it reads the start of a large
 # file and resets the connection. Its line names it, as a complete request's does; until
 # alpha.58 the address was asked of the socket when the line was written, after the reset, and
@@ -3402,6 +3403,7 @@ kill $DUALPID 2>/dev/null; wait $DUALPID 2>/dev/null
 check "access log: a client that resets mid-response is named in its line, over plain HTTP, TLS and IPv6 (alpha.57 report: \"-\")" "127.0.0.1 127.0.0.1 ::1" \
   "$(for a in plain tls v6; do grep -F "agensio-abort-$a" bench/tmp/dual/access.log | tail -1 | cut -d' ' -f2; done | tr '\n' ' ' | sed 's/ $//')"
 check "access log: a dual-stack listener records an IPv4 client as IPv4, an IPv6 one as IPv6; a mapped X-Forwarded-For entry unmapped" "127.0.0.1 ::1 198.51.100.8" "$(grep -F 'dual-v4' bench/tmp/dual/access.log | tail -1 | cut -d' ' -f2) $(grep -F 'dual-v6' bench/tmp/dual/access.log | tail -1 | cut -d' ' -f2) $(grep -F 'dual-xff' bench/tmp/access.log | tail -1 | cut -d' ' -f2)"
+check "an unknown method's error-log line names the client on a server that trusts no proxy (before, \"from  (405)\": the address was filled only on need)" "1" "$(grep -c "unrecognised method 'FROB' for /dual-frob from 127.0.0.1 (405)" bench/tmp/dual/error.log)"
 # ---- The server's addresses (docs/configuration.md 1c, 2026-11-03): named in the main file they are
 # open at start with no site on them, a site created without an address attaches by a reload, a site
 # with 0.0.0.0:P of its own beside the server's [::]:P is named, and without the keys a site on the
