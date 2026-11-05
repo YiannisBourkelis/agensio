@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.128
+## 0.1.0-alpha.128 (2026-11-05)
 
 - **Fewer records of a site: `access_log_exclude_paths` and `access_log_keep_days`** (grabloop.app's
   request, the owner's design; `docs/configuration.md` 8b). A site whose privacy notice promises that
