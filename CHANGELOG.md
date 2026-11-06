@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.135
+## 0.1.0-alpha.135 (2026-11-06)
 
 - **Approval reasons say what a change does, never what a site's tree holds** (the owner's decision after the
   alpha.131 to alpha.134 reports, each of which found a layout that the account of the tree missed: a link, the
