@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.132
+## 0.1.0-alpha.132 (2026-11-06)
 
 - **A PHP site's `app` changed to `static` says what it exposes** (the alpha.131 addendum, N1, the owner's
   decision). A static site runs no PHP and serves a `.php` file as its source, as nginx, Apache without PHP and
