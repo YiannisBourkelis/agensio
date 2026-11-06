@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.0-alpha.136 (2026-11-06)
+
+- **Fix: a static site created over PHP files went through at once when the check missed them** (the alpha.135
+  report, F1). A static `site_create` waited only for a PHP file the walk found, so one past its 5000th entry or
+  behind a directory link was then served as its source with no approval. A static site's create now takes the
+  rule a PHP preset's took in alpha.135: one read of the root, and any entry, or a directory the server cannot
+  read, waits ("the directory /srv/www/s/web is not empty, and once the site exists everything it serves to anyone
+  comes from there, PHP files as their source: look through it before you approve"). A static site created over a
+  directory of plain HTML now waits too; a new or empty root is free, as before.
+- **Fix: a PHP site's create named, as one of the files it serves or runs, a file it never reaches** (F3). With
+  `served_dir = "public"` and `config.php` beside an empty `public/`, the reason said "(/config.php among them)".
+  No create names a file any more: "the directory /srv/www/p is not empty, and once the site exists everything it
+  serves or runs as PHP comes from there: look through it before you approve". Nothing is walked for a create.
+- **A static site's root moved says what static serves there, whatever it holds** (F2): "...: everything a static
+  site serves to anyone comes from there, PHP files as their source", where it added that only when the check met
+  a PHP file. The move waited for approval before and still does. The one example left in a reason is the PHP
+  site made static's (`/wp-config.php among them`), which no gate depends on.
+- **The MCP texts** (F4): `site_update` no longer promises that the approval names a file (it gives one as an
+  example when its check meets one); `site_create` says that a static or PHP site over a root that is not empty
+  waits, whatever the root holds, and that an application not yet there goes on a new or empty root, then
+  `site_install`.
+
 ## 0.1.0-alpha.135 (2026-11-06)
 
 - **Approval reasons say what a change does, never what a site's tree holds** (the owner's decision after the

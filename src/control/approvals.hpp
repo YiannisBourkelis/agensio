@@ -25,18 +25,17 @@ std::string escape_for_terminal(std::string_view text);
 // two names never print alike.
 std::string escape_line(std::string_view text);
 
-// One PHP file under a site's root, by its served path ("/wp-config.php"), "" when the walk met none: an example
-// for the person approving, never a claim that there is none. The reasons say what a change does whatever the
-// walk found (2026-11-06, the owner's decision after the alpha.131 to alpha.134 reports, each of which found a
-// layout an account of the tree missed). Breadth first, at most kPhpScanEntries entries, links to directories not
-// followed, a directory that cannot be read passed over; a link named as a PHP file counts as one.
-// for_static: what a static site would serve as source (every PHP spelling, php_suffixes(); dot names skipped,
-// which it answers 404), a configuration file ("config" or "settings" in its name) before any other; else what a
-// PHP preset would run (.php in any case, dot names too), the first found.
+// One PHP file a static site would serve as its source, by its served path ("/wp-config.php"), "" when the walk met
+// none: the example of a PHP site made static (N1), never a claim that there is none. No gate depends on it: the
+// reasons say what a change does whatever the walk found (2026-11-06, the owner's decision after the alpha.131 to
+// alpha.135 reports, each of which found a layout an account of the tree missed). Breadth first, at most
+// kPhpScanEntries entries, links to directories not followed, a directory that cannot be read passed over; a link
+// named as a PHP file counts as one; every PHP spelling static serves as source (php_suffixes()), dot names skipped
+// (static answers 404), a configuration file ("config" or "settings" in its name) before any other.
 inline constexpr std::size_t kPhpScanEntries = 5000;
-std::string php_example(const std::string& root, bool for_static);
-// What a PHP preset's site_create finds at its root: nothing there (no directory, or an empty one), entries (any,
-// dot names too), or a directory the server cannot read, so not known to be empty. One directory read, no walk.
+std::string php_example(const std::string& root);
+// What a static or PHP site's site_create finds at its root: nothing there (no directory, or an empty one), entries
+// (any, dot names too), or a directory the server cannot read, so not known to be empty. One directory read, no walk.
 enum class RootState { empty, holds_files, unreadable };
 RootState root_state(const std::string& root);
 
@@ -102,7 +101,7 @@ std::string pending_text(const PendingChange& c, std::time_t now, std::size_t ma
 // is of a credential or database file (files::secret_path, judged by the handler against the site's
 // credential files); the site's managed spec as it is now, so a site_update is judged by what it
 // changes; the site's names, so a redirect to one of them is not "elsewhere"; and for a site_create
-// whether the root already holds files the app would run.
+// whether the root is empty.
 struct ApprovalContext {
     bool secret_read = false;
     const SiteSpec* current = nullptr;
@@ -111,13 +110,11 @@ struct ApprovalContext {
     // body has none or they do not check, in which case the handler refuses the change anyway.
     const json::Value* rules_after = nullptr;
     std::vector<std::string> site_names;
-    // php_example of the root: for a site_create of a PHP preset over files, one the site would run as soon as it
-    // exists; for a static one (F3a), or a static site's new root (F3b), one it would serve as its source, which
-    // alone makes the create wait; for a PHP site whose app becomes static (the alpha.131 addendum, N1, the owner's
-    // decision: the administrator's to decide, said plainly to the person approving), one it would serve as its
-    // source. An example only: "" changes no reason's claim.
+    // php_example of the root of a PHP site whose app becomes static (the alpha.131 addendum, N1, the owner's
+    // decision: the administrator's to decide, said plainly to the person approving). An example only: "" changes no
+    // reason's claim.
     std::string root_php;
-    // root_state of a PHP preset's site_create: entries there, or a directory the server cannot read, wait.
+    // root_state of a static or PHP site's site_create: entries there, or a directory the server cannot read, wait.
     RootState root = RootState::empty;
 };
 // Why a mutation waits for approval, in the server's words; empty when it does not. `action` is the

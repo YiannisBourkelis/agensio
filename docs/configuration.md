@@ -3487,8 +3487,8 @@ the commands here: `site-install`, `site-copy`, `site-env-set`, `site-env --reve
 `site-auth-user-set`, `trash-delete`, `trash-expire`, every file change, and a `site-update` that
 changes `app`, `root`, `served_dir`, the entry points or the front controller, changes `upstream`,
 redirects to a host that is none of the site's names, or removes or widens a password or address
-rule; a `site-create` only when its root already holds files (a PHP preset) or PHP files (static), its
-upstream is off this host, or a redirect leaves. Typed at a terminal, such a command asks for the code at once.
+rule; a `site-create` only when a static or PHP site's root is not empty, its upstream is off this
+host, or a redirect leaves. Typed at a terminal, such a command asks for the code at once.
 
 **The site's environment.** An application reads settings and secrets from its
 environment: a Rails application without credentials (every ONCE application such as

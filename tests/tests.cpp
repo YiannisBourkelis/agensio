@@ -8977,9 +8977,9 @@ static void test_approvers() {
 // Waiting changes (design 27.3, 27.4): what a terminal would act on is shown as \xHH; the store's
 // limits and lifetimes; the person's text leads with the server's reasons and ends with the
 // requester's words; the gate holds pip_install back, dry run or not, and nothing else yet.
-// The example behind those reasons (control::php_example): breadth first, no depth limit, a configuration file
-// first, links to directories never followed, at most kPhpScanEntries entries; and the one read behind a PHP
-// preset's site_create (control::root_state). Neither ever tells a reason that there is none (2026-11-06).
+// The example of a PHP site made static (control::php_example): breadth first, no depth limit, a configuration file
+// first, links to directories never followed, at most kPhpScanEntries entries; and the one read behind a static or
+// PHP site's site_create (control::root_state). Neither ever tells a reason that there is none (2026-11-06).
 static void test_php_scan() {
     namespace fs = std::filesystem;
     const fs::path dir = fs::temp_directory_path() / ("agensio-phpscan-" + std::to_string(::getpid()));
@@ -8991,48 +8991,47 @@ static void test_php_scan() {
     };
     // Six levels down: the alpha.132 walk stopped at the first entry five levels deep.
     put(dir / "deep/d1/d2/d3/d4/d5/d6/x.php");
-    CHECK(control::php_example((dir / "deep").string(), true) == "/d1/d2/d3/d4/d5/d6/x.php");
-    CHECK(control::php_example((dir / "deep").string(), false) == "/d1/d2/d3/d4/d5/d6/x.php");
+    CHECK(control::php_example((dir / "deep").string()) == "/d1/d2/d3/d4/d5/d6/x.php");
     // The only .php behind a directory link: not followed; a link named .php counts as the file.
     put(dir / "outside/secret.php");
     fs::create_directories(dir / "dlink");
     fs::create_directory_symlink(dir / "outside", dir / "dlink/ext");
-    CHECK(control::php_example((dir / "dlink").string(), true).empty() && control::php_example((dir / "dlink").string(), false).empty());
+    CHECK(control::php_example((dir / "dlink").string()).empty());
     fs::create_directories(dir / "flink");
     fs::create_symlink(dir / "outside/secret.php", dir / "flink/s.php");
-    CHECK(control::php_example((dir / "flink").string(), true) == "/s.php" && control::php_example((dir / "flink").string(), false) == "/s.php");
+    CHECK(control::php_example((dir / "flink").string()) == "/s.php");
     // Past the cap: the walk stops, with the first PHP file it met if any.
     fs::create_directories(dir / "big/zz");
     for (std::size_t i = 0; i <= control::kPhpScanEntries; ++i) std::ofstream(dir / "big" / ("f" + std::to_string(i) + ".txt"));
     put(dir / "big/zz/x.php");
-    CHECK(control::php_example((dir / "big").string(), true).empty());
-    // Dot names: static answers them 404, a PHP preset's example counts them.
+    CHECK(control::php_example((dir / "big").string()).empty());
+    // Dot names: static answers them 404.
     put(dir / "dots/.hidden.php");
     put(dir / "dots/.git/hooks/h.php");
-    CHECK(control::php_example((dir / "dots").string(), true).empty() && !control::php_example((dir / "dots").string(), false).empty());
+    CHECK(control::php_example((dir / "dots").string()).empty());
     // A configuration file first, the shallowest; the root's own before one further down.
     put(dir / "cfg/index.php");
     put(dir / "cfg/wp-admin/setup-config.php");
     put(dir / "cfg/wp-config.php");
-    CHECK(control::php_example((dir / "cfg").string() + "/", true) == "/wp-config.php");
+    CHECK(control::php_example((dir / "cfg").string() + "/") == "/wp-config.php");
     put(dir / "cfg2/aaa.php");
     put(dir / "cfg2/sub/settings.php");
     put(dir / "cfg2/sub/deeper/config.php");
-    CHECK(control::php_example((dir / "cfg2").string(), true) == "/sub/settings.php");
-    // Every PHP spelling is served as source by static; a PHP preset runs .php alone (the others it refuses).
+    CHECK(control::php_example((dir / "cfg2").string()) == "/sub/settings.php");
+    // Every PHP spelling is served as source by static.
     put(dir / "spell/Y.PHTML");
-    CHECK(control::php_example((dir / "spell").string(), true) == "/Y.PHTML" && control::php_example((dir / "spell").string(), false).empty());
+    CHECK(control::php_example((dir / "spell").string()) == "/Y.PHTML");
     // A directory the server's account cannot read is passed over; the walk goes on beside it.
     if (::geteuid() != 0) {
         put(dir / "locked/in/x.php");
         put(dir / "locked/open/y.php");
         fs::permissions(dir / "locked/in", fs::perms::none);
-        CHECK(control::php_example((dir / "locked").string(), false) == "/open/y.php");
+        CHECK(control::php_example((dir / "locked").string()) == "/open/y.php");
         fs::permissions(dir / "locked/in", fs::perms::owner_all);
     }
-    CHECK(control::php_example((dir / "nothing-here").string(), true).empty());
-    // A PHP preset's root: no directory or an empty one is free; any entry, a dot name too, waits; so does a
-    // directory the server cannot read, which is not known to be empty.
+    CHECK(control::php_example((dir / "nothing-here").string()).empty());
+    // A static or PHP site's root: no directory or an empty one is free; any entry, a dot name too, waits; so does
+    // a directory the server cannot read, which is not known to be empty.
     CHECK(control::root_state((dir / "nothing-here").string()) == control::RootState::empty && control::root_state("") == control::RootState::empty);
     fs::create_directories(dir / "empty");
     CHECK(control::root_state((dir / "empty").string()) == control::RootState::empty);
@@ -9165,15 +9164,14 @@ static void test_pending_changes() {
     }
     CHECK(reasons("/v1/sites/a.test", "", R"({"root":"/srv/www/a.test/other"})", ctx).find("another directory") != std::string::npos);
     {
-        // A static site's root moved onto PHP files (the alpha.132 report, F3b): the root's reason says what static
-        // serves there; nothing more when the walk found none, or when the site runs PHP.
+        // A static site's root moved (the alpha.132 report, F3b): the root's reason says what static serves there, in
+        // general terms whatever the new root holds (2026-11-06, the alpha.135 report, F2); nothing when the site runs PHP.
         control::ApprovalContext rctx = ctx;  // cur is static
-        rctx.root_php = "/wp-config.php";
         CHECK(reasons("/v1/sites/a.test", "", R"({"root":"/srv/www/blog/web"})", rctx) ==
-              "serves, or runs, files from another directory: /srv/www/blog/web: it holds PHP files, which a static site serves to anyone as their source, "
-              "with the passwords and keys in them (/wp-config.php among them) | ");
-        rctx.root_php.clear();
-        CHECK(reasons("/v1/sites/a.test", "", R"({"root":"/srv/www/blog/web"})", rctx) == "serves, or runs, files from another directory: /srv/www/blog/web | ");
+              "serves, or runs, files from another directory: /srv/www/blog/web: everything a static site serves to anyone comes from there, PHP files "
+              "as their source | ");
+        rctx.root_php = "/wp-config.php";  // the PHP-to-static example only: the root's line names none
+        CHECK(reasons("/v1/sites/a.test", "", R"({"root":"/srv/www/blog/web"})", rctx).find("among them") == std::string::npos);
         control::SiteSpec wp2 = cur;
         wp2.app = "wordpress";
         rctx.current = &wp2;
@@ -9259,29 +9257,34 @@ static void test_pending_changes() {
     control::ApprovalContext cctx;
     cctx.site_names = {"n.test"};
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"php","root":"/srv/www/n.test/web"})", cctx).empty());
-    // A PHP preset over files already there waits, whatever they are (2026-11-06, the owner's decision: one read, no
-    // layout of the tree can keep a .php from the person approving), with a PHP file as an example when one is met.
+    // A PHP preset or a static site over a root that is not empty waits, whatever it holds (2026-11-06, the owner's
+    // decision, and the alpha.135 report, F1 and F3): one read of the root, nothing walked, no file named.
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"static","root":"/srv/www/n.test/web"})", cctx).empty());
     cctx.root = control::RootState::holds_files;
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"php","root":"/srv/www/n.test/web"})", cctx) ==
-          "the directory /srv/www/n.test/web already holds files, which the site serves, or runs as PHP, as soon as it exists | ");
-    cctx.root_php = "/index.php";
+          "the directory /srv/www/n.test/web is not empty, and once the site exists everything it serves or runs as PHP comes from there: look "
+          "through it before you approve | ");
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"laravel","root":"/srv/www/n.test/web"})", cctx) ==
-          "the directory /srv/www/n.test/web already holds files, which the site serves, or runs as PHP, as soon as it exists (/index.php among them) | ");
+          "the directory /srv/www/n.test/web is not empty, and once the site exists everything it serves or runs as PHP comes from there: look "
+          "through it before you approve | ");
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"static","root":"/srv/www/n.test/web"})", cctx) ==
+          "the directory /srv/www/n.test/web is not empty, and once the site exists everything it serves to anyone comes from there, PHP files as "
+          "their source: look through it before you approve | ");
+    cctx.root_php = "/wp-config.php";  // an example belongs to the PHP-to-static change alone
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"static","root":"/srv/www/n.test/web"})", cctx).find("among them") == std::string::npos);
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"php","root":"/srv/www/n.test/web"})", cctx).find("among them") == std::string::npos);
+    cctx.root_php.clear();
     cctx.root = control::RootState::unreadable;
-    cctx.root_php.clear();
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"php","root":"/srv/www/n.test/web"})", cctx) ==
-          "the directory /srv/www/n.test/web exists, and the server cannot read it to see what it holds; the site may run what is there as soon as it exists | ");
-    cctx.root = control::RootState::holds_files;  // the state of a PHP preset's root only: another app's create is not judged by it
+          "the directory /srv/www/n.test/web exists and the server cannot read it, and once the site exists everything it serves or runs as PHP "
+          "comes from there: look through it before you approve | ");
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"static","root":"/srv/www/n.test/web"})", cctx) ==
+          "the directory /srv/www/n.test/web exists and the server cannot read it, and once the site exists everything it serves to anyone comes "
+          "from there, PHP files as their source: look through it before you approve | ");
+    cctx.root = control::RootState::holds_files;  // a static or PHP site's root only: an application server's create is not judged by it
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"rails","root":"/srv/www/n.test/app","upstream":"http://127.0.0.1:3000"})", cctx).empty());
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"proxy","upstream":"http://127.0.0.1:8080","root":"/srv/www/n.test/web"})", cctx).empty());
     cctx.root = control::RootState::empty;
-    // A static site over PHP files waits too (the alpha.132 report, F3a, the owner's decision): static serves them
-    // as their source. A walk that met none adds nothing: a large static tree or a link in it is no PHP site.
-    cctx.root_php = "/wp-config.php";
-    const std::string over_php = reasons("/v1/sites", "", R"({"domain":"n.test","app":"static","root":"/srv/www/n.test/web"})", cctx);
-    CHECK(over_php.find("the directory /srv/www/n.test/web holds PHP files, which a static site serves to anyone as their source, with the passwords and keys in them (/wp-config.php among them)") != std::string::npos &&
-          over_php.find("would run") == std::string::npos);
-    cctx.root_php.clear();
-    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"static","root":"/srv/www/n.test/web"})", cctx).empty());
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"proxy","upstream":"http://127.0.0.1:8080"})", cctx).empty());
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"proxy","upstream":"unix:/run/app.sock"})", cctx).empty());
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"proxy","upstream":"http://203.0.113.5:8080"})", cctx).find("off this host") != std::string::npos);

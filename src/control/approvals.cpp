@@ -49,13 +49,12 @@ std::string escape_line(std::string_view text) {
     return out;
 }
 
-std::string php_example(const std::string& root, bool for_static) {
+std::string php_example(const std::string& root) {
     namespace fs = std::filesystem;
     std::error_code ec;
     if (root.empty() || !fs::is_directory(fs::path(root), ec)) return "";
-    const auto php_name = [for_static](std::string n) {
+    const auto php_name = [](std::string n) {
         for (char& ch : n) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        if (!for_static) return n.size() > 4 && n.ends_with(".php");
         for (const auto& suffix : php_suffixes())
             if (n.size() > suffix.size() && n.ends_with(suffix)) return true;
         return false;
@@ -76,7 +75,7 @@ std::string php_example(const std::string& root, bool for_static) {
         for (; !ec && it != end; it.increment(ec)) {  // a directory that cannot be read, or stops midway, is passed over
             if (++seen > kPhpScanEntries) return first;
             const std::string n = it->path().filename().string();
-            if (for_static && !n.empty() && n[0] == '.') continue;  // a dot name static answers 404, below it too
+            if (!n.empty() && n[0] == '.') continue;  // a dot name static answers 404, below it too
             const std::string served = served_at + "/" + n;
             std::error_code e2;
             if (it->is_directory(e2)) {  // a link's target: not followed
@@ -84,7 +83,7 @@ std::string php_example(const std::string& root, bool for_static) {
                 continue;
             }
             if (!php_name(n) || !it->is_regular_file(e2)) continue;
-            if (!for_static || config_name(n)) return shown(served);  // breadth first: the shallowest configuration file
+            if (config_name(n)) return shown(served);  // breadth first: the shallowest configuration file
             if (first.empty()) first = shown(served);
         }
         ec.clear();
@@ -610,11 +609,11 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
         }
         if (update && changed("root", cur ? cur->root : "")) {
             std::string line = "serves, or runs, files from another directory: " + std::string(body["root"].str());
-            // A static site moved onto PHP files (the alpha.132 report, F3b), unless the app's line says it already (N1).
+            // A static site's root moved (the alpha.132 report, F3b): what static serves there, said whatever the new root
+            // holds (2026-11-06, the alpha.135 report, F2), unless the app's line says it already (N1).
             const std::string app_after = body["app"].is_string() ? std::string(body["app"].str()) : cur ? cur->app : std::string();
             const bool said = cur && php_app(cur->app) && app_after == "static";
-            if (app_after == "static" && !said && !ctx.root_php.empty())
-                line += ": it holds PHP files, which a static site serves to anyone as their source, with the passwords and keys in them (" + ctx.root_php + " among them)";
+            if (app_after == "static" && !said) line += ": everything a static site serves to anyone comes from there, PHP files as their source";
             out.push_back(std::move(line));
         }
         if (update && changed("served_dir", cur ? cur->served_dir : "")) {
@@ -627,21 +626,15 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
             out.push_back("serves, or runs, files from another directory of the project: " + served(root, std::string(body["served_dir"].str())) + ", in place of " +
                           served(was_root, cur ? cur->served_dir : std::string()));
         }
-        if (create && body.get("app") == "static") {
-            // Over PHP files (the alpha.132 report, F3a, the owner's decision): static serves them as their source. A
-            // walk that found none adds nothing: a large static tree or a link in it is no PHP site.
-            if (!ctx.root_php.empty())
-                out.push_back("the directory " + std::string(body.get("root")) + " holds PHP files, which a static site serves to anyone as their source, with the passwords and keys in them (" +
-                              ctx.root_php + " among them)");
-        } else if (create && php_app(body.get("app"))) {
-            // Over files already there (2026-11-06, the owner's decision): any entry waits, so no layout of the tree
-            // can keep a .php from the person approving; an empty or new root is free.
-            const std::string dir = "the directory " + std::string(body.get("root"));
-            if (ctx.root == RootState::holds_files)
-                out.push_back(dir + " already holds files, which the site serves, or runs as PHP, as soon as it exists" +
-                              (ctx.root_php.empty() ? "" : " (" + ctx.root_php + " among them)"));
-            else if (ctx.root == RootState::unreadable)
-                out.push_back(dir + " exists, and the server cannot read it to see what it holds; the site may run what is there as soon as it exists");
+        if (create && (php_app(body.get("app")) || body.get("app") == "static") && ctx.root != RootState::empty) {
+            // Over a root that is not empty (2026-11-06, the owner's decision, and the alpha.135 report, F1 and F3): one read
+            // of the root decides and nothing is walked, so no layout of the tree keeps a file from the person approving,
+            // and the reason names none; a new or empty root is free.
+            const std::string what = body.get("app") == "static" ? "everything it serves to anyone comes from there, PHP files as their source"
+                                                                  : "everything it serves or runs as PHP comes from there";
+            out.push_back("the directory " + std::string(body.get("root")) +
+                          (ctx.root == RootState::unreadable ? " exists and the server cannot read it" : " is not empty") +
+                          ", and once the site exists " + what + ": look through it before you approve");
         }
         if (body["rules"].is_object()) {
             const json::Value& r = ctx.rules_after ? *ctx.rules_after : body["rules"];

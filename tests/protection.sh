@@ -34,7 +34,7 @@ cleanup() {
 trap cleanup EXIT
 id -u agensio >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin agensio
 mkdir -p $T/sites.d $T/logs $T/run $T/state $T/www $T/www2; chown agensio:agensio $T/sites.d $T/logs $T/state; chmod 751 $T/state
-echo hi > $T/www/index.html; echo hi2 > $T/www2/index.html
+echo hi > $T/www/index.html  # $T/www2 is filled after its site is created: a static site over files waits for approval (alpha.136)
 write_config() {
 cat > $T/agensio.toml <<CFG
 include = ["sites.d/*.toml"]
@@ -132,6 +132,7 @@ check "unbanned: the site answers again" "200" "$(curl -sS -o /dev/null -w '%{ht
 
 # 5. A site added later: the loaded table misses its port and the installed jail is stale; rendering again heals both.
 ctl site-create --domain lp.test --app static --no-user --https none --root $T/www2 --listen-plain 0.0.0.0:18881 --login-path /signin --login-path '/?controller=AuthController&action=check' --yes --reason prot > $T/create.json
+echo hi2 > $T/www2/index.html
 check "a second site on another port with its own login paths (one through the query string) is created; its answer's next_steps carry root's re-render lines for the jail and the ruleset (a trial back to the kept file); health: the loaded table covers no limit on 18881 and the jail file is stale" "True jail+nft warn:firewall_limits_missing info:fail2ban_jail_stale yes yes" "$(python3 -c "import json; d=json.load(open('$T/create.json')); print(d['ok']); ns=' '.join(d['next_steps']); print(('jail' if 'fail2ban jail on disk differs' in ns and 'agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload' in ns else 'nojail') + '+' + ('nft' if 'firewall ruleset on disk differs' in ns and 'systemd-run --on-active=10min --collect --unit agensio-firewall-trial /usr/sbin/nft -f $T/firewall.nft' in ns else 'nonft'))" | tr '\n' ' ' | sed 's/ $//') $(codes) $(ctl health | grep -q 'covers no limit on TCP 18881:' && echo yes) $(ctl protection --jail | grep -c '^filter    = agensio-login\[paths="' | sed 's/^1$/yes/')"
 # The alpha.44 report's spellings: the log holds the request as the client sent it, so the
 # rendered filter must match every spelling the server and the applications accept.

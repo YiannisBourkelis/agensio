@@ -822,11 +822,9 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
             if (control::read_managed(control::site_file(backend_->running(), sc ? std::string_view(sc->server_names.front()) : name), current)) {
                 actx.current = &current;
                 if (action.empty()) {
-                    const std::string app_after = body["app"].is_string() ? std::string(body["app"].str()) : current.app;
                     const std::string root_after = body["root"].is_string() ? std::string(body["root"].str()) : current.root;
-                    // One file static would serve as source: a PHP site made static (N1), a static site's root moved (F3b).
-                    if (app_after == "static" && ((body.get("app") == "static" && php_app(current.app)) || root_after != current.root))
-                        actx.root_php = control::php_example(root_after, true);
+                    // One file static would serve as source, the example of a PHP site made static (N1).
+                    if (body.get("app") == "static" && php_app(current.app)) actx.root_php = control::php_example(root_after);
                 }
                 actx.site_names.push_back(current.domain);
                 for (const auto& a : current.aliases) actx.site_names.push_back(a);
@@ -839,15 +837,8 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         }
         if (path == "/v1/sites") {
             actx.site_names.push_back(std::string(body.get("domain")));
-            // Files a PHP preset would serve or run there, with one PHP file as an example; a PHP file a static site
-            // would serve as source (F3a).
-            const std::string root(body.get("root"));
-            if (php_app(body.get("app"))) {
-                actx.root = control::root_state(root);
-                if (actx.root == control::RootState::holds_files) actx.root_php = control::php_example(root, false);
-            } else if (body.get("app") == "static") {
-                actx.root_php = control::php_example(root, true);
-            }
+            // Whether a PHP preset or a static site would serve, or run, files already there: one read of the root.
+            if (php_app(body.get("app")) || body.get("app") == "static") actx.root = control::root_state(std::string(body.get("root")));
         }
         for (const auto& a : body["aliases"].items())
             if (a.is_string()) actx.site_names.push_back(std::string(a.str()));

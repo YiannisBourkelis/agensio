@@ -12,7 +12,7 @@ set -uo pipefail
 BIN=$(readlink -f "${1:-build/agensio}")
 ROOT=$(pwd)
 T=$ROOT/bench/tmp/isolation; rm -rf "$T"; mkdir -p "$T/sites.d" "$T/logs" "$T/www/a" "$T/www/a2" "$T/www/b" "$T/www/c" "$T/www/d" "$T/www/e"
-for s in a a2 b c d e; do echo "site $s" > "$T/www/$s/index.html"; done
+for s in a a2 b c d; do echo "site $s" > "$T/www/$s/index.html"; done  # e is filled after its sites are created: a static site over files waits for approval (alpha.136)
 pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
 body() {  # host port: the site's answer for that name, or "none"
@@ -185,6 +185,7 @@ check "site-create whose file would be set aside: refused, the file removed, the
 # site whose name another file serves meanwhile is refused and the file disabled again.
 "$BIN" ctl site-create --domain f.test --app static --no-user --https none --root "$T/www/e" \
   --listen-plain 127.0.0.1:18301 --yes --reason isolation --socket "$CS" > "$T/f.out" 2>&1
+echo "site e" > "$T/www/e/index.html"
 "$BIN" ctl site-update f.test --alias a.test --yes --reason isolation --socket "$CS" > "$T/fu.out" 2>&1; UPDATE_EXIT=$?
 check "site-update adding an alias another file serves: refused, the previous file back, both sites serving" "1 no site e site a2" \
   "$([ $UPDATE_EXIT -ne 0 ] && echo 1 || echo 0) $(grep -q 'a\.test' "$T/sites.d/f.test.toml" && echo yes || echo no) $(body f.test 18301) $(body a.test 18301)"
