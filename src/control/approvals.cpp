@@ -113,18 +113,35 @@ PhpScan scan_php(const std::string& root, bool for_static) {
 
 std::vector<std::string> preset_files_served(const SiteSpec& site, const std::string& root) {
     namespace fs = std::filesystem;
-    std::vector<std::string> candidates;
-    if (python_app(site.app) && !site.project.empty()) candidates.push_back("/" + site.project + "/settings.py");  // its SECRET_KEY: the .py ending
-    for (const char* p : preset_refused_paths(site.app)) candidates.emplace_back(p);
+    // The preset's secrets before the rest of its refusals (the alpha.133 report, S4: a Redmine install's Gemfiles
+    // took the places of configuration.yml, its SMTP password, and secret_token.rb). A secret may be a file or a
+    // directory (/storage); a refused path ending in a slash is a directory.
+    struct Candidate {
+        std::string path;
+        bool dir, either;
+    };
+    std::vector<Candidate> candidates;
+    if (python_app(site.app) && !site.project.empty()) candidates.push_back({"/" + site.project + "/settings.py", false, false});  // its SECRET_KEY: the .py ending
+    for (auto& p : preset_secrets(site.app)) candidates.push_back({std::move(p), false, true});
+    for (const char* p : preset_refused_paths(site.app)) {
+        std::string path = p;
+        const bool dir = path.ends_with('/');
+        if (dir) path.pop_back();
+        candidates.push_back({std::move(path), dir, false});
+    }
     std::string base = root;
     while (base.size() > 1 && base.back() == '/') base.pop_back();
-    std::vector<std::string> out;
-    for (const auto& p : candidates) {
+    std::vector<std::string> out, named;
+    for (const auto& c : candidates) {
         if (out.size() == 3 || base.empty()) break;
-        if (p.find("/.") != std::string::npos) continue;  // static answers a dot name 404
+        if (c.path.find("/.") != std::string::npos) continue;  // static answers a dot name 404
+        if (std::find(named.begin(), named.end(), c.path) != named.end()) continue;
         std::error_code ec;
-        const fs::path at = fs::path(base + (p.ends_with('/') ? p.substr(0, p.size() - 1) : p));
-        if (p.ends_with('/') ? fs::is_directory(at, ec) : fs::is_regular_file(at, ec)) out.push_back(p);
+        const fs::path at = fs::path(base + c.path);
+        const bool is_dir = fs::is_directory(at, ec);
+        if (!(c.either ? is_dir || fs::is_regular_file(at, ec) : c.dir ? is_dir : fs::is_regular_file(at, ec))) continue;
+        named.push_back(c.path);
+        out.push_back(is_dir ? c.path + "/" : c.path);
     }
     return out;
 }
@@ -640,7 +657,8 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
                 line += ": static serves every file under " + root + " to anyone (hidden ones aside)";
                 std::string names;
                 for (const auto& p : ctx.preset_served) names += (names.empty() ? "" : ", ") + p;
-                if (!names.empty()) line += ", among them what the " + cur->app + " preset refused: " + names;
+                if (!names.empty())
+                    line += ", among them what the " + cur->app + " preset refused" + (preset_secrets(cur->app).empty() ? "" : " or keeps as its secrets") + ": " + names;
             }
             out.push_back(std::move(line));
         }

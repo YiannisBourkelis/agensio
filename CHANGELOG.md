@@ -13,6 +13,14 @@
 - **Fix: a file named with the four characters `\x0a` printed in a reason the same as one with a newline in its
   name** (S3). A reason's backslash is escaped too (`\x5c`), so every name prints as itself. Previews keep their
   backslashes, which PHP's namespaces are full of; a byte a terminal acts on is still never shown raw there.
+- **An application server made static names its secrets first** (the alpha.133 report, S4). The reason names up
+  to three files static would serve, and took them in the order of the preset's refused paths, so on a Redmine
+  install `/Gemfile` and `/Gemfile.lock` took two of the three places while `config/configuration.yml` (the SMTP
+  password) and `config/initializers/secret_token.rb` (the key that signs the sessions) went unnamed. The
+  preset's credential files, the list a read of one waits for approval by, now come first: "among them what the
+  redmine preset refused or keeps as its secrets: /config/database.yml, /config/configuration.yml,
+  /config/initializers/secret_token.rb". A Rails site names `/storage/` before its Gemfile, a Django project
+  `db.sqlite3` before `manage.py`; Node keeps no such list and is unchanged. One stat each, as before.
 
 ## 0.1.0-alpha.133 (2026-11-06)
 

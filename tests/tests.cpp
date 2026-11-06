@@ -9035,21 +9035,35 @@ static void test_php_scan() {
     CHECK(control::scan_php((dir / "nothing-here").string(), true).found.empty());
     // What static would serve that an application-server preset refused (the alpha.132 report, S2): the preset's own
     // paths that exist, hidden ones skipped (static answers them 404), a Django project's settings first, at most three.
+    // Its secrets come before the rest (the alpha.133 report, S4: a Redmine install's Gemfiles took the places of
+    // configuration.yml, the SMTP password, and secret_token.rb), a directory with its slash, each named once.
     put(dir / "rails/config/master.key");
     put(dir / "rails/config/database.yml");
     put(dir / "rails/Gemfile");
     put(dir / "rails/.env");
     fs::create_directories(dir / "rails/storage");
     control::SiteSpec rs;
-    rs.app = "redmine";
-    CHECK(control::preset_files_served(rs, (dir / "rails").string()) == std::vector<std::string>({"/config/master.key", "/config/database.yml", "/Gemfile"}));
+    rs.app = "rails";
+    CHECK(control::preset_files_served(rs, (dir / "rails").string()) == std::vector<std::string>({"/config/master.key", "/config/database.yml", "/storage/"}));
+    put(dir / "rm/config/database.yml");
+    put(dir / "rm/config/configuration.yml");
+    put(dir / "rm/config/initializers/secret_token.rb");
+    put(dir / "rm/Gemfile");
+    put(dir / "rm/Gemfile.lock");
+    put(dir / "rm/Gemfile.local");
+    control::SiteSpec rm;
+    rm.app = "redmine";
+    CHECK(control::preset_files_served(rm, (dir / "rm").string()) ==
+          std::vector<std::string>({"/config/database.yml", "/config/configuration.yml", "/config/initializers/secret_token.rb"}));
+    fs::remove(dir / "rm/config/initializers/secret_token.rb", ec);
+    CHECK(control::preset_files_served(rm, (dir / "rm").string()) == std::vector<std::string>({"/config/database.yml", "/config/configuration.yml", "/Gemfile"}));
     put(dir / "dj/blog/settings.py");
     put(dir / "dj/db.sqlite3");
     put(dir / "dj/manage.py");
     control::SiteSpec ds;
     ds.app = "wagtail";
     ds.project = "blog";
-    CHECK(control::preset_files_served(ds, (dir / "dj").string() + "/") == std::vector<std::string>({"/blog/settings.py", "/manage.py", "/db.sqlite3"}));
+    CHECK(control::preset_files_served(ds, (dir / "dj").string() + "/") == std::vector<std::string>({"/blog/settings.py", "/db.sqlite3", "/manage.py"}));
     fs::create_directories(dir / "nd/node_modules");
     put(dir / "nd/package.json");
     control::SiteSpec ns;
@@ -9210,7 +9224,13 @@ static void test_pending_changes() {
         pctx.preset_served = {"/config/master.key", "/config/database.yml"};
         CHECK(reasons("/v1/sites/a.test", "", R"({"app":"static"})", pctx) ==
               "changes what the site runs: app rails becomes static: static serves every file under /srv/www/app/app to anyone (hidden ones aside), "
-              "among them what the rails preset refused: /config/master.key, /config/database.yml | ");
+              "among them what the rails preset refused or keeps as its secrets: /config/master.key, /config/database.yml | ");
+        control::SiteSpec node = rails;
+        node.app = "node";
+        pctx.current = &node;
+        pctx.preset_served = {"/package.json"};
+        CHECK(reasons("/v1/sites/a.test", "", R"({"app":"static"})", pctx).ends_with("among them what the node preset refused: /package.json | "));  // it keeps none
+        pctx.current = &rails;
         pctx.preset_served.clear();
         CHECK(reasons("/v1/sites/a.test", "", R"({"app":"static"})", pctx) ==
               "changes what the site runs: app rails becomes static: static serves every file under /srv/www/app/app to anyone (hidden ones aside) | ");

@@ -39,9 +39,9 @@ struct PhpScan {
 // skipped, which it answers 404); else what a PHP preset would run (.php in any case, dot names too, the
 // first found).
 PhpScan scan_php(const std::string& root, bool for_static);
-// What a static site would serve under `root` that the site's preset refused (preset_refused_paths, a Django
-// project's settings.py first), as served paths: at most three that exist, hidden ones skipped (static answers
-// them 404). One stat each, no walk.
+// What a static site would serve under `root` that the site's preset refused or keeps as its secrets (a Django
+// project's settings.py, then preset_secrets, then preset_refused_paths), as served paths, a directory with its
+// slash: at most three that exist, each once, hidden ones skipped (static answers them 404). One stat each, no walk.
 std::vector<std::string> preset_files_served(const SiteSpec& site, const std::string& root);
 
 // 48 random bits as 12 hex digits ("" without random bytes): unique, not a secret (the code is).
