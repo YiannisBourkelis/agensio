@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.134
+## 0.1.0-alpha.134 (2026-11-06)
 
 - **Fix: a PHP site made static over a directory the server cannot read said "none is there now"** (the
   alpha.133 report, S1). The walk had not looked inside that directory, and a PHP file there is served once
