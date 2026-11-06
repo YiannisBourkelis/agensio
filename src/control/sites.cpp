@@ -690,8 +690,8 @@ static std::string join_list(const std::vector<std::string>& v) {
 }
 
 // The addresses the site would listen on (docs/configuration.md 1c): its own where given, in the
-// stored spelling, else the server's; a TLS site's plain ones likewise. `given` says whether any is
-// the site's own.
+// stored spelling, else the server's; a TLS site's plain ones likewise. `by_default` says whether
+// they are the server's.
 std::vector<std::string> spec_listen(const SiteSpec& spec, const Config& cfg, std::vector<std::string>& plain, bool& by_default) {
     auto canonical = [](const std::string& a) {
         try {
@@ -1394,7 +1394,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     }
     if (!spec.project.empty()) {
         if (!python_app(spec.app) && !spec.app.empty()) {
-            error = "project names a Django project's package: it goes with app = \"django\" or \"wagtail\"";
+            error = "project names a Django project's package: it goes with app = \"django\" or \"wagtail\"; send project: \"\" (ctl --no-project) with the change of app";
             return needs;
         }
         if (const std::string bad = check_project_name(spec.project); !bad.empty()) {
@@ -1404,7 +1404,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     }
     if (!spec.entry.empty()) {
         if (!node_app(spec.app) && !spec.app.empty()) {
-            error = "entry names the file node runs: it goes with app = \"node\"";
+            error = "entry names the file node runs: it goes with app = \"node\"; send entry: \"\" (ctl --no-entry) with the change of app";
             return needs;
         }
         if (const std::string bad = check_entry(spec.entry); !bad.empty()) {
@@ -1415,7 +1415,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (!spec.served_dir.empty()) {
         if (spec.app != "php" && !spec.app.empty()) {
             error = "served_dir names the project's directory that is served: it goes with app = \"php\" (the other PHP presets know their own); "
-                    "send served_dir: \"\" with the change of app";
+                    "send served_dir: \"\" (ctl --no-served-dir) with the change of app";
             return needs;
         }
         if (const std::string bad = check_served_dir(spec.served_dir); !bad.empty()) {
@@ -1425,7 +1425,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     }
     if (!spec.env_file.empty()) {  // the loader judges where it lies against the served directory
         if (!schedule_app(spec.app) && !spec.app.empty()) {
-            error = "env_file names a Laravel application's .env: it goes with app = \"laravel\" or app = \"php\"; send env_file: \"\" with the change of app";
+            error = "env_file names a Laravel application's .env: it goes with app = \"laravel\" or app = \"php\"; send env_file: \"\" (ctl --no-env-file) with the change of app";
             return needs;
         }
         if (const std::string bad = check_env_file(spec.env_file); !bad.empty()) {

@@ -20,6 +20,24 @@ namespace agensio::control {
 // and tab (a carriage return included), so no content of a preview can move the cursor, clear a
 // line or change colours in front of the person reading it.
 std::string escape_for_terminal(std::string_view text);
+// The same with newline and tab written as \x0a and \x09 too: a line made of text from outside (a file
+// name from a site's tree, a path the request gives) stays one line wherever it is shown.
+std::string escape_line(std::string_view text);
+
+// What a walk of a site's root finds of PHP files, by their served path ("/wp-config.php"): breadth first,
+// so the shallowest come first; at most kScanEntries entries; a link to a directory recorded, never
+// followed (static and PHP follow it: symlinks = "allow"); a link named as a PHP file counts as one.
+struct PhpScan {
+    static constexpr std::size_t kScanEntries = 5000;
+    std::string found;   // the first whose name holds "config" or "settings", else the first PHP file
+    std::string link;    // the first link to a directory, not followed
+    std::string unread;  // the first directory the server's account could not read
+    bool capped = false; // stopped at kScanEntries entries, the rest not read
+};
+// for_static: what a static site would serve as source (every PHP spelling, php_suffixes(); dot names
+// skipped, which it answers 404); else what a PHP preset would run (.php in any case, dot names too, the
+// first found).
+PhpScan scan_php(const std::string& root, bool for_static);
 
 // 48 random bits as 12 hex digits ("" without random bytes): unique, not a secret (the code is).
 std::string new_approval_id();
@@ -92,11 +110,12 @@ struct ApprovalContext {
     // body has none or they do not check, in which case the handler refuses the change anyway.
     const json::Value* rules_after = nullptr;
     std::vector<std::string> site_names;
-    bool root_runs_files = false;
-    // A PHP site whose app becomes static (the alpha.131 addendum, N1, the owner's decision: the
-    // administrator's to decide, said plainly to the person approving): a PHP file under the root the static
-    // site would serve, as served (a configuration file first), which static answers with its source.
-    std::string php_file_served;
+    // scan_php of the root: for a site_create of a PHP preset, a file the site would run as soon as it exists;
+    // for a PHP site whose app becomes static (the alpha.131 addendum, N1, the owner's decision: the
+    // administrator's to decide, said plainly to the person approving), a file it would serve as its source.
+    // Where the walk could not see everything (capped, a link, a directory unread) the reason says so and
+    // never that there is none (the alpha.132 report, F1).
+    PhpScan root_scan;
 };
 // Why a mutation waits for approval, in the server's words; empty when it does not. `action` is the
 // part after /v1/sites/NAME/. A dry run gets the same reasons: the handler runs it as it is and says

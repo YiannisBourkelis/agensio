@@ -73,6 +73,7 @@ void usage(std::ostream& out = std::cout) {
                  "                      site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F]\n"
                  "                           [--user U|--no-user] [--group G] [--app static|php|laravel|drupal|wordpress|grav|proxy|rails|redmine|django|wagtail|node]\n"
                  "                           [--root DIR] [--served-dir DIR] [--env-file F] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S] [--php-children N]\n"
+                 "                           [--no-served-dir] [--no-env-file] [--no-project] [--no-entry] (site-update: emptied, with a change of app)\n"
                  "                           [--php-version V] [--cut-requests] [--ignore-requirements]\n"
                  "                           [--no-redirect] [--hsts LIFETIME [--hsts-subdomains]|--no-hsts] [--canonical NAME] [--listen-plain A] [--listen-tls A|--listen-default]\n"
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
@@ -605,6 +606,8 @@ int main(int argc, char** argv) {
                              "        site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F] [--user U|--no-user]\n"
                              "                    [--group G] [--app NAME] [--root DIR] [--served-dir DIR] [--env-file F] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S]\n"
                              "                    [--php-children N] [--php-version V] [--no-redirect] [--canonical NAME] [--listen-plain A] [--listen-tls A]\n"
+                             "                    [--no-served-dir] [--no-env-file] [--no-project] [--no-entry] (site-update: each emptied, as a change\n"
+                             "                    of app away from the preset it belongs to needs)\n"
                              "                    [--listen-default] (the server's addresses, [server] listen_tls / listen_plain, which a site takes unless\n"
                              "                    given its own; --listen-default hands one with its own back to them)\n"
                              "                    [--hsts LIFETIME [--hsts-subdomains] | --no-hsts] (HSTS for the lifetime browsers commit to: 1w, 1y,\n"
@@ -860,6 +863,11 @@ int main(int argc, char** argv) {
                 else if (b == "--entry") field("entry");
                 else if (b == "--served-dir") field("served_dir");
                 else if (b == "--env-file") field("env_file");
+                // Each emptied, as a change of app needs (a value cannot be "", flag_value; the alpha.132 report, S1).
+                else if (b == "--no-served-dir") body.set("served_dir", "");
+                else if (b == "--no-env-file") body.set("env_file", "");
+                else if (b == "--no-project") body.set("project", "");
+                else if (b == "--no-entry") body.set("entry", "");
                 else if (b == "--files") body.set("files", true);
                 else if (b == "--private" || b == "--entry-point") {
                     std::string v; value(v);

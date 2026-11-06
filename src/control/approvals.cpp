@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <deque>
+#include <filesystem>
 
 #include "core/log_exclude.hpp"
 #include "services/dotenv.hpp"
@@ -27,6 +29,85 @@ std::string escape_for_terminal(std::string_view text) {
         out.push_back(kHex[c >> 4]);
         out.push_back(kHex[c & 15]);
     }
+    return out;
+}
+
+std::string escape_line(std::string_view text) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(text.size());
+    for (const char ch : text) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c >= 0x20 && c < 0x7f) {
+            out.push_back(ch);
+            continue;
+        }
+        out += "\\x";
+        out.push_back(kHex[c >> 4]);
+        out.push_back(kHex[c & 15]);
+    }
+    return out;
+}
+
+PhpScan scan_php(const std::string& root, bool for_static) {
+    namespace fs = std::filesystem;
+    PhpScan out;
+    std::error_code ec;
+    if (root.empty() || !fs::is_directory(fs::path(root), ec)) return out;
+    const auto php_name = [for_static](std::string n) {
+        for (char& ch : n) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (!for_static) return n.size() > 4 && n.ends_with(".php");
+        for (const auto& suffix : php_suffixes())
+            if (n.size() > suffix.size() && n.ends_with(suffix)) return true;
+        return false;
+    };
+    const auto config_name = [](std::string n) {
+        for (char& ch : n) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        return n.find("config") != std::string::npos || n.find("settings") != std::string::npos;
+    };
+    // A served path is shown to a person: kept to a line's length (escaped where the reason is made).
+    const auto shown = [](std::string p) { return p.size() > 200 ? p.substr(0, 200) + "..." : p; };
+    std::string first;
+    std::deque<std::pair<fs::path, std::string>> dirs{{fs::path(root), std::string()}};  // a directory and its served path
+    std::size_t seen = 0;
+    while (!dirs.empty()) {
+        const auto [at, served_at] = std::move(dirs.front());
+        dirs.pop_front();
+        fs::directory_iterator it(at, ec), end;
+        if (ec) {
+            if (out.unread.empty()) out.unread = shown(served_at.empty() ? "/" : served_at);
+            ec.clear();
+            continue;
+        }
+        for (; it != end; it.increment(ec)) {
+            if (++seen > PhpScan::kScanEntries) {
+                out.capped = true;
+                out.found = first;
+                return out;
+            }
+            const std::string n = it->path().filename().string();
+            if (for_static && !n.empty() && n[0] == '.') continue;  // a dot name static answers 404, below it too
+            const std::string served = served_at + "/" + n;
+            std::error_code e2;
+            const bool link = it->is_symlink(e2);
+            if (it->is_directory(e2)) {  // a link's target
+                if (!link) dirs.emplace_back(it->path(), served);
+                else if (out.link.empty()) out.link = shown(served);
+                continue;
+            }
+            if (!php_name(n) || !it->is_regular_file(e2)) continue;
+            if (!for_static || config_name(n)) {  // breadth first: the shallowest configuration file
+                out.found = shown(served);
+                return out;
+            }
+            if (first.empty()) first = shown(served);
+        }
+        if (ec) {  // a directory that stopped answering midway
+            if (out.unread.empty()) out.unread = shown(served_at.empty() ? "/" : served_at);
+            ec.clear();
+        }
+    }
+    out.found = first;
     return out;
 }
 
@@ -525,15 +606,32 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
             // reads what it serves.
             if (cur && php_app(cur->app) && body["app"].str() == "static") {
                 const std::string root = body["root"].is_string() ? std::string(body["root"].str()) : cur->root;
-                line += ": static runs no PHP, so every PHP file under " + root + " is served to anyone as its source, with the passwords and keys in it" +
-                        (ctx.php_file_served.empty() ? std::string(" (none is there now; any put there later is served so)")
-                                                     : " (" + ctx.php_file_served + " among them)");
+                // What the walk saw (the alpha.132 report, F1): a file named, or how far it looked; "none" only after a
+                // whole walk. A directory the server cannot read, static cannot serve either.
+                const PhpScan& scan = ctx.root_scan;
+                const std::string seen = !scan.found.empty() ? scan.found + " among them"
+                                         : scan.capped ? "none in the first " + std::to_string(PhpScan::kScanEntries) + " entries, which is as far as the check reads"
+                                         : !scan.link.empty() ? "none outside " + scan.link + ", a link to a directory, which the check does not follow and static does"
+                                                              : std::string("none is there now; any put there later is served so");
+                line += ": static runs no PHP, so every PHP file under " + root + " is served to anyone as its source, with the passwords and keys in it (" + seen +
+                        "), and so is every other file the " + cur->app + " preset refuses there (its logs, backups, databases and the like)";
             }
             out.push_back(std::move(line));
         }
         if (update && changed("root", cur ? cur->root : "")) out.push_back("serves, or runs, files from another directory: " + std::string(body["root"].str()));
         if (update && changed("served_dir", cur ? cur->served_dir : "")) out.push_back("serves, or runs, files from another directory of the project: " + std::string(body["served_dir"].str()));
-        if (create && ctx.root_runs_files) out.push_back("the directory " + std::string(body.get("root")) + " already holds PHP files, which the site would run as soon as it exists");
+        if (create) {  // the scan is there for a PHP preset only; one that could not see everything waits too (F1)
+            const PhpScan& scan = ctx.root_scan;
+            const std::string dir = "the directory " + std::string(body.get("root"));
+            if (!scan.found.empty()) out.push_back(dir + " already holds PHP files, which the site would run as soon as it exists (" + scan.found + " among them)");
+            else if (scan.capped)
+                out.push_back(dir + " may hold PHP files, which the site would run as soon as it exists: it holds more than " + std::to_string(PhpScan::kScanEntries) +
+                              " entries, and the check reads only that many");
+            else if (!scan.link.empty())
+                out.push_back(dir + " may hold PHP files, which the site would run as soon as it exists: " + scan.link + " is a link to a directory, which the check does not follow");
+            else if (!scan.unread.empty())
+                out.push_back(dir + " may hold PHP files, which the site would run as soon as it exists: the server cannot read " + scan.unread + ", so the check could not look inside");
+        }
         if (body["rules"].is_object()) {
             const json::Value& r = ctx.rules_after ? *ctx.rules_after : body["rules"];
             const json::Value& before = cur ? cur->rules : json::Value();
@@ -575,6 +673,8 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
             if (!had) out.push_back("redirects " + std::string(rule.get("from")) + " to another host: " + to);
         }
     }
+    // One line each, wherever shown: a reason carries names from the request and from the site's tree (F2).
+    for (auto& line : out) line = escape_line(line);
     return out;
 }
 

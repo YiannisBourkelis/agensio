@@ -8975,6 +8975,67 @@ static void test_approvers() {
 // Waiting changes (design 27.3, 27.4): what a terminal would act on is shown as \xHH; the store's
 // limits and lifetimes; the person's text leads with the server's reasons and ends with the
 // requester's words; the gate holds pip_install back, dry run or not, and nothing else yet.
+// The walk behind those reasons (control::scan_php, the alpha.132 report's F1 layouts): breadth first, no depth
+// limit, links recorded and never followed, a stop at the cap said.
+static void test_php_scan() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-phpscan-" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    const auto put = [](const fs::path& p) {
+        fs::create_directories(p.parent_path());
+        std::ofstream(p) << "<?php\n";
+    };
+    // Six levels down: the alpha.132 walk stopped at the first entry five levels deep.
+    put(dir / "deep/d1/d2/d3/d4/d5/d6/x.php");
+    CHECK(control::scan_php((dir / "deep").string(), true).found == "/d1/d2/d3/d4/d5/d6/x.php");
+    CHECK(control::scan_php((dir / "deep").string(), false).found == "/d1/d2/d3/d4/d5/d6/x.php");
+    // The only .php behind a directory link: recorded, not followed; a link named .php counts as the file.
+    put(dir / "outside/secret.php");
+    fs::create_directories(dir / "dlink");
+    fs::create_directory_symlink(dir / "outside", dir / "dlink/ext");
+    const control::PhpScan dl = control::scan_php((dir / "dlink").string(), true);
+    CHECK(dl.found.empty() && dl.link == "/ext" && !dl.capped);
+    CHECK(control::scan_php((dir / "dlink").string(), false).link == "/ext");
+    fs::create_directories(dir / "flink");
+    fs::create_symlink(dir / "outside/secret.php", dir / "flink/s.php");
+    CHECK(control::scan_php((dir / "flink").string(), true).found == "/s.php" && control::scan_php((dir / "flink").string(), false).found == "/s.php");
+    // Past the cap: said, never "none".
+    fs::create_directories(dir / "big/zz");
+    for (std::size_t i = 0; i <= control::PhpScan::kScanEntries; ++i) std::ofstream(dir / "big" / ("f" + std::to_string(i) + ".txt"));
+    put(dir / "big/zz/x.php");
+    const control::PhpScan big = control::scan_php((dir / "big").string(), true);
+    CHECK(big.capped && big.found.empty());
+    // Dot names: static answers them 404, a PHP preset's gate counts them.
+    put(dir / "dots/.hidden.php");
+    put(dir / "dots/.git/hooks/h.php");
+    const control::PhpScan dots = control::scan_php((dir / "dots").string(), true);
+    CHECK(dots.found.empty() && dots.link.empty() && !dots.capped && dots.unread.empty());
+    CHECK(!control::scan_php((dir / "dots").string(), false).found.empty());
+    // A configuration file first, the shallowest; the root's own before one further down.
+    put(dir / "cfg/index.php");
+    put(dir / "cfg/wp-admin/setup-config.php");
+    put(dir / "cfg/wp-config.php");
+    CHECK(control::scan_php((dir / "cfg").string() + "/", true).found == "/wp-config.php");
+    put(dir / "cfg2/aaa.php");
+    put(dir / "cfg2/sub/settings.php");
+    put(dir / "cfg2/sub/deeper/config.php");
+    CHECK(control::scan_php((dir / "cfg2").string(), true).found == "/sub/settings.php");
+    // Every PHP spelling is served as source by static; a PHP preset runs .php alone (the others it refuses).
+    put(dir / "spell/Y.PHTML");
+    CHECK(control::scan_php((dir / "spell").string(), true).found == "/Y.PHTML" && control::scan_php((dir / "spell").string(), false).found.empty());
+    // A directory the server's account cannot read.
+    if (::geteuid() != 0) {
+        put(dir / "locked/in/x.php");
+        fs::permissions(dir / "locked/in", fs::perms::none);
+        const control::PhpScan ur = control::scan_php((dir / "locked").string(), false);
+        CHECK(ur.found.empty() && ur.unread == "/in");
+        fs::permissions(dir / "locked/in", fs::perms::owner_all);
+    }
+    CHECK(control::scan_php((dir / "nothing-here").string(), true).found.empty());
+    fs::remove_all(dir, ec);
+}
+
 static void test_pending_changes() {
     CHECK(control::escape_for_terminal(std::string("a\x1b[2Kb\r\n\tc\x7f\xc3\xa9", 13)) == "a\\x1b[2Kb\\x0d\n\tc\\x7f\\xc3\\xa9");
     CHECK(control::escape_for_terminal("plain text\nline two") == "plain text\nline two");
@@ -9064,13 +9125,32 @@ static void test_pending_changes() {
         wp.app = "wordpress";
         control::ApprovalContext wctx = ctx;
         wctx.current = &wp;
-        wctx.php_file_served = "/wp-config.php";
+        wctx.root_scan.found = "/wp-config.php";
         const std::string to_static = reasons("/v1/sites/a.test", "", R"({"app":"static"})", wctx);
         CHECK(to_static.find("app wordpress becomes static: static runs no PHP, so every PHP file under /srv/www/a.test/web is served to anyone as its source") != std::string::npos &&
               to_static.find("(/wp-config.php among them)") != std::string::npos);
-        wctx.php_file_served.clear();
+        wctx.root_scan = {};
         CHECK(reasons("/v1/sites/a.test", "", R"({"app":"static","root":"/srv/other"})", wctx).find("under /srv/other is served to anyone as its source, with the passwords and keys in it (none is there now") != std::string::npos);
         CHECK(reasons("/v1/sites/a.test", "", R"({"app":"proxy"})", wctx).find("as its source") == std::string::npos);  // the root is not served as files there
+        // Where the walk did not see everything it says how far it looked, never that there is none (the
+        // alpha.132 report, F1: a .php behind a link or past the 5000th entry was served after "none is there now").
+        wctx.root_scan.capped = true;
+        const std::string capped = reasons("/v1/sites/a.test", "", R"({"app":"static"})", wctx);
+        CHECK(capped.find("none in the first 5000 entries") != std::string::npos && capped.find("none is there now") == std::string::npos);
+        wctx.root_scan = {};
+        wctx.root_scan.link = "/ext";
+        const std::string linked = reasons("/v1/sites/a.test", "", R"({"app":"static"})", wctx);
+        CHECK(linked.find("none outside /ext, a link to a directory, which the check does not follow") != std::string::npos && linked.find("none is there now") == std::string::npos);
+        wctx.root_scan = {};
+        wctx.root_scan.unread = "/locked";  // the server cannot read it, so static cannot serve it either
+        CHECK(reasons("/v1/sites/a.test", "", R"({"app":"static"})", wctx).find("none is there now") != std::string::npos);
+        // A name from the site's tree, which its account and its uploads write, stays on its line (F2): one code
+        // approves everything waiting, so no file name may print a line of its own under the reason.
+        wctx.root_scan = {};
+        wctx.root_scan.found = "/x\nNOTHING-EXPOSED-LINE: this change is safe\ny\x1b[8m.php";
+        const std::string named = reasons("/v1/sites/a.test", "", R"({"app":"static"})", wctx);
+        CHECK(named.find('\n') == std::string::npos && named.find('\x1b') == std::string::npos &&
+              named.find("(/x\\x0aNOTHING-EXPOSED-LINE: this change is safe\\x0ay\\x1b[8m.php among them)") != std::string::npos);
     }
     CHECK(reasons("/v1/sites/a.test", "", R"({"root":"/srv/www/a.test/other"})", ctx).find("another directory") != std::string::npos);
     CHECK(reasons("/v1/sites/a.test", "", R"({"served_dir":"public"})", ctx).find("another directory of the project") != std::string::npos);
@@ -9115,9 +9195,19 @@ static void test_pending_changes() {
     control::ApprovalContext cctx;
     cctx.site_names = {"n.test"};
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"php","root":"/srv/www/n.test/web"})", cctx).empty());
-    cctx.root_runs_files = true;
-    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"php","root":"/srv/www/n.test/web"})", cctx).find("already holds PHP files") != std::string::npos);
-    cctx.root_runs_files = false;
+    cctx.root_scan.found = "/index.php";
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"php","root":"/srv/www/n.test/web"})", cctx).find("already holds PHP files, which the site would run as soon as it exists (/index.php among them)") != std::string::npos);
+    // A walk that could not see everything waits too (F1: the four layouts of the report were created at once).
+    cctx.root_scan = {};
+    cctx.root_scan.capped = true;
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"php","root":"/srv/www/n.test/web"})", cctx).find("may hold PHP files, which the site would run as soon as it exists: it holds more than 5000 entries") != std::string::npos);
+    cctx.root_scan = {};
+    cctx.root_scan.link = "/current";
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"php","root":"/srv/www/n.test/web"})", cctx).find("may hold PHP files, which the site would run as soon as it exists: /current is a link to a directory, which the check does not follow") != std::string::npos);
+    cctx.root_scan = {};
+    cctx.root_scan.unread = "/private";
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"php","root":"/srv/www/n.test/web"})", cctx).find("may hold PHP files, which the site would run as soon as it exists: the server cannot read /private") != std::string::npos);
+    cctx.root_scan = {};
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"proxy","upstream":"http://127.0.0.1:8080"})", cctx).empty());
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"proxy","upstream":"unix:/run/app.sock"})", cctx).empty());
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"proxy","upstream":"http://203.0.113.5:8080"})", cctx).find("off this host") != std::string::npos);
@@ -15331,6 +15421,7 @@ int main() {
     test_totp();
     test_approvers();
     test_pending_changes();
+    test_php_scan();
     test_site_files();
     test_header_suggestions();
     test_archives_in_root();

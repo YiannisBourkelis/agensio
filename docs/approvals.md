@@ -22,7 +22,7 @@ after it was queued.
 | reading a credential or database file of a site (`site_file_read` of `.env`, `wp-config.php`, `*.key`, `*.pem`, `.git/`, a SQLite file): its content would leave the server for whoever asked; once approved, it is handed out once (`approvals_list` with the id) | 0.1.0-alpha.120 |
 | `site_install` from any source, and `site_copy`: files the site then serves or runs; the preview names the source, the target and what the install creates | 0.1.0-alpha.120 |
 | the site's environment: `site_env_set` (the preview names the variables, never a value) and `site_env` with `reveal` (the values are handed out once, by id) | 0.1.0-alpha.120 |
-| a `site_update` that makes other files run (`app`, `root`, `served_dir`, `rules.entry_points`, `rules.front_controller`), sends visitors elsewhere (`upstream`, a redirect to a host that is none of the site's names) or removes or widens a password or address rule (a rule gone, an allow list or `skip_for` grown, `open`, report mode, the password over plain HTTP); the preview is the managed file's diff; a PHP site's `app` changed to `static` says that static serves every `.php` file as its source and names one it would expose (0.1.0-alpha.132). A `site_create` whose root already holds PHP files, whose upstream is off this host, or with a redirect to another host | 0.1.0-alpha.120 |
+| a `site_update` that makes other files run (`app`, `root`, `served_dir`, `rules.entry_points`, `rules.front_controller`), sends visitors elsewhere (`upstream`, a redirect to a host that is none of the site's names) or removes or widens a password or address rule (a rule gone, an allow list or `skip_for` grown, `open`, report mode, the password over plain HTTP); the preview is the managed file's diff; a PHP site's `app` changed to `static` says that static serves every `.php` file as its source and names one it would expose (0.1.0-alpha.132), or says how far it looked: the first 5000 entries, a link to a directory it does not follow (0.1.0-alpha.133). A `site_create` of a PHP preset whose root already holds PHP files, or may (a root of more than 5000 entries, a link to a directory, a directory the server cannot read: 0.1.0-alpha.133), whose upstream is off this host, or with a redirect to another host | 0.1.0-alpha.120 |
 | `site_auth_user_set`: who may log in; a generated password is handed out once, by id | 0.1.0-alpha.120 |
 | fewer records of a site (`site_update` or `site_create`): an `access_log_exclude_paths` entry added or widened (requests there leave no access-log line and no client address in the error log) and `access_log_keep_days` set or lowered (the rotated lines past it are deleted); removing a path or raising the days does not wait (docs/configuration.md 8b) | 0.1.0-alpha.128 |
 | `trash_delete`, `trash_expire`: nothing brings the files back | 0.1.0-alpha.120 |
@@ -113,7 +113,9 @@ code, and an agent that asks for one is misled.
   change on its own: it cannot approve it, through MCP, `agensio ctl` or the socket directly.
 - Read what you approve. A change you approve because its description looked harmless runs; the
   description is the server's, never the agent's, and every byte a terminal could act on (escape
-  sequences that move the cursor or hide a line) is shown as `\xHH`.
+  sequences that move the cursor or hide a line) is shown as `\xHH`; in a reason, a newline too, so a
+  name from the site's files (a file the walk below names) never prints a line of its own
+  (0.1.0-alpha.133).
 - The agent must not run as root, which could read the secrets. Give it a plain account in the
   control plane's admins group (`docs/mcp.md`).
 - Five wrong codes within ten minutes stop approvals for ten minutes: guessing six digits gets nowhere,

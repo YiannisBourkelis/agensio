@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.0-alpha.133
+
+- **Fix (security): an approval said "none is there now" where its walk had not looked, and a PHP site was
+  created over PHP files without approval** (the alpha.132 report, F1). The walk behind both reasons stopped
+  for good at its first entry five levels down, stopped without a word at its 5000th entry, and skipped links:
+  four layouts (the only `.php` behind a directory link, a `.php` that is a link, a `.php` six levels down, one
+  past the 5000th entry) gave "none is there now" while static then served that file as source, and the same
+  walk let a `php` site be created over each at once. One walk now (`control::scan_php`): breadth first, no
+  depth limit, still 5000 entries; a link named as a PHP file counts as one, a link to a directory is named and
+  not followed. A `static` change that found none says how far it looked ("none in the first 5000 entries",
+  "none outside /ext, a link to a directory, which the check does not follow"); a `site_create` of a PHP preset
+  whose root the walk could not read whole waits, naming why. Static counts every PHP spelling it serves as
+  source (`.phtml`, `.php5`, `.phar`). The `static` reason also says the preset's other refusals go (its logs,
+  backups and databases), and a `site_create`'s names the file found.
+- **Fix (security): a file name went into an approval's reason unescaped** (F2). A file under the site's root
+  named with a newline printed a line of its own under the reason in `ctl approve --list`, and escape bytes went
+  raw into the JSON every client shows (`approvals_ask`'s dialog included). Every reason is now one line where it
+  is made (`control::escape_line`: a newline and every byte outside printable ASCII as `\xHH`), the names a
+  request gives included.
+- **Fix: `ctl site-update` could not empty `served_dir`** (S1), which a change of `app` away from `php` needs:
+  the refusal said to send `served_dir: ""` and `--served-dir ""` is a flag without its value. `--no-served-dir`,
+  `--no-env-file`, `--no-project` and `--no-entry`; each refusal names its flag, and the project and entry
+  refusals now say how to empty them. The MCP schema's patterns for the four fields accept the `""` their
+  descriptions offer.
+- **Fix: `site_create` on the server's addresses warned "requests to  with a Host ..." twice** (S3): the warning
+  read the spec's empty listen fields. It names each address the site listens on, once.
+
 ## 0.1.0-alpha.132 (2026-11-06)
 
 - **A PHP site's `app` changed to `static` says what it exposes** (the alpha.131 addendum, N1, the owner's

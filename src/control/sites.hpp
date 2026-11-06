@@ -186,6 +186,9 @@ json::Value admin_rules(const SiteSpec& spec);
 // IPv6 listener, a single IPv6 address. site_create and site_update answer them as warnings,
 // so the agent relays them before the user confirms (alpha.52 report).
 std::vector<AccessNotice> access_notices_for(const SiteSpec& spec, const Config& cfg);
+// The addresses a site of this spec listens on (docs/configuration.md 1c): its own, else the server's
+// listen_tls / listen_plain; a TLS site's plain ones into `plain`; `by_default` when they are the server's.
+std::vector<std::string> spec_listen(const SiteSpec& spec, const Config& cfg, std::vector<std::string>& plain, bool& by_default);
 // Reads the spec back from a managed file; false for a hand-written file.
 bool read_managed(const std::filesystem::path& file, SiteSpec& out);
 

@@ -372,7 +372,9 @@ unpacks into it, health reads its `composer.json` for the PHP the application ne
 their own directory; one that exists must stay inside the project once its symlinks are
 resolved. A served directory that does not exist yet loads (the install brings it) and answers
 404, and health says `served_dir_missing` until it is there. Managed: `served_dir` of
-`site_create` and `site_update` (`agensio ctl --served-dir DIR`, `""` to serve the root itself);
+`site_create` and `site_update` (`agensio ctl --served-dir DIR`; `""`, `--no-served-dir`, serves
+the root itself, and a change of `app` away from `php` sends it, as `--no-env-file`,
+`--no-project` and `--no-entry` empty the other presets' fields: 0.1.0-alpha.133);
 `site_show` gives both directories (`served_dir`, `project_directory`). The cookbook recipe:
 [A PHP application with a public/ directory](examples/php.md#a-php-application-with-a-public-directory).
 
