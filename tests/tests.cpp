@@ -9064,6 +9064,10 @@ static void test_php_scan() {
 static void test_pending_changes() {
     CHECK(control::escape_for_terminal(std::string("a\x1b[2Kb\r\n\tc\x7f\xc3\xa9", 13)) == "a\\x1b[2Kb\\x0d\n\tc\\x7f\\xc3\\xa9");
     CHECK(control::escape_for_terminal("plain text\nline two") == "plain text\nline two");
+    // A line's backslash is escaped too, so a name spelled "\x0a" never prints as one holding a newline (the
+    // alpha.133 report, S3).
+    CHECK(control::escape_line("/a\\x0aFAKE.php") == "/a\\x5cx0aFAKE.php" && control::escape_line("/a\nFAKE.php") == "/a\\x0aFAKE.php" &&
+          control::escape_line("/a\tb c.php") == "/a\\x09b c.php");
     if (totp::available()) {
         const std::string a = control::new_approval_id(), b = control::new_approval_id();
         CHECK(a.size() == 12 && a.find_first_not_of("0123456789abcdef") == std::string::npos && a != b);
@@ -9167,8 +9171,10 @@ static void test_pending_changes() {
         const std::string linked = reasons("/v1/sites/a.test", "", R"({"app":"static"})", wctx);
         CHECK(linked.find("none outside /ext, a link to a directory, which the check does not follow") != std::string::npos && linked.find("none is there now") == std::string::npos);
         wctx.root_scan = {};
-        wctx.root_scan.unread = "/locked";  // the server cannot read it, so static cannot serve it either
-        CHECK(reasons("/v1/sites/a.test", "", R"({"app":"static"})", wctx).find("none is there now") != std::string::npos);
+        wctx.root_scan.unread = "/locked";  // not looked inside: never "none is there now" (the alpha.133 report, S1)
+        const std::string unread = reasons("/v1/sites/a.test", "", R"({"app":"static"})", wctx);
+        CHECK(unread.find("(none outside /locked, which the server cannot read and so cannot serve either)") != std::string::npos &&
+              unread.find("none is there now") == std::string::npos);
         // A name from the site's tree, which its account and its uploads write, stays on its line (F2): one code
         // approves everything waiting, so no file name may print a line of its own under the reason.
         wctx.root_scan = {};
@@ -9213,7 +9219,24 @@ static void test_pending_changes() {
         pctx.current = &px;
         CHECK(reasons("/v1/sites/a.test", "", R"({"app":"static"})", pctx) == "changes what the site runs: app proxy becomes static | ");
     }
-    CHECK(reasons("/v1/sites/a.test", "", R"({"served_dir":"public"})", ctx).find("another directory of the project") != std::string::npos);
+    {
+        // The directory a php site serves, named whole on both sides; emptied, the project directory itself (the
+        // alpha.133 report, S2: nothing followed the colon).
+        control::SiteSpec php = cur;
+        php.app = "php";
+        php.root = "/srv/www/p";
+        php.served_dir = "public";
+        control::ApprovalContext sctx = ctx;
+        sctx.current = &php;
+        CHECK(reasons("/v1/sites/a.test", "", R"({"served_dir":""})", sctx) ==
+              "serves, or runs, files from another directory of the project: the project directory /srv/www/p itself, in place of /srv/www/p/public | ");
+        CHECK(reasons("/v1/sites/a.test", "", R"({"served_dir":"web"})", sctx) ==
+              "serves, or runs, files from another directory of the project: /srv/www/p/web, in place of /srv/www/p/public | ");
+        php.served_dir.clear();
+        CHECK(reasons("/v1/sites/a.test", "", R"({"served_dir":"public"})", sctx) ==
+              "serves, or runs, files from another directory of the project: /srv/www/p/public, in place of the project directory /srv/www/p itself | ");
+        CHECK(reasons("/v1/sites/a.test", "", R"({"served_dir":"public","root":"/srv/www/q"})", sctx).find(": /srv/www/q/public, in place of the project directory /srv/www/p itself") != std::string::npos);
+    }
     CHECK(reasons("/v1/sites/a.test", "", R"({"upstream":"http://127.0.0.1:3000"})", ctx).empty());
     CHECK(reasons("/v1/sites/a.test", "", R"({"upstream":"http://127.0.0.1:3001"})", ctx).find("another application: http://127.0.0.1:3001 | ") != std::string::npos);
     CHECK(reasons("/v1/sites/a.test", "", R"({"upstream":"http://10.0.0.9:3000"})", ctx).find(", off this host") != std::string::npos);

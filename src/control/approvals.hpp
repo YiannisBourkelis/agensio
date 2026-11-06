@@ -20,8 +20,9 @@ namespace agensio::control {
 // and tab (a carriage return included), so no content of a preview can move the cursor, clear a
 // line or change colours in front of the person reading it.
 std::string escape_for_terminal(std::string_view text);
-// The same with newline and tab written as \x0a and \x09 too: a line made of text from outside (a file
-// name from a site's tree, a path the request gives) stays one line wherever it is shown.
+// The same with newline, tab and the backslash written as \x0a, \x09 and \x5c too: a line made of text from
+// outside (a file name from a site's tree, a path the request gives) stays one line wherever it is shown, and
+// two names never print alike.
 std::string escape_line(std::string_view text);
 
 // What a walk of a site's root finds of PHP files, by their served path ("/wp-config.php"): breadth first,

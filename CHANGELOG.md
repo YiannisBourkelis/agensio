@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.0-alpha.134
+
+- **Fix: a PHP site made static over a directory the server cannot read said "none is there now"** (the
+  alpha.133 report, S1). The walk had not looked inside that directory, and a PHP file there is served once
+  its mode changes. The reason says "none outside /locked, which the server cannot read and so cannot serve
+  either", as it already did for a link and for the 5000-entry limit.
+- **Fix: emptying `served_dir` gave a reason with nothing after its colon** (S2): "serves, or runs, files from
+  another directory of the project: ". It names the directory served before and after: "the project directory
+  /srv/www/p itself, in place of /srv/www/p/public"; a change between two directories names both whole
+  (`/srv/www/p/web`, where it said only `web`).
+- **Fix: a file named with the four characters `\x0a` printed in a reason the same as one with a newline in its
+  name** (S3). A reason's backslash is escaped too (`\x5c`), so every name prints as itself. Previews keep their
+  backslashes, which PHP's namespaces are full of; a byte a terminal acts on is still never shown raw there.
+
 ## 0.1.0-alpha.133 (2026-11-06)
 
 - **Fix (security): an approval said "none is there now" where its walk had not looked, and a PHP site was

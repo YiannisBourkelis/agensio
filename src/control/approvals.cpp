@@ -38,7 +38,7 @@ std::string escape_line(std::string_view text) {
     out.reserve(text.size());
     for (const char ch : text) {
         const auto c = static_cast<unsigned char>(ch);
-        if (c >= 0x20 && c < 0x7f) {
+        if (c >= 0x20 && c < 0x7f && c != '\\') {  // the backslash too: a name spelled "\x0a" stays apart from one with a newline
             out.push_back(ch);
             continue;
         }
@@ -625,12 +625,13 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
             if (cur && php_app(cur->app) && body["app"].str() == "static") {
                 const std::string root = body["root"].is_string() ? std::string(body["root"].str()) : cur->root;
                 // What the walk saw (the alpha.132 report, F1): a file named, or how far it looked; "none" only after a
-                // whole walk. A directory the server cannot read, static cannot serve either.
+                // whole walk, a directory the server cannot read included (the alpha.133 report, S1).
                 const PhpScan& scan = ctx.root_scan;
                 const std::string seen = !scan.found.empty() ? scan.found + " among them"
                                          : scan.capped ? "none in the first " + std::to_string(PhpScan::kScanEntries) + " entries, which is as far as the check reads"
                                          : !scan.link.empty() ? "none outside " + scan.link + ", a link to a directory, which the check does not follow and static does"
-                                                              : std::string("none is there now; any put there later is served so");
+                                         : !scan.unread.empty() ? "none outside " + scan.unread + ", which the server cannot read and so cannot serve either"
+                                                                : std::string("none is there now; any put there later is served so");
                 line += ": static runs no PHP, so every PHP file under " + root + " is served to anyone as its source, with the passwords and keys in it (" + seen +
                         "), and so is every other file the " + cur->app + " preset refuses there (its logs, backups, databases and the like)";
             } else if (cur && body["app"].str() == "static" && !preset_refused_paths(cur->app).empty()) {
@@ -652,7 +653,16 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
                 line += ": it holds PHP files, which a static site serves to anyone as their source, with the passwords and keys in them (" + ctx.root_scan.found + " among them)";
             out.push_back(std::move(line));
         }
-        if (update && changed("served_dir", cur ? cur->served_dir : "")) out.push_back("serves, or runs, files from another directory of the project: " + std::string(body["served_dir"].str()));
+        if (update && changed("served_dir", cur ? cur->served_dir : "")) {
+            // Both directories named whole, "" being the project directory itself (the alpha.133 report, S2).
+            const std::string was_root = cur ? cur->root : std::string();
+            const std::string root = body["root"].is_string() ? std::string(body["root"].str()) : was_root;
+            const auto served = [](const std::string& project, const std::string& dir) {
+                return dir.empty() ? "the project directory " + project + " itself" : project + "/" + dir;
+            };
+            out.push_back("serves, or runs, files from another directory of the project: " + served(root, std::string(body["served_dir"].str())) + ", in place of " +
+                          served(was_root, cur ? cur->served_dir : std::string()));
+        }
         if (create && body.get("app") == "static") {
             // Over PHP files (the alpha.132 report, F3a, the owner's decision): static serves them as their source. A
             // walk that found none adds nothing: a large static tree or a link in it is no PHP site.

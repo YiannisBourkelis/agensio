@@ -2522,6 +2522,10 @@ PYT
   # served_dir: "", and --served-dir "" is a flag without its value); dry runs, so the site stays as it is.
   check "served_dir: a change of app without emptying it is refused naming ctl --no-served-dir; with --no-served-dir the dry run passes; the file keeps it" "refused yes 0 yes" \
     "$(ctl site-update served.test --app static --dry-run --yes --reason s1 --socket $CS > bench/tmp/s1.out 2>&1 && echo -n "passed " || echo -n "refused "; grep -q 'ctl --no-served-dir' bench/tmp/s1.out && echo -n "yes " || echo -n "no "; ctl site-update served.test --app static --no-served-dir --dry-run --yes --reason s1 --socket $CS > /dev/null 2>&1; echo -n "$? "; grep -q '^served_dir = "public"' bench/tmp/sites.d/served.test.toml && echo yes || echo no)"
+  # Emptied, the reason names the project directory now served in place of public/ (the alpha.133 report, S2:
+  # nothing followed the colon).
+  check "served_dir emptied: the dry run's needs_approval names the project directory itself in place of its public/; nothing written" "200 yes yes" \
+    "$(cpost /v1/sites/served.test '{"app":"static","served_dir":"","dry_run":true,"confirm":true,"reason":"s2"}') $(python3 -c 'import json,sys; d=json.load(open("bench/tmp/ctl-reply.json")); n=" ".join(d.get("needs_approval", [])); p=sys.argv[1] + "/bench/tmp/served"; print("yes" if "files from another directory of the project: the project directory " + p + " itself, in place of " + p + "/public" in n else n or d)' "$ROOT") $(grep -q '^served_dir = "public"' bench/tmp/sites.d/served.test.toml && echo yes || echo no)"
   cpost /v1/sites/served.test/delete '{"confirm":true,"reason":"served"}' > /dev/null
   cpost /v1/sites/later.test/delete '{"confirm":true,"reason":"served"}' > /dev/null
   # rules.private on a .php file holds for its path-info form too (2026-10-22): before, /install.php/x
