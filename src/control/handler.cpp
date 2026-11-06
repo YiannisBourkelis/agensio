@@ -97,6 +97,7 @@ constexpr std::size_t kBodyMax = 256 * 1024;
 const SiteConfig* env_site(const Config& cfg, std::string_view name, int& status, json::Value& refusal);
 std::string shell_word(const std::string& a);
 bool root_holds_scripts(std::string_view app, const std::string& root);
+std::string php_file_under(const std::string& root);
 
 struct BodyRead {
     std::string data;
@@ -809,6 +810,8 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
             const SiteConfig* sc = control::find_site(backend_->running(), name);
             if (control::read_managed(control::site_file(backend_->running(), sc ? std::string_view(sc->server_names.front()) : name), current)) {
                 actx.current = &current;
+                if (action.empty() && body.get("app") == "static" && php_app(current.app))  // what static would serve as source (N1)
+                    actx.php_file_served = php_file_under(body["root"].is_string() ? std::string(body["root"].str()) : current.root);
                 actx.site_names.push_back(current.domain);
                 for (const auto& a : current.aliases) actx.site_names.push_back(a);
                 if (action.empty() && body["rules"].is_object()) {  // the rules as the spec would store them, for the comparison
@@ -2228,6 +2231,44 @@ bool root_holds_scripts(std::string_view app, const std::string& root) {
         if (n.size() > 4 && n.ends_with(".php")) return true;
     }
     return false;
+}
+
+// A PHP file under `root` as served ("/wp-config.php"), "" for none: the shallowest name holding "config" or
+// "settings" (what a person approving recognises: wp-config.php, settings.php, config/database.php), else
+// the first found. Bounded as root_holds_scripts's walk: 5000 entries, four levels, no link followed; dot
+// names skipped, which the static site answers 404.
+std::string php_file_under(const std::string& root) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (root.empty() || !fs::is_directory(fs::path(root), ec)) return {};
+    std::string base = root;
+    while (base.size() > 1 && base.back() == '/') base.pop_back();
+    std::string first, config;
+    int config_depth = 0;
+    std::size_t seen = 0;
+    fs::recursive_directory_iterator it(fs::path(root), fs::directory_options::skip_permission_denied, ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        if (++seen > 5000 || it.depth() > 4) break;
+        std::string n = it->path().filename().string();
+        if (it->is_symlink(ec) || (!n.empty() && n[0] == '.')) {
+            it.disable_recursion_pending();
+            continue;
+        }
+        if (!it->is_regular_file(ec)) continue;
+        for (char& ch : n) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (n.size() <= 4 || !n.ends_with(".php")) continue;
+        const std::string path = it->path().string();
+        const std::string served = path.size() > base.size() && path.compare(0, base.size(), base) == 0 ? path.substr(base.size()) : "/" + n;
+        if (n.find("config") != std::string::npos || n.find("settings") != std::string::npos) {
+            if (it.depth() == 0) return served;  // the root's own: wp-config.php before wp-admin/setup-config.php
+            if (config.empty() || it.depth() < config_depth) {
+                config = served;
+                config_depth = it.depth();
+            }
+        }
+        if (first.empty()) first = served;
+    }
+    return config.empty() ? first : config;
 }
 }  // namespace
 

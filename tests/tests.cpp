@@ -9057,6 +9057,21 @@ static void test_pending_changes() {
     CHECK(reasons("/v1/sites/a.test", "", R"({"hsts":"1y","response_headers":[]})", ctx).empty());
     CHECK(reasons("/v1/sites/a.test", "", R"({"app":"static"})", ctx).empty());
     CHECK(reasons("/v1/sites/a.test", "", R"({"app":"php"})", ctx).find("app static becomes php") != std::string::npos);
+    {
+        // A PHP site made static (the alpha.131 addendum, N1, the owner's decision: no request-path refusal, the
+        // approval says what static serves): the warning with the file found, or that none is there now.
+        control::SiteSpec wp = cur;
+        wp.app = "wordpress";
+        control::ApprovalContext wctx = ctx;
+        wctx.current = &wp;
+        wctx.php_file_served = "/wp-config.php";
+        const std::string to_static = reasons("/v1/sites/a.test", "", R"({"app":"static"})", wctx);
+        CHECK(to_static.find("app wordpress becomes static: static runs no PHP, so every PHP file under /srv/www/a.test/web is served to anyone as its source") != std::string::npos &&
+              to_static.find("(/wp-config.php among them)") != std::string::npos);
+        wctx.php_file_served.clear();
+        CHECK(reasons("/v1/sites/a.test", "", R"({"app":"static","root":"/srv/other"})", wctx).find("under /srv/other is served to anyone as its source, with the passwords and keys in it (none is there now") != std::string::npos);
+        CHECK(reasons("/v1/sites/a.test", "", R"({"app":"proxy"})", wctx).find("as its source") == std::string::npos);  // the root is not served as files there
+    }
     CHECK(reasons("/v1/sites/a.test", "", R"({"root":"/srv/www/a.test/other"})", ctx).find("another directory") != std::string::npos);
     CHECK(reasons("/v1/sites/a.test", "", R"({"served_dir":"public"})", ctx).find("another directory of the project") != std::string::npos);
     CHECK(reasons("/v1/sites/a.test", "", R"({"upstream":"http://127.0.0.1:3000"})", ctx).empty());

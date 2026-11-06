@@ -519,7 +519,18 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
         const auto changed = [&](const char* key, const std::string& was) {
             return body[key].is_string() && (create || !cur || std::string(body[key].str()) != was);
         };
-        if (update && changed("app", cur ? cur->app : "")) out.push_back("changes what the site runs: app " + (cur ? cur->app : std::string("?")) + " becomes " + std::string(body["app"].str()));
+        if (update && changed("app", cur ? cur->app : "")) {
+            std::string line = "changes what the site runs: app " + (cur ? cur->app : std::string("?")) + " becomes " + std::string(body["app"].str());
+            // From PHP to static (N1): no request-path refusal stands in for this decision, so the person approving
+            // reads what it serves.
+            if (cur && php_app(cur->app) && body["app"].str() == "static") {
+                const std::string root = body["root"].is_string() ? std::string(body["root"].str()) : cur->root;
+                line += ": static runs no PHP, so every PHP file under " + root + " is served to anyone as its source, with the passwords and keys in it" +
+                        (ctx.php_file_served.empty() ? std::string(" (none is there now; any put there later is served so)")
+                                                     : " (" + ctx.php_file_served + " among them)");
+            }
+            out.push_back(std::move(line));
+        }
         if (update && changed("root", cur ? cur->root : "")) out.push_back("serves, or runs, files from another directory: " + std::string(body["root"].str()));
         if (update && changed("served_dir", cur ? cur->served_dir : "")) out.push_back("serves, or runs, files from another directory of the project: " + std::string(body["served_dir"].str()));
         if (create && ctx.root_runs_files) out.push_back("the directory " + std::string(body.get("root")) + " already holds PHP files, which the site would run as soon as it exists");

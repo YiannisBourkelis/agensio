@@ -93,6 +93,10 @@ struct ApprovalContext {
     const json::Value* rules_after = nullptr;
     std::vector<std::string> site_names;
     bool root_runs_files = false;
+    // A PHP site whose app becomes static (the alpha.131 addendum, N1, the owner's decision: the
+    // administrator's to decide, said plainly to the person approving): a PHP file under the root the static
+    // site would serve, as served (a configuration file first), which static answers with its source.
+    std::string php_file_served;
 };
 // Why a mutation waits for approval, in the server's words; empty when it does not. `action` is the
 // part after /v1/sites/NAME/. A dry run gets the same reasons: the handler runs it as it is and says

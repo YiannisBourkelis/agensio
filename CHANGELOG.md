@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0-alpha.132
+
+- **A PHP site's `app` changed to `static` says what it exposes** (the alpha.131 addendum, N1, the owner's
+  decision). A static site runs no PHP and serves a `.php` file as its source, as nginx, Apache without PHP and
+  Caddy do; keeping PHP sites off static is the administrator's work, so the request path gets no refusal and
+  no extra check. The change already waited for a person's approval like any `app` change. Its reason now says
+  that static serves every PHP file under the root to anyone as its source, and names one found there, a
+  configuration file first (`/wp-config.php`). The MCP texts tell the agent never to make that change unless
+  the user asks for exactly it, in those words.
+
 ## 0.1.0-alpha.131 (2026-11-06)
 
 - **Fix (security): the login jail missed `/index.php` with path info before a query login on `/`** (the
