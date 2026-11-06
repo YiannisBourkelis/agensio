@@ -49,11 +49,10 @@ std::string escape_line(std::string_view text) {
     return out;
 }
 
-PhpScan scan_php(const std::string& root, bool for_static) {
+std::string php_example(const std::string& root, bool for_static) {
     namespace fs = std::filesystem;
-    PhpScan out;
     std::error_code ec;
-    if (root.empty() || !fs::is_directory(fs::path(root), ec)) return out;
+    if (root.empty() || !fs::is_directory(fs::path(root), ec)) return "";
     const auto php_name = [for_static](std::string n) {
         for (char& ch : n) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         if (!for_static) return n.size() > 4 && n.ends_with(".php");
@@ -74,76 +73,32 @@ PhpScan scan_php(const std::string& root, bool for_static) {
         const auto [at, served_at] = std::move(dirs.front());
         dirs.pop_front();
         fs::directory_iterator it(at, ec), end;
-        if (ec) {
-            if (out.unread.empty()) out.unread = shown(served_at.empty() ? "/" : served_at);
-            ec.clear();
-            continue;
-        }
-        for (; it != end; it.increment(ec)) {
-            if (++seen > PhpScan::kScanEntries) {
-                out.capped = true;
-                out.found = first;
-                return out;
-            }
+        for (; !ec && it != end; it.increment(ec)) {  // a directory that cannot be read, or stops midway, is passed over
+            if (++seen > kPhpScanEntries) return first;
             const std::string n = it->path().filename().string();
             if (for_static && !n.empty() && n[0] == '.') continue;  // a dot name static answers 404, below it too
             const std::string served = served_at + "/" + n;
             std::error_code e2;
-            const bool link = it->is_symlink(e2);
-            if (it->is_directory(e2)) {  // a link's target
-                if (!link) dirs.emplace_back(it->path(), served);
-                else if (out.link.empty()) out.link = shown(served);
+            if (it->is_directory(e2)) {  // a link's target: not followed
+                if (!it->is_symlink(e2)) dirs.emplace_back(it->path(), served);
                 continue;
             }
             if (!php_name(n) || !it->is_regular_file(e2)) continue;
-            if (!for_static || config_name(n)) {  // breadth first: the shallowest configuration file
-                out.found = shown(served);
-                return out;
-            }
+            if (!for_static || config_name(n)) return shown(served);  // breadth first: the shallowest configuration file
             if (first.empty()) first = shown(served);
         }
-        if (ec) {  // a directory that stopped answering midway
-            if (out.unread.empty()) out.unread = shown(served_at.empty() ? "/" : served_at);
-            ec.clear();
-        }
+        ec.clear();
     }
-    out.found = first;
-    return out;
+    return first;
 }
 
-std::vector<std::string> preset_files_served(const SiteSpec& site, const std::string& root) {
+RootState root_state(const std::string& root) {
     namespace fs = std::filesystem;
-    // The preset's secrets before the rest of its refusals (the alpha.133 report, S4: a Redmine install's Gemfiles
-    // took the places of configuration.yml, its SMTP password, and secret_token.rb). A secret may be a file or a
-    // directory (/storage); a refused path ending in a slash is a directory.
-    struct Candidate {
-        std::string path;
-        bool dir, either;
-    };
-    std::vector<Candidate> candidates;
-    if (python_app(site.app) && !site.project.empty()) candidates.push_back({"/" + site.project + "/settings.py", false, false});  // its SECRET_KEY: the .py ending
-    for (auto& p : preset_secrets(site.app)) candidates.push_back({std::move(p), false, true});
-    for (const char* p : preset_refused_paths(site.app)) {
-        std::string path = p;
-        const bool dir = path.ends_with('/');
-        if (dir) path.pop_back();
-        candidates.push_back({std::move(path), dir, false});
-    }
-    std::string base = root;
-    while (base.size() > 1 && base.back() == '/') base.pop_back();
-    std::vector<std::string> out, named;
-    for (const auto& c : candidates) {
-        if (out.size() == 3 || base.empty()) break;
-        if (c.path.find("/.") != std::string::npos) continue;  // static answers a dot name 404
-        if (std::find(named.begin(), named.end(), c.path) != named.end()) continue;
-        std::error_code ec;
-        const fs::path at = fs::path(base + c.path);
-        const bool is_dir = fs::is_directory(at, ec);
-        if (!(c.either ? is_dir || fs::is_regular_file(at, ec) : c.dir ? is_dir : fs::is_regular_file(at, ec))) continue;
-        named.push_back(c.path);
-        out.push_back(is_dir ? c.path + "/" : c.path);
-    }
-    return out;
+    std::error_code ec;
+    if (root.empty() || !fs::is_directory(fs::path(root), ec)) return RootState::empty;
+    fs::directory_iterator it(fs::path(root), ec);
+    if (ec) return RootState::unreadable;
+    return it == fs::directory_iterator() ? RootState::empty : RootState::holds_files;
 }
 
 std::string new_approval_id() {
@@ -638,27 +593,18 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
         if (update && changed("app", cur ? cur->app : "")) {
             std::string line = "changes what the site runs: app " + (cur ? cur->app : std::string("?")) + " becomes " + std::string(body["app"].str());
             // From PHP to static (N1): no request-path refusal stands in for this decision, so the person approving
-            // reads what it serves.
+            // reads what it serves: in general, whatever the tree holds now or later, with one file as an example
+            // when the walk met one (2026-11-06: an account of the tree's contents missed a layout in each report).
             if (cur && php_app(cur->app) && body["app"].str() == "static") {
                 const std::string root = body["root"].is_string() ? std::string(body["root"].str()) : cur->root;
-                // What the walk saw (the alpha.132 report, F1): a file named, or how far it looked; "none" only after a
-                // whole walk, a directory the server cannot read included (the alpha.133 report, S1).
-                const PhpScan& scan = ctx.root_scan;
-                const std::string seen = !scan.found.empty() ? scan.found + " among them"
-                                         : scan.capped ? "none in the first " + std::to_string(PhpScan::kScanEntries) + " entries, which is as far as the check reads"
-                                         : !scan.link.empty() ? "none outside " + scan.link + ", a link to a directory, which the check does not follow and static does"
-                                         : !scan.unread.empty() ? "none outside " + scan.unread + ", which the server cannot read and so cannot serve either"
-                                                                : std::string("none is there now; any put there later is served so");
-                line += ": static runs no PHP, so every PHP file under " + root + " is served to anyone as its source, with the passwords and keys in it (" + seen +
-                        "), and so is every other file the " + cur->app + " preset refuses there (its logs, backups, databases and the like)";
+                line += ": static runs no PHP, so every PHP file under " + root + " is served to anyone as its source, with the passwords and keys in it" +
+                        (ctx.root_php.empty() ? "" : " (" + ctx.root_php + " among them)") + ", and so is every other file the " + cur->app +
+                        " preset refuses there (its logs, backups, databases and the like)";
             } else if (cur && body["app"].str() == "static" && !preset_refused_paths(cur->app).empty()) {
                 // From an application server (the alpha.132 report, S2): its project directory is served whole.
                 const std::string root = body["root"].is_string() ? std::string(body["root"].str()) : cur->root;
-                line += ": static serves every file under " + root + " to anyone (hidden ones aside)";
-                std::string names;
-                for (const auto& p : ctx.preset_served) names += (names.empty() ? "" : ", ") + p;
-                if (!names.empty())
-                    line += ", among them what the " + cur->app + " preset refused" + (preset_secrets(cur->app).empty() ? "" : " or keeps as its secrets") + ": " + names;
+                line += ": static serves every file under " + root + " to anyone (hidden ones aside): the project's code, its configuration and secrets, its "
+                        "databases and logs";
             }
             out.push_back(std::move(line));
         }
@@ -667,8 +613,8 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
             // A static site moved onto PHP files (the alpha.132 report, F3b), unless the app's line says it already (N1).
             const std::string app_after = body["app"].is_string() ? std::string(body["app"].str()) : cur ? cur->app : std::string();
             const bool said = cur && php_app(cur->app) && app_after == "static";
-            if (app_after == "static" && !said && !ctx.root_scan.found.empty())
-                line += ": it holds PHP files, which a static site serves to anyone as their source, with the passwords and keys in them (" + ctx.root_scan.found + " among them)";
+            if (app_after == "static" && !said && !ctx.root_php.empty())
+                line += ": it holds PHP files, which a static site serves to anyone as their source, with the passwords and keys in them (" + ctx.root_php + " among them)";
             out.push_back(std::move(line));
         }
         if (update && changed("served_dir", cur ? cur->served_dir : "")) {
@@ -684,20 +630,18 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
         if (create && body.get("app") == "static") {
             // Over PHP files (the alpha.132 report, F3a, the owner's decision): static serves them as their source. A
             // walk that found none adds nothing: a large static tree or a link in it is no PHP site.
-            if (!ctx.root_scan.found.empty())
+            if (!ctx.root_php.empty())
                 out.push_back("the directory " + std::string(body.get("root")) + " holds PHP files, which a static site serves to anyone as their source, with the passwords and keys in them (" +
-                              ctx.root_scan.found + " among them)");
-        } else if (create) {  // the scan is there for a PHP preset only; one that could not see everything waits too (F1)
-            const PhpScan& scan = ctx.root_scan;
+                              ctx.root_php + " among them)");
+        } else if (create && php_app(body.get("app"))) {
+            // Over files already there (2026-11-06, the owner's decision): any entry waits, so no layout of the tree
+            // can keep a .php from the person approving; an empty or new root is free.
             const std::string dir = "the directory " + std::string(body.get("root"));
-            if (!scan.found.empty()) out.push_back(dir + " already holds PHP files, which the site would run as soon as it exists (" + scan.found + " among them)");
-            else if (scan.capped)
-                out.push_back(dir + " may hold PHP files, which the site would run as soon as it exists: it holds more than " + std::to_string(PhpScan::kScanEntries) +
-                              " entries, and the check reads only that many");
-            else if (!scan.link.empty())
-                out.push_back(dir + " may hold PHP files, which the site would run as soon as it exists: " + scan.link + " is a link to a directory, which the check does not follow");
-            else if (!scan.unread.empty())
-                out.push_back(dir + " may hold PHP files, which the site would run as soon as it exists: the server cannot read " + scan.unread + ", so the check could not look inside");
+            if (ctx.root == RootState::holds_files)
+                out.push_back(dir + " already holds files, which the site serves, or runs as PHP, as soon as it exists" +
+                              (ctx.root_php.empty() ? "" : " (" + ctx.root_php + " among them)"));
+            else if (ctx.root == RootState::unreadable)
+                out.push_back(dir + " exists, and the server cannot read it to see what it holds; the site may run what is there as soon as it exists");
         }
         if (body["rules"].is_object()) {
             const json::Value& r = ctx.rules_after ? *ctx.rules_after : body["rules"];

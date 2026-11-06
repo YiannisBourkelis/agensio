@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.0-alpha.135
+
+- **Approval reasons say what a change does, never what a site's tree holds** (the owner's decision after the
+  alpha.131 to alpha.134 reports, each of which found a layout that the account of the tree missed: a link, the
+  5000-entry limit, an unreadable directory, both at once, the three files named). A PHP site made `static`
+  says that static serves every PHP file under its root as its source, with one file as an example when the
+  check meets one, and nothing else about the tree: no "none is there now", no "none outside /ext". A `rails`,
+  `redmine`, `django`, `wagtail` or `node` site made `static` says that static serves its project directory
+  whole, "the project's code, its configuration and secrets, its databases and logs", naming no file.
+- **A PHP site created over files already there waits for approval, whatever they are** (same decision). The gate
+  was a walk for PHP files that could miss one; it is now one read of the root: any entry, a dot name too, or a
+  directory the server cannot read waits ("the directory /srv/www/n/web already holds files, which the site
+  serves, or runs as PHP, as soon as it exists"), with a PHP file as an example when there is one. A new or empty
+  root is free, as before. A static site created over PHP files waits as before.
+- **Rails' `config/secrets.yml` is one of the preset's credential files** (the alpha.134 report, S2). It holds the
+  `secret_key_base` of applications from before Rails 5.2's credentials. A read of it through the file tools
+  waits for approval, the hosting rule finds it when others can read it (the root helper makes it the site's own
+  at a start and on reload), the installer and the credential sweep make it `0600`, and a `rails` or `redmine`
+  site answers `/config/secrets.yml` 404 itself.
+
 ## 0.1.0-alpha.134 (2026-11-06)
 
 - **Fix: a PHP site made static over a directory the server cannot read said "none is there now"** (the

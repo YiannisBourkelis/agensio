@@ -25,24 +25,20 @@ std::string escape_for_terminal(std::string_view text);
 // two names never print alike.
 std::string escape_line(std::string_view text);
 
-// What a walk of a site's root finds of PHP files, by their served path ("/wp-config.php"): breadth first,
-// so the shallowest come first; at most kScanEntries entries; a link to a directory recorded, never
-// followed (static and PHP follow it: symlinks = "allow"); a link named as a PHP file counts as one.
-struct PhpScan {
-    static constexpr std::size_t kScanEntries = 5000;
-    std::string found;   // the first whose name holds "config" or "settings", else the first PHP file
-    std::string link;    // the first link to a directory, not followed
-    std::string unread;  // the first directory the server's account could not read
-    bool capped = false; // stopped at kScanEntries entries, the rest not read
-};
-// for_static: what a static site would serve as source (every PHP spelling, php_suffixes(); dot names
-// skipped, which it answers 404); else what a PHP preset would run (.php in any case, dot names too, the
-// first found).
-PhpScan scan_php(const std::string& root, bool for_static);
-// What a static site would serve under `root` that the site's preset refused or keeps as its secrets (a Django
-// project's settings.py, then preset_secrets, then preset_refused_paths), as served paths, a directory with its
-// slash: at most three that exist, each once, hidden ones skipped (static answers them 404). One stat each, no walk.
-std::vector<std::string> preset_files_served(const SiteSpec& site, const std::string& root);
+// One PHP file under a site's root, by its served path ("/wp-config.php"), "" when the walk met none: an example
+// for the person approving, never a claim that there is none. The reasons say what a change does whatever the
+// walk found (2026-11-06, the owner's decision after the alpha.131 to alpha.134 reports, each of which found a
+// layout an account of the tree missed). Breadth first, at most kPhpScanEntries entries, links to directories not
+// followed, a directory that cannot be read passed over; a link named as a PHP file counts as one.
+// for_static: what a static site would serve as source (every PHP spelling, php_suffixes(); dot names skipped,
+// which it answers 404), a configuration file ("config" or "settings" in its name) before any other; else what a
+// PHP preset would run (.php in any case, dot names too), the first found.
+inline constexpr std::size_t kPhpScanEntries = 5000;
+std::string php_example(const std::string& root, bool for_static);
+// What a PHP preset's site_create finds at its root: nothing there (no directory, or an empty one), entries (any,
+// dot names too), or a directory the server cannot read, so not known to be empty. One directory read, no walk.
+enum class RootState { empty, holds_files, unreadable };
+RootState root_state(const std::string& root);
 
 // 48 random bits as 12 hex digits ("" without random bytes): unique, not a secret (the code is).
 std::string new_approval_id();
@@ -115,16 +111,14 @@ struct ApprovalContext {
     // body has none or they do not check, in which case the handler refuses the change anyway.
     const json::Value* rules_after = nullptr;
     std::vector<std::string> site_names;
-    // scan_php of the root: for a site_create of a PHP preset, a file the site would run as soon as it exists;
-    // for a static one (F3a), or a static site's new root (F3b), a file it would serve as its source; for a PHP
-    // site whose app becomes static (the alpha.131 addendum, N1, the owner's decision: the
-    // administrator's to decide, said plainly to the person approving), a file it would serve as its source.
-    // Where the walk could not see everything (capped, a link, a directory unread) the reason says so and
-    // never that there is none (the alpha.132 report, F1).
-    PhpScan root_scan;
-    // An application-server site (rails, django, node) whose app becomes static (the alpha.132 report, S2):
-    // preset_files_served of the root.
-    std::vector<std::string> preset_served;
+    // php_example of the root: for a site_create of a PHP preset over files, one the site would run as soon as it
+    // exists; for a static one (F3a), or a static site's new root (F3b), one it would serve as its source, which
+    // alone makes the create wait; for a PHP site whose app becomes static (the alpha.131 addendum, N1, the owner's
+    // decision: the administrator's to decide, said plainly to the person approving), one it would serve as its
+    // source. An example only: "" changes no reason's claim.
+    std::string root_php;
+    // root_state of a PHP preset's site_create: entries there, or a directory the server cannot read, wait.
+    RootState root = RootState::empty;
 };
 // Why a mutation waits for approval, in the server's words; empty when it does not. `action` is the
 // part after /v1/sites/NAME/. A dry run gets the same reasons: the handler runs it as it is and says

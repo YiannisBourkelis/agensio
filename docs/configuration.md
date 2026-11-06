@@ -846,16 +846,18 @@ beside `web/` in the site's tree (`/var/www/example.com/app`, what `site-create`
 suggests), and the preset's named tasks run there as the site's account (section 15,
 `site-task`): `gem_install_rails`, `rails_new`, `bundle_install`, `db_prepare`,
 `db_migrate`, `assets_precompile`. Its credential files, `config/master.key`,
-`config/credentials/`, `config/database.yml` and `storage/` (the SQLite databases and
-Active Storage's files), are held to the hosting rule of section 11 like `wp-config.php`
+`config/credentials/`, `config/database.yml`, `config/secrets.yml` (the `secret_key_base`
+of applications from before Rails 5.2's credentials) and `storage/` (the SQLite databases
+and Active Storage's files), are held to the hosting rule of section 11 like `wp-config.php`
 is, and every writer and task leaves them the site's alone. A site with its own `user`
 and `app = "rails"` gets no php-fpm pool. Nothing is served from the project directory
 yet: every request goes to Puma, and Rails' own public file server answers what lies in
 `public/` (serving it from disk is step 7 of `docs/design-site-operations.md`). The paths
 scanners probe are answered 404 by agensio itself and never reach the application:
-`/config/master.key`, `/config/database.yml`, `/config/credentials.yml.enc`,
-`/config/credentials/`, `/.env`, `/.env.production`, `/.kamal/`, `/.git/`, `/Gemfile`,
-`/Gemfile.lock`, `/log/production.log` and everything below `/storage/` (Rails keeps its
+`/config/master.key`, `/config/database.yml`, `/config/secrets.yml`,
+`/config/credentials.yml.enc`, `/config/credentials/`, `/.env`, `/.env.production`,
+`/.kamal/`, `/.git/`, `/Gemfile`, `/Gemfile.lock`, `/log/production.log` and everything
+below `/storage/` (Rails keeps its
 databases and Active Storage's disk files there and routes none of it; Active Storage
 answers under `/rails/active_storage/`), and any path ending in `.sqlite3`,
 `.sqlite3-wal`, `.sqlite3-shm`, `.sqlite3-journal`, `.log`, `.key` or `.sql`, the ending in
@@ -3413,7 +3415,7 @@ every task (only the main file can hold `[control]`; included files carry sites 
 
 After every run the credential sweep makes the preset's credential files the site's
 alone: the hosting rule's list (for Rails `config/master.key`, `config/credentials/`,
-`config/database.yml`, `storage/`, `.env`, `.git`) plus `config/credentials.yml.enc`,
+`config/database.yml`, `config/secrets.yml`, `storage/`, `.env`, `.git`) plus `config/credentials.yml.enc`,
 `config/credentials/*.key`, `.env.*`, `.kamal/secrets*` and the SQLite files under `db/` and `storage/`;
 files become `0600`, directories lose their group's read and write and everything for
 others (`0710`: the kernel drops the set-gid bit when the account is not in the
@@ -3485,8 +3487,8 @@ the commands here: `site-install`, `site-copy`, `site-env-set`, `site-env --reve
 `site-auth-user-set`, `trash-delete`, `trash-expire`, every file change, and a `site-update` that
 changes `app`, `root`, `served_dir`, the entry points or the front controller, changes `upstream`,
 redirects to a host that is none of the site's names, or removes or widens a password or address
-rule; a `site-create` only when its root already holds PHP files, its upstream is off this host, or a
-redirect leaves. Typed at a terminal, such a command asks for the code at once.
+rule; a `site-create` only when its root already holds files (a PHP preset) or PHP files (static), its
+upstream is off this host, or a redirect leaves. Typed at a terminal, such a command asks for the code at once.
 
 **The site's environment.** An application reads settings and secrets from its
 environment: a Rails application without credentials (every ONCE application such as

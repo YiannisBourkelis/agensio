@@ -114,7 +114,7 @@ add_headers = { "Cache-Control" = "public, max-age=31536000, immutable" }   # th
 **What it does.** Puma answers everything except `/assets/`, which agensio reads from
 `public/assets/` with the year-long cache that fingerprinted asset names allow. The rails
 preset answers `404` itself for what scanners look for in a Rails tree, so Puma never sees
-those requests: `/config/master.key`, `/config/database.yml`, `/config/credentials/`, `/.env`,
+those requests: `/config/master.key`, `/config/database.yml`, `/config/secrets.yml`, `/config/credentials/`, `/.env`,
 `/.git/`, `/Gemfile.lock`, everything below `/storage/` (the SQLite databases and Active
 Storage's files), and any path ending in `.sqlite3`, `.log`, `.key` or `.sql`. Rails builds
 its links and redirects from `Host` and `X-Forwarded-Proto`, which agensio sends; a redirect

@@ -900,8 +900,8 @@ struct PhpPreset {
 // public/ behind the proxy), so before 2026-09-27 these reached Puma and cost an
 // application round trip and a log line each. Exact paths, and directories no
 // application routes to; the rest of the URL space stays the application's.
-const std::vector<const char*> kRailsRefused = {"/config/master.key", "/config/database.yml", "/config/credentials.yml.enc", "/config/credentials/",
-                                                "/.env", "/.env.production", "/.kamal/", "/.git/", "/Gemfile", "/Gemfile.lock",
+const std::vector<const char*> kRailsRefused = {"/config/master.key", "/config/database.yml", "/config/secrets.yml", "/config/credentials.yml.enc",
+                                                "/config/credentials/", "/.env", "/.env.production", "/.kamal/", "/.git/", "/Gemfile", "/Gemfile.lock",
                                                 "/Gemfile.local", "/log/production.log", "/storage/"};
 // Endings a Rails site never answers through the application, wherever the files live:
 // databases, logs, keys and dumps (2026-09-27 Writebook report: its database is
@@ -5661,8 +5661,10 @@ std::vector<std::string> preset_secrets(const std::string& app) {
     if (const PhpPreset* p = php_preset(app))
         for (const char* n : p->secrets) out.emplace_back(n);
     // Rails: the key that decrypts the credentials, per-environment keys, the database
-    // settings, and storage/ (the SQLite databases and Active Storage's files).
-    if (app == "rails") out = {"/config/master.key", "/config/credentials", "/config/database.yml", "/storage"};
+    // settings, secrets.yml (secret_key_base before Rails 5.2's credentials, kept by applications
+    // upgraded since; the alpha.134 report, S2), and storage/ (the SQLite databases and Active
+    // Storage's files).
+    if (app == "rails") out = {"/config/master.key", "/config/credentials", "/config/database.yml", "/config/secrets.yml", "/storage"};
     // Redmine: its database and SMTP settings and the secret generate_secret_token writes.
     if (app == "redmine")
         out = {"/config/database.yml", "/config/configuration.yml", "/config/initializers/secret_token.rb", "/config/master.key", "/config/credentials"};
