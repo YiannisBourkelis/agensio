@@ -2909,7 +2909,8 @@ else
   echo "skip mcp: over ssh localhost (no sshd on this host)"
 fi
 check "ctl: --help on a change command prints usage, exit 0, no confirm needed" "0 yes" "$(ctl site-update --help > bench/tmp/ctl-help.out 2>&1; echo -n "$? "; grep -q '^usage: agensio ctl' bench/tmp/ctl-help.out && echo yes)"
-check "ctl: bare ctl and ctl --help print the command list" "yes yes" "$({ ctl 2>&1 || true; } | grep -q 'site-create' && echo yes) $({ ctl --help 2>&1 || true; } | grep -q 'site-create' && echo yes)"
+# Captured, then grepped: under pipefail a writer's SIGPIPE after grep -q's early exit failed this row about once in 17.
+check "ctl: bare ctl and ctl --help print the command list" "yes yes" "$(o=$(ctl 2>&1); grep -q 'site-create' <<< "$o" && echo yes) $(o=$(ctl --help 2>&1); grep -q 'site-create' <<< "$o" && echo yes)"
 check "ctl: a change without --yes says how to confirm" "yes" "$({ ctl reload --socket $CS 2>&1 >/dev/null || true; } | grep -q 'add --yes' && echo yes)"
 check "control: socket file mode and no access-log line for it" "666 no" "$(stat -c %a $CS 2>/dev/null || stat -f %Lp $CS) $(grep -q 'v1/status' bench/tmp/access.log && echo yes || echo no)"
 
