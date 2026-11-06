@@ -821,8 +821,16 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
             const SiteConfig* sc = control::find_site(backend_->running(), name);
             if (control::read_managed(control::site_file(backend_->running(), sc ? std::string_view(sc->server_names.front()) : name), current)) {
                 actx.current = &current;
-                if (action.empty() && body.get("app") == "static" && php_app(current.app))  // what static would serve as source (N1)
-                    actx.root_scan = control::scan_php(body["root"].is_string() ? std::string(body["root"].str()) : current.root, true);
+                if (action.empty()) {
+                    const std::string app_after = body["app"].is_string() ? std::string(body["app"].str()) : current.app;
+                    const std::string root_after = body["root"].is_string() ? std::string(body["root"].str()) : current.root;
+                    // What static would serve as source: a PHP site made static (N1), a static site's root moved (F3b).
+                    if (app_after == "static" && ((body.get("app") == "static" && php_app(current.app)) || root_after != current.root))
+                        actx.root_scan = control::scan_php(root_after, true);
+                    // What an application server's preset refused that static would serve (S2).
+                    if (body.get("app") == "static" && current.app != "static" && !php_app(current.app))
+                        actx.preset_served = control::preset_files_served(current, root_after);
+                }
                 actx.site_names.push_back(current.domain);
                 for (const auto& a : current.aliases) actx.site_names.push_back(a);
                 if (action.empty() && body["rules"].is_object()) {  // the rules as the spec would store them, for the comparison

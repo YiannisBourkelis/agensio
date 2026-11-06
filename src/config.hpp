@@ -951,6 +951,10 @@ bool php_app(std::string_view app);
 // (control/sites.hpp) refuse below a cached directory.
 const std::vector<std::string>& php_suffixes();
 const std::vector<std::string>& source_backup_suffixes();
+// The exact paths an application-server preset answers 404 itself (rails and redmine: config/master.key,
+// config/database.yml, ...; django and wagtail: manage.py, db.sqlite3, ...; node: package.json, node_modules/,
+// ...; a trailing slash a directory), empty for any other app: what static would serve in their place.
+const std::vector<const char*>& preset_refused_paths(std::string_view app);
 // The directories a PHP preset never answers (Grav's logs/, cache/, backup/; empty for any other
 // app): a location or a rules.cache directory below one is refused (apply_preset, control's check_rules).
 std::vector<std::string> preset_never_dirs(std::string_view app);

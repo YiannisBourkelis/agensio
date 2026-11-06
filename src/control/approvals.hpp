@@ -38,6 +38,10 @@ struct PhpScan {
 // skipped, which it answers 404); else what a PHP preset would run (.php in any case, dot names too, the
 // first found).
 PhpScan scan_php(const std::string& root, bool for_static);
+// What a static site would serve under `root` that the site's preset refused (preset_refused_paths, a Django
+// project's settings.py first), as served paths: at most three that exist, hidden ones skipped (static answers
+// them 404). One stat each, no walk.
+std::vector<std::string> preset_files_served(const SiteSpec& site, const std::string& root);
 
 // 48 random bits as 12 hex digits ("" without random bytes): unique, not a secret (the code is).
 std::string new_approval_id();
@@ -111,11 +115,15 @@ struct ApprovalContext {
     const json::Value* rules_after = nullptr;
     std::vector<std::string> site_names;
     // scan_php of the root: for a site_create of a PHP preset, a file the site would run as soon as it exists;
-    // for a static one (F3a), a file it would serve as its source; for a PHP site whose app becomes static (the alpha.131 addendum, N1, the owner's decision: the
+    // for a static one (F3a), or a static site's new root (F3b), a file it would serve as its source; for a PHP
+    // site whose app becomes static (the alpha.131 addendum, N1, the owner's decision: the
     // administrator's to decide, said plainly to the person approving), a file it would serve as its source.
     // Where the walk could not see everything (capped, a link, a directory unread) the reason says so and
     // never that there is none (the alpha.132 report, F1).
     PhpScan root_scan;
+    // An application-server site (rails, django, node) whose app becomes static (the alpha.132 report, S2):
+    // preset_files_served of the root.
+    std::vector<std::string> preset_served;
 };
 // Why a mutation waits for approval, in the server's words; empty when it does not. `action` is the
 // part after /v1/sites/NAME/. A dry run gets the same reasons: the handler runs it as it is and says

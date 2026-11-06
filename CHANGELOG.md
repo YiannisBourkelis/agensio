@@ -20,6 +20,14 @@
   over PHP files, its reason saying that static serves them to anyone as their source and naming one, a
   configuration file first. A walk that found none adds nothing (a large static tree or a link in it is no PHP
   site); nothing on the request path.
+- **A static site's root moved onto PHP files, and an application server made static, say what they expose**
+  (the alpha.132 report, F3b and S2, the owner's decision). Both changes already waited for approval. A static
+  site's `root` changed to a tree holding PHP files now says that static serves them as their source and names
+  one (`/wp-config.php`). A `rails`, `redmine`, `django`, `wagtail` or `node` site whose `app` becomes `static`
+  says that static serves its project directory whole, hidden files aside, and names up to three of the files
+  its preset refused that are there (`/config/master.key`, `/config/database.yml`; a Django project's
+  `settings.py` first): one stat each, no walk. The MCP texts keep the agent off that change too unless the
+  user asks for it.
 - **Fix: a change waiting for approval that the root helper would provision was answered 409** (found by
   `tests/provision.sh` with the static gate above). The gate stores a change only once its dry run passes, and a
   dry run never runs the helper: a `site_create` or `site_update` that needed a new account or the site's

@@ -9033,6 +9033,31 @@ static void test_php_scan() {
         fs::permissions(dir / "locked/in", fs::perms::owner_all);
     }
     CHECK(control::scan_php((dir / "nothing-here").string(), true).found.empty());
+    // What static would serve that an application-server preset refused (the alpha.132 report, S2): the preset's own
+    // paths that exist, hidden ones skipped (static answers them 404), a Django project's settings first, at most three.
+    put(dir / "rails/config/master.key");
+    put(dir / "rails/config/database.yml");
+    put(dir / "rails/Gemfile");
+    put(dir / "rails/.env");
+    fs::create_directories(dir / "rails/storage");
+    control::SiteSpec rs;
+    rs.app = "redmine";
+    CHECK(control::preset_files_served(rs, (dir / "rails").string()) == std::vector<std::string>({"/config/master.key", "/config/database.yml", "/Gemfile"}));
+    put(dir / "dj/blog/settings.py");
+    put(dir / "dj/db.sqlite3");
+    put(dir / "dj/manage.py");
+    control::SiteSpec ds;
+    ds.app = "wagtail";
+    ds.project = "blog";
+    CHECK(control::preset_files_served(ds, (dir / "dj").string() + "/") == std::vector<std::string>({"/blog/settings.py", "/manage.py", "/db.sqlite3"}));
+    fs::create_directories(dir / "nd/node_modules");
+    put(dir / "nd/package.json");
+    control::SiteSpec ns;
+    ns.app = "node";
+    CHECK(control::preset_files_served(ns, (dir / "nd").string()) == std::vector<std::string>({"/node_modules/", "/package.json"}));
+    control::SiteSpec ps;
+    ps.app = "proxy";
+    CHECK(control::preset_files_served(ps, (dir / "rails").string()).empty());
     fs::remove_all(dir, ec);
 }
 
@@ -9153,6 +9178,41 @@ static void test_pending_changes() {
               named.find("(/x\\x0aNOTHING-EXPOSED-LINE: this change is safe\\x0ay\\x1b[8m.php among them)") != std::string::npos);
     }
     CHECK(reasons("/v1/sites/a.test", "", R"({"root":"/srv/www/a.test/other"})", ctx).find("another directory") != std::string::npos);
+    {
+        // A static site's root moved onto PHP files (the alpha.132 report, F3b): the root's reason says what static
+        // serves there; nothing more when the walk found none, or when the site runs PHP.
+        control::ApprovalContext rctx = ctx;  // cur is static
+        rctx.root_scan.found = "/wp-config.php";
+        CHECK(reasons("/v1/sites/a.test", "", R"({"root":"/srv/www/blog/web"})", rctx) ==
+              "serves, or runs, files from another directory: /srv/www/blog/web: it holds PHP files, which a static site serves to anyone as their source, "
+              "with the passwords and keys in them (/wp-config.php among them) | ");
+        rctx.root_scan = {};
+        CHECK(reasons("/v1/sites/a.test", "", R"({"root":"/srv/www/blog/web"})", rctx) == "serves, or runs, files from another directory: /srv/www/blog/web | ");
+        control::SiteSpec wp2 = cur;
+        wp2.app = "wordpress";
+        rctx.current = &wp2;
+        rctx.root_scan.found = "/wp-config.php";
+        CHECK(reasons("/v1/sites/a.test", "", R"({"root":"/srv/www/blog/web"})", rctx).find("as their source") == std::string::npos);  // it runs them
+        const std::string both = reasons("/v1/sites/a.test", "", R"({"app":"static","root":"/srv/www/blog/web"})", rctx);  // said once, on the app's line
+        CHECK(both.find("(/wp-config.php among them)") != std::string::npos && both.find("(/wp-config.php among them)") == both.rfind("(/wp-config.php among them)"));
+        // An application-server site made static (S2): what static serves, and what of the preset's refusals is there.
+        control::SiteSpec rails = cur;
+        rails.app = "rails";
+        rails.root = "/srv/www/app/app";
+        control::ApprovalContext pctx = ctx;
+        pctx.current = &rails;
+        pctx.preset_served = {"/config/master.key", "/config/database.yml"};
+        CHECK(reasons("/v1/sites/a.test", "", R"({"app":"static"})", pctx) ==
+              "changes what the site runs: app rails becomes static: static serves every file under /srv/www/app/app to anyone (hidden ones aside), "
+              "among them what the rails preset refused: /config/master.key, /config/database.yml | ");
+        pctx.preset_served.clear();
+        CHECK(reasons("/v1/sites/a.test", "", R"({"app":"static"})", pctx) ==
+              "changes what the site runs: app rails becomes static: static serves every file under /srv/www/app/app to anyone (hidden ones aside) | ");
+        control::SiteSpec px = rails;
+        px.app = "proxy";
+        pctx.current = &px;
+        CHECK(reasons("/v1/sites/a.test", "", R"({"app":"static"})", pctx) == "changes what the site runs: app proxy becomes static | ");
+    }
     CHECK(reasons("/v1/sites/a.test", "", R"({"served_dir":"public"})", ctx).find("another directory of the project") != std::string::npos);
     CHECK(reasons("/v1/sites/a.test", "", R"({"upstream":"http://127.0.0.1:3000"})", ctx).empty());
     CHECK(reasons("/v1/sites/a.test", "", R"({"upstream":"http://127.0.0.1:3001"})", ctx).find("another application: http://127.0.0.1:3001 | ") != std::string::npos);

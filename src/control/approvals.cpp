@@ -111,6 +111,24 @@ PhpScan scan_php(const std::string& root, bool for_static) {
     return out;
 }
 
+std::vector<std::string> preset_files_served(const SiteSpec& site, const std::string& root) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> candidates;
+    if (python_app(site.app) && !site.project.empty()) candidates.push_back("/" + site.project + "/settings.py");  // its SECRET_KEY: the .py ending
+    for (const char* p : preset_refused_paths(site.app)) candidates.emplace_back(p);
+    std::string base = root;
+    while (base.size() > 1 && base.back() == '/') base.pop_back();
+    std::vector<std::string> out;
+    for (const auto& p : candidates) {
+        if (out.size() == 3 || base.empty()) break;
+        if (p.find("/.") != std::string::npos) continue;  // static answers a dot name 404
+        std::error_code ec;
+        const fs::path at = fs::path(base + (p.ends_with('/') ? p.substr(0, p.size() - 1) : p));
+        if (p.ends_with('/') ? fs::is_directory(at, ec) : fs::is_regular_file(at, ec)) out.push_back(p);
+    }
+    return out;
+}
+
 std::string new_approval_id() {
 #ifdef AGENSIO_HAS_TLS
     unsigned char bytes[6];
@@ -615,10 +633,25 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
                                                               : std::string("none is there now; any put there later is served so");
                 line += ": static runs no PHP, so every PHP file under " + root + " is served to anyone as its source, with the passwords and keys in it (" + seen +
                         "), and so is every other file the " + cur->app + " preset refuses there (its logs, backups, databases and the like)";
+            } else if (cur && body["app"].str() == "static" && !preset_refused_paths(cur->app).empty()) {
+                // From an application server (the alpha.132 report, S2): its project directory is served whole.
+                const std::string root = body["root"].is_string() ? std::string(body["root"].str()) : cur->root;
+                line += ": static serves every file under " + root + " to anyone (hidden ones aside)";
+                std::string names;
+                for (const auto& p : ctx.preset_served) names += (names.empty() ? "" : ", ") + p;
+                if (!names.empty()) line += ", among them what the " + cur->app + " preset refused: " + names;
             }
             out.push_back(std::move(line));
         }
-        if (update && changed("root", cur ? cur->root : "")) out.push_back("serves, or runs, files from another directory: " + std::string(body["root"].str()));
+        if (update && changed("root", cur ? cur->root : "")) {
+            std::string line = "serves, or runs, files from another directory: " + std::string(body["root"].str());
+            // A static site moved onto PHP files (the alpha.132 report, F3b), unless the app's line says it already (N1).
+            const std::string app_after = body["app"].is_string() ? std::string(body["app"].str()) : cur ? cur->app : std::string();
+            const bool said = cur && php_app(cur->app) && app_after == "static";
+            if (app_after == "static" && !said && !ctx.root_scan.found.empty())
+                line += ": it holds PHP files, which a static site serves to anyone as their source, with the passwords and keys in them (" + ctx.root_scan.found + " among them)";
+            out.push_back(std::move(line));
+        }
         if (update && changed("served_dir", cur ? cur->served_dir : "")) out.push_back("serves, or runs, files from another directory of the project: " + std::string(body["served_dir"].str()));
         if (create && body.get("app") == "static") {
             // Over PHP files (the alpha.132 report, F3a, the owner's decision): static serves them as their source. A

@@ -3270,6 +3270,10 @@ AppContext app_context(const Config& cfg, const SiteConfig& site) {
 bool php_app(std::string_view app) { return php_preset(std::string(app)) != nullptr; }
 const std::vector<std::string>& php_suffixes() { return kPhpSuffixes; }
 const std::vector<std::string>& source_backup_suffixes() { return kSourceBackups; }
+const std::vector<const char*>& preset_refused_paths(std::string_view app) {
+    static const std::vector<const char*> none;
+    return rails_app(app) ? kRailsRefused : python_app(app) ? kDjangoRefused : node_app(app) ? kNodeRefused : none;
+}
 std::vector<std::string> preset_never_dirs(std::string_view app) {
     std::vector<std::string> out;
     if (const PhpPreset* p = php_preset(std::string(app)))
