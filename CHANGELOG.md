@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.133
+## 0.1.0-alpha.133 (2026-11-06)
 
 - **Fix (security): an approval said "none is there now" where its walk had not looked, and a PHP site was
   created over PHP files without approval** (the alpha.132 report, F1). The walk behind both reasons stopped
