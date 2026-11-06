@@ -13,12 +13,16 @@ BIN=$(readlink -f "${1:-build/agensio}")
 FPM=$(ls /usr/sbin/php-fpm* 2>/dev/null | head -1); [ -n "$FPM" ] || { echo "site-user: no php-fpm; skipped"; exit 0; }
 PHPV=$(basename "$FPM" | sed 's/php-fpm//'); POOLD=/etc/php/$PHPV/fpm/pool.d
 T=$(mktemp -d /tmp/agensio-siteuser.XXXXXX); chmod 755 "$T"
+# A change that waits is approved with a fresh approver's code, as the server's own account: without the helper the
+# server checks codes against that account's files (docs/approvals.md 4).
+source "$(dirname "$0")/approve-lib.sh"; gated_setup "$BIN" $T/agensio.toml $T/run/control.sock; GATED_AS=agensio
 pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
 cleanup() { [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; [ -f "$T/fpm.pid" ] && kill "$(cat "$T/fpm.pid")" 2>/dev/null; rm -f $POOLD/agensio-t1-*.conf; userdel t1 2>/dev/null; rm -rf "$T"; }
 trap cleanup EXIT
 id -u agensio >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin agensio
 mkdir -p $T/sites.d $T/logs $T/run $T/state $T/www; chown agensio:agensio $T/sites.d $T/logs $T/state
+install -d -o agensio -g agensio -m 700 $T/approvers
 cat > $T/agensio.toml <<CFG
 include = ["sites.d/*.toml"]
 [server]
@@ -95,7 +99,8 @@ install -d -o t1 -g agensio -m 2750 $T/www/t1.test/web/public $T/www/t1.test/web
 printf '<?php require __DIR__ . "/../src/lib.php"; echo lib(), " outside=", @file_get_contents("/etc/hostname") === false ? "blocked" : "READ", " docroot=", basename($_SERVER["DOCUMENT_ROOT"]);' > $T/www/t1.test/web/public/index.php
 printf '<?php function lib() { return "lib=ok"; }' > $T/www/t1.test/web/src/lib.php
 chown t1:agensio $T/www/t1.test/web/public/index.php $T/www/t1.test/web/src/lib.php; chmod 640 $T/www/t1.test/web/public/index.php $T/www/t1.test/web/src/lib.php
-rc=0; "$BIN" ctl site-update t1.test --served-dir public --yes --reason "served_dir" --socket $T/run/control.sock > $T/sd.out 2>&1 || rc=$?
+# A served_dir change waits for approval (alpha.120): approved here as a person would.
+rc=0; gated "$BIN" ctl site-update t1.test --served-dir public --yes --reason "served_dir" --socket $T/run/control.sock > $T/sd.out 2>&1 || rc=$?
 prc=0; "$BIN" pools -c $T/agensio.toml > /dev/null 2>&1 || prc=$?
 check "site-update --served-dir public applies; the pool file is unchanged (agensio pools exits 0)" "0 0 public" "$rc $prc $("$BIN" ctl site t1.test --socket $T/run/control.sock | sed -n 's/.*"served_dir":"\([a-z]*\)".*/\1/p')"
 [ $rc = 0 ] || cat $T/sd.out

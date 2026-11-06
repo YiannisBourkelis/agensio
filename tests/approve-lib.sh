@@ -4,6 +4,8 @@
 #   source "$(dirname "$0")/approve-lib.sh"; gated_setup "$BIN" "$CONFIG" "$SOCKET"
 #   ctl() { gated "$BIN" ctl "$@" --socket "$CS"; }      # prints the result; exit 1 when it failed
 #   cpost PATH BODY                                        # prints the final status, the body in $GATED_REPLY
+# GATED_AS=ACCOUNT approves as that account: a server without its root helper ([control] provision = false) that
+# drops to its own server.user checks codes against that account's approver files, which root's would not be.
 gated_setup() { GATED_BIN=$1; GATED_CONFIG=$2; GATED_SOCKET=$3; GATED_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); GATED_REPLY=${GATED_REPLY:-/tmp/gated-reply.$$.json}; }
 
 # The inner result of an approval's answer: prints it, exit 0 when its status is 2xx.
@@ -28,7 +30,7 @@ except Exception:
     print("")' 2>/dev/null)
     if [ -z "$id" ]; then [ -n "$out" ] && printf '%s\n' "$out"; return $rc; fi  # nothing printed for nothing, as the command
     tmp=$(mktemp)
-    python3 "$GATED_LIB_DIR/approve-code.py" "$GATED_SOCKET" "$GATED_CONFIG" "$GATED_BIN" "$id" > "$tmp"
+    ${GATED_AS:+runuser -u "$GATED_AS" --} python3 "$GATED_LIB_DIR/approve-code.py" "$GATED_SOCKET" "$GATED_CONFIG" "$GATED_BIN" "$id" > "$tmp"
     gated_result "$tmp"; rc=$?
     rm -f "$tmp"
     return $rc
@@ -43,7 +45,7 @@ cpost() {
     id=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["id"] if d.get("pending") else "")' "$GATED_REPLY" 2>/dev/null)
     [ -n "$id" ] || { printf '%s' "$code"; return 0; }
     tmp=$(mktemp)
-    python3 "$GATED_LIB_DIR/approve-code.py" "$GATED_SOCKET" "$GATED_CONFIG" "$GATED_BIN" "$id" > "$tmp"
+    ${GATED_AS:+runuser -u "$GATED_AS" --} python3 "$GATED_LIB_DIR/approve-code.py" "$GATED_SOCKET" "$GATED_CONFIG" "$GATED_BIN" "$id" > "$tmp"
     python3 - "$tmp" "$GATED_REPLY" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
