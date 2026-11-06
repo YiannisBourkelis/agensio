@@ -14,6 +14,18 @@
   whose root the walk could not read whole waits, naming why. Static counts every PHP spelling it serves as
   source (`.phtml`, `.php5`, `.phar`). The `static` reason also says the preset's other refusals go (its logs,
   backups and databases), and a `site_create`'s names the file found.
+- **A static site created over PHP files waits for approval** (the alpha.132 report, F3a, the owner's decision).
+  `site_create` with `app = "static"` over a root holding PHP files went through at once, and static then served
+  `wp-config.php` or a Laravel project's `config/database.php` as source. It now waits like a PHP site created
+  over PHP files, its reason saying that static serves them to anyone as their source and naming one, a
+  configuration file first. A walk that found none adds nothing (a large static tree or a link in it is no PHP
+  site); nothing on the request path.
+- **Fix: a change waiting for approval that the root helper would provision was answered 409** (found by
+  `tests/provision.sh` with the static gate above). The gate stores a change only once its dry run passes, and a
+  dry run never runs the helper: a `site_create` or `site_update` that needed a new account or the site's
+  directories answered 409 with root's commands, which the helper would have run itself, so it could never be
+  approved. The dry run now answers `helper_fixes: true` when the helper does every blocking problem, and such a
+  change waits for approval like any other.
 - **Fix (security): a file name went into an approval's reason unescaped** (F2). A file under the site's root
   named with a newline printed a line of its own under the reason in `ctl approve --list`, and escape bytes went
   raw into the JSON every client shows (`approvals_ask`'s dialog included). Every reason is now one line where it

@@ -620,7 +620,13 @@ std::vector<std::string> approval_reasons(std::string_view path, std::string_vie
         }
         if (update && changed("root", cur ? cur->root : "")) out.push_back("serves, or runs, files from another directory: " + std::string(body["root"].str()));
         if (update && changed("served_dir", cur ? cur->served_dir : "")) out.push_back("serves, or runs, files from another directory of the project: " + std::string(body["served_dir"].str()));
-        if (create) {  // the scan is there for a PHP preset only; one that could not see everything waits too (F1)
+        if (create && body.get("app") == "static") {
+            // Over PHP files (the alpha.132 report, F3a, the owner's decision): static serves them as their source. A
+            // walk that found none adds nothing: a large static tree or a link in it is no PHP site.
+            if (!ctx.root_scan.found.empty())
+                out.push_back("the directory " + std::string(body.get("root")) + " holds PHP files, which a static site serves to anyone as their source, with the passwords and keys in them (" +
+                              ctx.root_scan.found + " among them)");
+        } else if (create) {  // the scan is there for a PHP preset only; one that could not see everything waits too (F1)
             const PhpScan& scan = ctx.root_scan;
             const std::string dir = "the directory " + std::string(body.get("root"));
             if (!scan.found.empty()) out.push_back(dir + " already holds PHP files, which the site would run as soon as it exists (" + scan.found + " among them)");

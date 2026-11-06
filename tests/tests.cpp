@@ -9207,6 +9207,17 @@ static void test_pending_changes() {
     cctx.root_scan = {};
     cctx.root_scan.unread = "/private";
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"php","root":"/srv/www/n.test/web"})", cctx).find("may hold PHP files, which the site would run as soon as it exists: the server cannot read /private") != std::string::npos);
+    // A static site over PHP files waits too (the alpha.132 report, F3a, the owner's decision): static serves them
+    // as their source. A walk that found none adds nothing: a large static tree or a link in it is no PHP site.
+    cctx.root_scan = {};
+    cctx.root_scan.found = "/wp-config.php";
+    const std::string over_php = reasons("/v1/sites", "", R"({"domain":"n.test","app":"static","root":"/srv/www/n.test/web"})", cctx);
+    CHECK(over_php.find("the directory /srv/www/n.test/web holds PHP files, which a static site serves to anyone as their source, with the passwords and keys in them (/wp-config.php among them)") != std::string::npos &&
+          over_php.find("would run") == std::string::npos);
+    cctx.root_scan = {};
+    cctx.root_scan.capped = true;
+    cctx.root_scan.link = "/current";
+    CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"static","root":"/srv/www/n.test/web"})", cctx).empty());
     cctx.root_scan = {};
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"proxy","upstream":"http://127.0.0.1:8080"})", cctx).empty());
     CHECK(reasons("/v1/sites", "", R"({"domain":"n.test","app":"proxy","upstream":"unix:/run/app.sock"})", cctx).empty());

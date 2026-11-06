@@ -604,6 +604,19 @@ json::Value problems_json(const std::vector<control::Problem>& problems) {
     return a;
 }
 
+// Whether the provisioning helper fixes, in the real run, every problem that blocks the dry run (the account, the
+// site's layout): such a dry run answers helper_fixes, and a change waiting for approval is stored, not answered
+// 409 with root's commands (before alpha.133 a gated site_create that needed provisioning could not be queued).
+bool helper_fixes_all(const std::vector<control::Problem>& problems, bool available) {
+    bool any = false;
+    for (const auto& p : problems)
+        if (p.blocks) {
+            if (p.fix.is_null()) return false;
+            any = true;
+        }
+    return available && any;
+}
+
 json::Value commands_of(const std::vector<control::Problem>& problems, bool blocking_only) {
     json::Value a = json::Value::array();
     for (const auto& p : problems)
@@ -821,7 +834,9 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         }
         if (path == "/v1/sites") {
             actx.site_names.push_back(std::string(body.get("domain")));
+            // What a PHP preset would run there, or what a static site would serve as source (F3a).
             if (php_app(body.get("app"))) actx.root_scan = control::scan_php(std::string(body.get("root")), false);
+            else if (body.get("app") == "static") actx.root_scan = control::scan_php(std::string(body.get("root")), true);
         }
         for (const auto& a : body["aliases"].items())
             if (a.is_string()) actx.site_names.push_back(std::string(a.str()));
@@ -1730,10 +1745,12 @@ bool ControlHandler::site_create(Stream& s, const json::Value& body, std::string
                       "rule (rules.auth) would let them in, so remove those who should not (site_auth_user_delete) before adding one");
 #endif
     if (dry_run) {
-        reply(s, 200, json::Value::object().set("ok", !blocking).set("dry_run", true).set("file", file.string())
-                          .set("would_write", rendered).set("problems", problems_json(problems))
-                          .set("run_as_root", commands_of(problems, false)).set("spec", spec.to_json())
-                          .set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", warnings));
+        json::Value r = json::Value::object().set("ok", !blocking).set("dry_run", true).set("file", file.string())
+                            .set("would_write", rendered).set("problems", problems_json(problems))
+                            .set("run_as_root", commands_of(problems, false)).set("spec", spec.to_json())
+                            .set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", warnings);
+        if (helper_fixes_all(problems, backend_->provision_available())) r.set("helper_fixes", true);
+        reply(s, 200, r);
         return false;
     }
     if (blocking) {
@@ -1938,10 +1955,12 @@ bool ControlHandler::site_update(Stream& s, std::string_view name, const json::V
     // confirms (alpha.52 report: a whole-site rule's dry run answered warnings: null).
     for (const auto& n : control::access_notices_for(spec, cfg)) warnings.push("access: " + n.text);
     if (body["dry_run"].boolean()) {
-        reply(s, 200, json::Value::object().set("ok", !blocking).set("dry_run", true).set("file", file.string())
-                          .set("would_write", control::render_site(spec, now_stamp())).set("problems", problems_json(problems))
-                          .set("run_as_root", commands_of(problems, false)).set("spec", spec.to_json()).set("warnings", warnings)
-                          .set("hsts_note", ctx.note.empty() ? json::Value() : json::Value(ctx.note)));
+        json::Value r = json::Value::object().set("ok", !blocking).set("dry_run", true).set("file", file.string())
+                            .set("would_write", control::render_site(spec, now_stamp())).set("problems", problems_json(problems))
+                            .set("run_as_root", commands_of(problems, false)).set("spec", spec.to_json()).set("warnings", warnings)
+                            .set("hsts_note", ctx.note.empty() ? json::Value() : json::Value(ctx.note));
+        if (helper_fixes_all(problems, backend_->provision_available())) r.set("helper_fixes", true);
+        reply(s, 200, r);
         return false;
     }
     json::Value done = json::Value::array();
@@ -3490,9 +3509,10 @@ bool ControlHandler::queue_for_approval(Stream& s, WorkerState& ws, std::string_
         std::string err;
         if (!json::parse(text, v, err)) v = json::Value::object().set("error", text);
         // Refused as it would be, nothing stored: a dry run's refusal, or one that says ok: false (a
-        // site's prerequisites missing, with root's commands to run first).
+        // site's prerequisites missing, with root's commands to run first), unless the helper does them in
+        // the real run (helper_fixes: the account and the layout of a new site).
         if (rs->response.status != 200) reply(s, rs->response.status, v);
-        else if (v.is_object() && v["ok"].type() == json::Value::Type::boolean && !v["ok"].boolean()) reply(s, 409, v);
+        else if (v.is_object() && v["ok"].type() == json::Value::Type::boolean && !v["ok"].boolean() && !v["helper_fixes"].boolean()) reply(s, 409, v);
         else if (v.is_object() && v["unchanged"].boolean()) reply(s, 200, v["secured"].boolean() ? without_digest(v) : v);  // the file holds that text already: nothing to do, nothing to approve
         else store(v);
         finish();

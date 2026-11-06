@@ -111,7 +111,7 @@ struct ApprovalContext {
     const json::Value* rules_after = nullptr;
     std::vector<std::string> site_names;
     // scan_php of the root: for a site_create of a PHP preset, a file the site would run as soon as it exists;
-    // for a PHP site whose app becomes static (the alpha.131 addendum, N1, the owner's decision: the
+    // for a static one (F3a), a file it would serve as its source; for a PHP site whose app becomes static (the alpha.131 addendum, N1, the owner's decision: the
     // administrator's to decide, said plainly to the person approving), a file it would serve as its source.
     // Where the walk could not see everything (capped, a link, a directory unread) the reason says so and
     // never that there is none (the alpha.132 report, F1).

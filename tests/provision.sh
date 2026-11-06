@@ -328,6 +328,15 @@ srv_stop; srv_start
 check "start: a start whose pool files match touches nothing" "1 200" \
   "$(grep -c 'php-fpm pools at start: up to date' $T/logs/error.log) $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: t9.test' http://127.0.0.1:18198/who.php)"
 
+# A static site over PHP files waits for approval (the alpha.132 report, F3a), and what blocks its dry run is the
+# helper's to do: once approved, the create provisions the account and hands the root over (before alpha.133 the
+# store answered 409 with root's commands for any gated create the helper would have provisioned).
+mkdir -p "$T/www/t11.test/web"; printf '<?php $password = "x";\n' > "$T/www/t11.test/web/config.php"
+out=$(gated "$BIN" ctl site-create --domain t11.test --app static --root "$T/www/t11.test/web" --user t11 --https none --listen-plain 127.0.0.1:18199 --yes --reason f3a --socket $T/run/control.sock); rc=$?
+check "a static site over PHP files: it waited for approval, then the helper provisioned the account and the root; no command handed back" "0 yes yes no t11" \
+  "$rc $(grep -q 'waits for approval [0-9a-f]*: the directory .*t11.test/web holds PHP files, which a static site serves' $T/logs/audit.log && echo yes) $(echo "$out" | grep -q '"ok":true' && echo yes) $(echo "$out" | grep -q 'useradd' && echo yes || echo no) $(stat -c %U $T/www/t11.test/web)"
+gated "$BIN" ctl site-delete t11.test --yes --reason f3a --socket $T/run/control.sock > /dev/null
+
 # What the helper refuses.
 out=$(gated "$BIN" ctl site-create --domain t8.test --app static --root "$T/www/t9.test/web" --user t8 --https none --listen-plain 127.0.0.1:18199 --yes --reason repro --socket $T/run/control.sock)
 check "another site's directory is never handed over (helper refuses)" "yes yes" "$(echo "$out" | grep -q 'another site; refused' && echo yes) $([ "$(stat -c %U $T/www/t9.test/web)" = t9 ] && echo yes)"
