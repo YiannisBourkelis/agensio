@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.141 (2026-11-07)
+## 0.1.0-alpha.141 (2026-11-08)
 
 - **Fix: brotli answers from applications decode on Debian 12 and Ubuntu 22.04.** libbrotli before
   1.1.0, which those two distributions ship and the .deb links, writes a metadata block of one byte
