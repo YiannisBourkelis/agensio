@@ -12,6 +12,24 @@
   0.1.0-alpha.140, whose `packages` job (Ubuntu 22.04) failed the compressed-body tests; that release
   published no packages for Debian 12 and Ubuntu 22.04, the RPM or the APT repository's update. The
   upstream fix and what to do when the distributions carry it: `docs/third-party-bugs.md`.
+- **Fix: an event stream over HTTP/1.1 is no longer cut after 15 seconds of quiet.** An answer
+  streamed from an application (`buffering = false`) whose application sent nothing for
+  `idle_timeout` (15 s) was closed as an idle connection, over HTTP/1.1 only, with nothing logged: an
+  event stream whose heartbeat is 15 s or longer broke there, also behind a CDN that speaks HTTP/1.1
+  to the origin. It now waits as it does over HTTP/2, bounded by the location's `read_timeout`.
+- **Fix: a client that leaves an HTTP/1.1 stream frees the application's place at once.** Nothing read
+  from an HTTP/1.1 client while an answer streamed unless the application had taken a quarter of a
+  second to send its head: a browser that closed a quiet event stream held its upstream slot and the
+  connection to the application until `idle_timeout`. The client is now watched for the whole stream,
+  as nginx does: when it closes or resets the connection, the exchange ends (its slot back, the
+  connection to the application closed, a CGI script stopped). No cost for answers shorter than a
+  quarter of a second; one read per longer exchange, no memory.
+- **Fix: a crash after a client left a CGI or PHP answer whose script was still running.** When a
+  streamed answer (`buffering = false`) carried its length and the client took all of it and left
+  within a quarter of a second, while the script ran on (a CGI script still working after its
+  output, php-fpm's end of request still on its way), the exchange called its freed connection a
+  moment later: a use after free, reported by the sanitizer build; a release build read freed memory.
+  Found while building the fix above.
 
 ## 0.1.0-alpha.140 (2026-11-07)
 

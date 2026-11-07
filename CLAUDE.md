@@ -202,9 +202,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   lambdas capturing `self`. Receive buffer reused across keep-alive requests; hard cap on
   header size (default 16 KB) and an idle timeout (default 15 s) via `asio::steady_timer`;
   a request whose handler is still working (an upstream exchange with its own timeouts, a
-  control command running a task or a download) is not idle, only a body the client does
-  not send ends it (before 2026-09-26 any HTTP/1 request slower than the idle timeout was
-  closed with an empty reply; HTTP/2 always did it this way).
+  control command running a task or a download) is not idle, nor a streamed answer waiting on
+  its origin (alpha.141: an HTTP/1 event stream quiet for idle_timeout was cut), only a body
+  the client does not send ends it (before 2026-09-26 any HTTP/1 request slower than the idle
+  timeout was closed with an empty reply; HTTP/2 always did it this way).
   Idle memory (G2, 2026-09-23): a connection idle for 2 s sheds what it does not need
   (both protocols: body and writer buffers, pooled HTTP/2 streams, and the receive buffer,
   whose pending read is cancelled and replaced by `async_wait(wait_read)`; the buffer
@@ -534,8 +535,15 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   reader goes first (the body dropped, an HTTP/2 stream reset or closed) ends its exchange
   (`UpstreamRequest::reader_gone`, alpha.140): before, it read on to its read-ahead and was freed
   without giving back its pool slot, 503 for the location after `max_connections` such clients.
-  HTTP/1 has no client read during a streamed answer, so a quiet origin's exchange ends at the
-  next write or `read_timeout`.
+  HTTP/1 keeps its handle on the exchange while a streamed answer is written, so the same
+  callback watches the client during the stream (alpha.141; before, a head within the tick left
+  it unwatched until idle_timeout), and `release_upstream` drops the callback with the handle
+  (an exchange whose end is still on its way outlives its connection: before alpha.141 its tick
+  called a freed connection). The watch is a read: a FIN or a reset ends the exchange at once
+  (a half-close counts as gone, as nginx and Go have it); a client that vanishes without either
+  is the kernel's to notice (keepalive or TCP_USER_TIMEOUT on long streams was proposed with it,
+  2026-11-08, after reading nginx, httpd, Caddy/Go and lighttpd, and not built; the owner chose
+  the watch alone).
 - **Range requests** (E1, `src/http1/range.hpp`): one `bytes=` range with If-Range; 206
   as a slice of the cache entry or a `FileBody` with an offset (sendfile keeps the fast
   path), 416 past the end, `Accept-Ranges: bytes` prebuilt into the entry block.

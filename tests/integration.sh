@@ -3265,12 +3265,13 @@ fi
 
 # Answers pulled from a source over HTTP/2 (the alpha.138 VPS report, F1): compressed in pieces over
 # h2c and TLS they decode to the same bytes, and a WINDOW_UPDATE while a pull waits starts no second read.
-# A client that leaves a streamed answer (fuzz_h2_bodies, alpha.140) gives back the location's slot.
+# A client that leaves a streamed answer (fuzz_h2_bodies, alpha.140) gives back the location's slot;
+# over HTTP/1 also from a quiet stream, which waits past idle_timeout (alpha.141).
 if [ "$(uname -s)" = Linux ] && python3 -c 'import h2' 2>/dev/null; then
   python3 tests/h2-streamed-bodies.py "$BIN" > bench/tmp/h2-streamed-bodies.log 2>&1
   h2_streamed_result=$?
   cat bench/tmp/h2-streamed-bodies.log
-  check "HTTP/2 answers pulled from a source: compressed in pieces over h2c and TLS each decodes to what was sent, ten streamed answers on one connection with a WINDOW_UPDATE in every pause each whole, a client leaving an event stream (reset, closed, HTTP/1) gives back the slot and the origin's connection" "0" "$h2_streamed_result"
+  check "HTTP/2 answers pulled from a source: compressed in pieces over h2c and TLS each decodes to what was sent, ten streamed answers on one connection with a WINDOW_UPDATE in every pause each whole, a client leaving an event stream (reset, closed, HTTP/1, HTTP/1 while the origin is quiet) gives back the slot and the origin's connection, an HTTP/1 stream quiet past idle_timeout goes on, a client leaving a CGI answer whose script runs on leaves the server up" "0" "$h2_streamed_result"
 else
   echo "skip HTTP/2 streamed bodies (Linux and python3-h2 required; run in the devbox)"
 fi

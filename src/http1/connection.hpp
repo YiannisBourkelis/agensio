@@ -174,6 +174,7 @@ public:
     // next request, or close.
     void on_response_written() {
         responding_ = false;
+        release_upstream();
         const bool keep_alive = stream_.response.keep_alive;
         log_request();
         if (peer_) {
@@ -215,8 +216,8 @@ public:
         if (handed_over_) return;
         ++request_gen_;  // a late upstream completion must not touch this connection
         if (upstream_) {
-            upstream_->cancel();
-            upstream_.reset();
+            if (!responding_) upstream_->cancel();  // a streamed answer's source ends it below (reader_gone)
+            release_upstream();
         }
         if (!request_logged_ && stream_.request.length > 0) log_request();  // client went away mid-response
         tunnel_ = false;
@@ -407,8 +408,10 @@ private:
                 // download) is not idleness: the idle limit is for a connection with nothing
                 // in flight, as HTTP/2 applies it. Only a body the client does not send ends
                 // it here. Before 2026-09-26 any request slower than idle_timeout (15 s) got
-                // its connection closed with an empty reply.
-                if (self->handler_busy_ && !self->body_reading_) {
+                // its connection closed with an empty reply. A streamed answer waiting on its origin
+                // is the same (its read_timeout bounds it); before 0.1.0-alpha.141 an event stream
+                // quiet for idle_timeout was cut, over HTTP/1 only.
+                if ((self->handler_busy_ || (self->upstream_ && self->writer_.pulling())) && !self->body_reading_) {
                     self->arm_timer(self->timeout_);
                     return;
                 }
@@ -538,13 +541,27 @@ private:
 
     // E9: an exchange that has run for a tick is watched for its client leaving, so the
     // pool slot and the application's work are given back instead of held until the
-    // answer arrives. Fast exchanges never arm this (no syscall on the common path); a
-    // body still being read keeps the body reader as the watch.
+    // answer arrives, or while it streams (the read stays out until the client sends or
+    // goes). Fast exchanges never arm this (no syscall on the common path); a body still
+    // being read keeps the body reader as the watch. Before 0.1.0-alpha.141 a head that came
+    // within the tick left a streamed answer unwatched: a client gone from a quiet event
+    // stream held its slot until idle_timeout.
     static void on_slow_exchange(void* ctx, unsigned gen) {
         auto* self = static_cast<Http1Connection*>(ctx);
         if (self->request_gen_ != gen || !self->upstream_ || self->body_pending_ || self->read_pending_) return;
         if (self->in_len_ >= self->in_.size()) return;  // no room to notice anything
         self->arm_read();
+    }
+
+    // Lets go of the exchange, and of the slow callback with it: the callback holds this
+    // connection's raw pointer, and an exchange whose end is still on its way (a CGI child's
+    // exit, php-fpm's END_REQUEST after the whole answer) outlives the connection. Before
+    // 0.1.0-alpha.141 the callback stayed, and such an exchange younger than a tick called a
+    // freed connection (left-h1-cgi in tests/h2-streamed-bodies.py).
+    void release_upstream() noexcept {
+        if (!upstream_) return;
+        upstream_->on_slow(nullptr, nullptr, 0);
+        upstream_.reset();
     }
 
     // A reload switched the worker to a new generation: take it at this request boundary.
@@ -833,7 +850,9 @@ private:
                     // A 101: the origin connection becomes the other end of a tunnel once
                     // the head is out (on_response_written).
                     if (self->stream_.response.upgrade && self->upstream_) self->peer_ = self->upstream_->take_connection();
-                    self->upstream_.reset();
+                    // A streamed answer keeps its exchange until it is written: the slow tick then
+                    // watches the client while it streams, and the idle timer sees it wait on the origin.
+                    if (!std::holds_alternative<std::unique_ptr<StreamBody>>(self->stream_.response.body)) self->release_upstream();
                     self->respond();
                 };
                 if (loc->kind == HandlerKind::httparena) {
@@ -983,7 +1002,7 @@ private:
         ++request_gen_;
         if (upstream_) {
             upstream_->cancel();
-            upstream_.reset();
+            release_upstream();
         }
         handler_busy_ = false;
         worker_.state.now = std::time(nullptr);

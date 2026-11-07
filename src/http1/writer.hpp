@@ -76,6 +76,9 @@ public:
     // Body bytes handed to the kernel for the current or last response (access log).
     std::uint64_t body_bytes_sent() const noexcept { return body_sent_; }
 
+    // A StreamBody read is out: the answer waits on its source, not on the client.
+    bool pulling() const noexcept { return pulling_; }
+
     // Idle: the chunk and coalescing buffers go (they come back on first use).
     void shed() noexcept {
         std::vector<char>().swap(chunk_);
@@ -87,6 +90,7 @@ public:
         sf_file_ = nullptr;
         stream_ = nullptr;
         mem_rest_ = {};
+        pulling_ = false;
     }
 
 private:
@@ -355,11 +359,13 @@ private:
         }
         std::size_t want = chunk_.size();
         if (source_sized_) want = static_cast<std::size_t>(std::min<std::uint64_t>(source_remaining_, want));
+        pulling_ = true;
         source.async_read(chunk_.data(), want,
                           [self = self(), this](std::error_code ec, std::size_t n) { on_pulled(ec, n); });
     }
 
     void on_pulled(std::error_code ec, std::size_t n) {
+        pulling_ = false;
         if (ec) {  // the source failed mid-body: cut the connection so the client sees a short body
             owner_.close();
             return;
@@ -513,6 +519,7 @@ private:
     std::string_view mem_rest_;    // what is left of a memory body after the pieces written (view; the response keeps it alive)
     bool chunked_ = false;      // StreamBody of unknown length on HTTP/1.1
     bool source_done_ = false;  // StreamBody reported end of body
+    bool pulling_ = false;      // a StreamBody read is out (pulling())
     bool source_sized_ = false;         // the StreamBody declared its length
     std::uint64_t source_remaining_ = 0;  // bytes of that length still to send
     ChunkSizeBuffer chunk_size_{};

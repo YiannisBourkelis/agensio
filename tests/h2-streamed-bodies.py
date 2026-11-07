@@ -40,6 +40,20 @@ its length, /pause/K answers K pieces of 20 KB chunked, 0.3 s apart. Rows:
   after its first DATA (RST_STREAM, the connection closed; over HTTP/1 the connection closed while
   the origin keeps sending): the origin's connection closes within 2 s (HTTP/2: the origin quiet
   after its first event), and the next request through the slot is answered 200.
+
+HTTP/1 during a streamed answer (2026-11-08): nothing read from the client while the answer streamed
+unless the origin had taken a tick (250 ms) to send its head, and the idle timer counted a stream
+waiting on its origin as an idle connection.
+- left-h1-quiet: the HTTP/1 client leaves after the first event of an origin that then sends nothing:
+  the origin's connection closes within 2 s, the next request through the slot is answered 200.
+  On 0.1.0-alpha.140 it closed only at idle_timeout.
+- h1-quiet-stream: an event stream over HTTP/1.1 whose origin is quiet for 5 s, longer than the
+  server's idle_timeout (3 s here), gets its second event and its end. On 0.1.0-alpha.140 it was cut
+  at idle_timeout (HTTP/2 was not).
+- left-h1-cgi: a CGI script on a streaming location (buffering = false) prints its whole answer with
+  its length and runs on for a second; its client takes the answer and leaves at once, three times;
+  the server lives on. On 0.1.0-alpha.140 the exchange, still waiting for the script's end, called its
+  freed connection at its slow tick (the sanitizer build: heap-use-after-free in on_slow_exchange).
 Requires python3-h2 and openssl. Exit 1 on any failed row.
 """
 import argparse
@@ -118,7 +132,8 @@ HOLD_CLOSED = {}  # /hold/NAME: when the server closed the origin's connection
 
 class SlotOrigin(socketserver.BaseRequestHandler):
     """One answer per connection: /quick at once; /hold/NAME an event stream's head and one event,
-    then quiet until the server closes; /flood/S events of 64 KB back to back for S seconds."""
+    then quiet until the server closes; /flood/S events of 64 KB back to back for S seconds; /later/S
+    one event, S seconds of quiet, a second event and the stream's end."""
 
     def handle(self):
         sock = self.request
@@ -134,8 +149,17 @@ class SlotOrigin(socketserver.BaseRequestHandler):
             return
         sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
         event = b"data: " + b"e" * 2000 + b"\n\n"
-        m = re.fullmatch(r"/(hold|flood)/(\w+)", target)
+        m = re.fullmatch(r"/(hold|flood|later)/(\w+)", target)
         if not m:
+            return
+        if m.group(1) == "later":
+            sock.sendall(b"%x\r\n" % len(event) + event + b"\r\n")
+            time.sleep(int(m.group(2)))
+            last = b"data: two\n\n"
+            try:
+                sock.sendall(b"%x\r\n" % len(last) + last + b"\r\n0\r\n\r\n")
+            except OSError:
+                pass
             return
         if m.group(1) == "hold":
             sock.sendall(b"%x\r\n" % len(event) + event + b"\r\n")
@@ -288,8 +312,23 @@ class Server:
                 sites += f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{port}"]\n' + slots + (extra or "")
                 continue
             sites += f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{port}"]\n' + upstream + extra
+        # A CGI script that prints its whole answer, with its length, and runs on for a second with its
+        # output still open, on a location that streams: the client has the answer at once, and the
+        # exchange's end (the child's exit) comes after the client is gone.
+        (root / "www").mkdir()
+        (root / "cgi").mkdir()
+        script = root / "cgi" / "linger.cgi"
+        script.write_text("#!/bin/sh\nprintf 'Content-Type: text/plain\\r\\nContent-Length: 2\\r\\n\\r\\nok'\nsleep 1\n")
+        script.chmod(0o755)
+        self.ports["cgi"] = free_port()
+        while list(self.ports.values()).count(self.ports["cgi"]) > 1:
+            self.ports["cgi"] = free_port()
+        sites += (f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{self.ports["cgi"]}"]\nroot = "{root}/www"\n'
+                  f'[[site.location]]\npath = "/cgi/"\nalias = "{root}/cgi"\ncgi = {{ buffering = false }}\n')
+        # idle_timeout below the quiet of /later/5, so that the HTTP/1 rows tell a stream waiting on its
+        # origin from an idle connection quickly.
         (root / "agensio.toml").write_text(
-            '[server]\nworkers = 1\nprotocols = ["h1", "h2", "h2c"]\n'
+            '[server]\nworkers = 1\nprotocols = ["h1", "h2", "h2c"]\nidle_timeout = 3\n'
             f'pid_file = "{root}/agensio.pid"\nstate_dir = "{root}/state"\n'
             f'[log]\naccess = "off"\nerror = "{root}/error.log"\n' + sites)
         self.log = (root / "server.log").open("w+")
@@ -470,6 +509,63 @@ def row_left_h1_close(srv):
     return None if status.startswith("HTTP/1.1 200") else f"the next request through the slot: {status}"
 
 
+def row_left_h1_quiet(srv):
+    with socket.create_connection(("127.0.0.1", srv.ports["slots"]), timeout=5) as s:
+        s.sendall(b"GET /hold/h1q HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        data = b""
+        while b"data: " not in data:  # the head and the first event
+            d = s.recv(65536)
+            if not d:
+                break
+            data += d
+        if not data.startswith(b"HTTP/1.1 200"):
+            return "the event stream itself: " + data.split(b"\r\n", 1)[0].decode(errors="replace")
+    left = time.monotonic()  # the origin sends nothing more: only a watch of the client sees it leave
+    while "h1q" not in HOLD_CLOSED and time.monotonic() < left + 4:
+        time.sleep(0.05)
+    closed = HOLD_CLOSED.get("h1q")
+    if closed is None or closed - left > 2:
+        return f"the origin's connection still open {time.monotonic() - left:.1f} s after the client left"
+    status = quick(srv.ports["slots"])
+    return None if status.startswith("HTTP/1.1 200") else f"the next request through the slot: {status}"
+
+
+def row_h1_quiet_stream(srv):
+    start = time.monotonic()
+    with socket.create_connection(("127.0.0.1", srv.ports["slots"]), timeout=10) as s:
+        s.sendall(b"GET /later/5 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        data = b""
+        while not data.endswith(b"\r\n0\r\n\r\n"):
+            d = s.recv(65536)
+            if not d:
+                break
+            data += d
+    if not data.startswith(b"HTTP/1.1 200"):
+        return "the event stream itself: " + data.split(b"\r\n", 1)[0].decode(errors="replace")
+    if b"data: two" not in data or not data.endswith(b"\r\n0\r\n\r\n"):
+        return f"cut after {time.monotonic() - start:.1f} s, before the origin's second event (idle_timeout 3 s)"
+    return None
+
+
+def row_left_h1_cgi(srv):
+    for _ in range(3):
+        with socket.create_connection(("127.0.0.1", srv.ports["cgi"]), timeout=5) as s:
+            s.sendall(b"GET /cgi/linger.cgi HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            data = b""
+            while not data.endswith(b"\r\n\r\nok"):
+                d = s.recv(65536)
+                if not d:
+                    break
+                data += d
+        if not data.startswith(b"HTTP/1.1 200"):
+            return "the CGI answer: " + data.split(b"\r\n", 1)[0].decode(errors="replace")
+    time.sleep(1.5)  # past the exchanges' slow tick and the scripts' end
+    if srv.process.poll() is not None:
+        return f"the server exited ({srv.process.returncode}) after clients left lingering CGI answers"
+    status = quick(srv.ports["slots"])
+    return None if status.startswith("HTTP/1.1 200") else f"the next request afterwards: {status}"
+
+
 ROWS = {
     "h2c-pieces": row_h2c_pieces,
     "h2-window-during-pull": row_h2_window_during_pull,
@@ -479,6 +575,9 @@ ROWS = {
     "left-h2-close": row_left_h2_close,
     "left-h2-reset-compressed": row_left_h2_reset_compressed,
     "left-h1-close": row_left_h1_close,
+    "left-h1-quiet": row_left_h1_quiet,
+    "h1-quiet-stream": row_h1_quiet_stream,
+    "left-h1-cgi": row_left_h1_cgi,
 }
 
 
