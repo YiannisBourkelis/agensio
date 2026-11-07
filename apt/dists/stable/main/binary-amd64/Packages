@@ -1,0 +1,36 @@
+Package: agensio
+Architecture: amd64
+Version: 0.1.0~alpha.138
+Priority: optional
+Section: httpd
+Maintainer: Yiannis Bourkelis <yiannis@grbytes.com>
+Installed-Size: 9434
+Depends: adduser, libbrotli1 (>= 0.6.0), libc6 (>= 2.34), libcrypt1 (>= 1:4.1.0), libgcc-s1 (>= 3.0), libssl3 (>= 3.0.0~~alpha1), libstdc++6 (>= 12), libzstd1 (>= 1.4.0), zlib1g (>= 1:1.2.2)
+Recommends: php-fpm, logrotate
+Filename: pool/stable/agensio_0.1.0~alpha.138_amd64.deb
+Size: 4098640
+MD5sum: 679aa210e404b0caf2cace051f4b9af3
+SHA1: 26fa4e0954bddec2b3c1f7b129caddce71c3c234
+SHA256: 8ee1dc3f666a798bb529b410ca5eb8e64ddbc2615ca19c8145c407be1daad209
+SHA512: 0d3d39be80977617310f78a9a98b31434c4770aa56fadfcc9d851ba2c43484f25d486532c61f542d2cc40868d7fbcef532d983c75e6d8947f9c93ad7659c76c8
+Homepage: https://github.com/YiannisBourkelis/agensio
+Description: Fast web server with PHP, reverse proxy, automatic TLS and an MCP control plane
+
+Package: agensio
+Architecture: amd64
+Version: 0.1.0~alpha.139
+Priority: optional
+Section: httpd
+Maintainer: Yiannis Bourkelis <yiannis@grbytes.com>
+Installed-Size: 9438
+Depends: adduser, libbrotli1 (>= 0.6.0), libc6 (>= 2.34), libcrypt1 (>= 1:4.1.0), libgcc-s1 (>= 3.0), libssl3 (>= 3.0.0~~alpha1), libstdc++6 (>= 12), libzstd1 (>= 1.4.0), zlib1g (>= 1:1.2.2)
+Recommends: php-fpm, logrotate
+Filename: pool/stable/agensio_0.1.0~alpha.139_amd64.deb
+Size: 4099296
+MD5sum: e635f9bdcc2c0e7780387d7cf412938f
+SHA1: 72f9e016aecdfcbe29a9617bb8d213eb34ca7f67
+SHA256: 3cb9e03ffbd09448c19730cdf790061b941b31fd4da56ef012589d9bd6214de8
+SHA512: 1a0ef7073bd321cd1f743ba9c5a99286d27fc8d44fa0f232b752ae548c428ad73933ebe130b599fc0ec0a57889ffeb38b4ee22fecafb1d395205a483e9dd9038
+Homepage: https://github.com/YiannisBourkelis/agensio
+Description: Fast web server with PHP, reverse proxy, automatic TLS and an MCP control plane
+
