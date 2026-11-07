@@ -15,6 +15,11 @@
   departed client (or `read_timeout` when the application is quiet). An answer without a body
   (HEAD, 204, 304) or whose declared length the client took whole is left to finish, so php-fpm's
   END_REQUEST and a CGI script's exit come as before.
+- **Fix: a unix socket path too long for a socket address is refused at load.** A FastCGI socket or
+  a proxy's `upstream = "unix:..."` longer than a socket address holds (107 bytes on Linux, 103 on
+  macOS) loaded, and the first request to it ended the server (the address's constructor threw on
+  the worker); `agensio -t` aborted with a core dump. The configuration is now refused with the
+  path's length, as the generated pools' sockets already were.
 - **The texts name the table a PHP stream needs.** A location has no `php` table: a PHP script's
   answers stream with `handler = "fastcgi"` and `fastcgi = { buffering = false }` in its location
   (which uses the site's own pool when it names no socket), or for all of a hand-written site's PHP

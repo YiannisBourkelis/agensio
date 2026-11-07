@@ -10712,6 +10712,19 @@ static void test_unknown_keys() {
     CHECK(refused(site + "proxy = { tls = { server_nmae = \"a.test\" } }\n", ".proxy.tls: unknown key 'server_nmae' (did you mean 'server_name'?)"));
     CHECK(refused(site + "[[site.location]]\npath = \"/a/\"\nhiden_files = true\n", "unknown key 'hiden_files' (did you mean 'hidden_files'?)"));
     CHECK(refused(site + "[[site.location]]\npath = \"/a/\"\nphp = { socket = \"unix:/run/x.sock\" }\n", "unknown key 'php'"));  // the location key is fastcgi
+    // A unix socket path longer than a socket address holds (107 bytes on Linux, 103 on macOS) is refused at
+    // load, as the generated pools' already were: asio's endpoint throws on it, on the worker at the first
+    // request to it, and `-t` aborted with a core dump (2026-11-07).
+    {
+        const std::string long_sock = "/run/" + std::string(110, 'p') + ".sock";
+        CHECK(refused(site + "php = { socket = \"unix:" + long_sock + "\" }\n", "a unix socket's path holds"));
+        CHECK(refused(site + "[[site.location]]\npath = \"/api/\"\nupstream = \"unix:" + long_sock + "\"\n", "a unix socket's path holds"));
+        CHECK(refused(site + "[[site.location]]\npath = \"/f/\"\nhandler = \"fastcgi\"\nfastcgi = { socket = \"" + long_sock + "\" }\n",
+                      "a unix socket's path holds"));
+        const std::string fits = "/run/" + std::string(90, 'p') + ".sock";  // 100 bytes: loads everywhere
+        write("k.toml", site + "php = { socket = \"unix:" + fits + "\" }\n");
+        CHECK(load_config(dir / "k.toml").sites.size() == 1);
+    }
     // A key of the site in a location: the hint names the location's own table or the site, never the
     // file's top level, where `php` is root's [php] runtimes and a root additions file has nothing (the
     // alpha.139 report, F2: its hint sent a managed PHP site's streaming location to a second refusal).

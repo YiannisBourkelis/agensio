@@ -13,6 +13,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <csignal>
 #endif
@@ -70,6 +71,15 @@ bool parse_upstream_address(std::string_view text, UpstreamAddress& out, std::st
             error = "unix socket path must be absolute: '" + std::string(text) + "'";
             return false;
         }
+#ifndef _WIN32
+        // What a socket address holds (sun_path less its NUL): asio's endpoint throws on a longer one,
+        // which on a worker ended the server at the first request (2026-11-07). Refused at load instead.
+        if (constexpr std::size_t max = sizeof(sockaddr_un{}.sun_path) - 1; out.path.size() > max) {
+            error = "unix socket path " + out.path + " is " + std::to_string(out.path.size()) + " bytes, more than the " +
+                    std::to_string(max) + " a unix socket's path holds";
+            return false;
+        }
+#endif
         out.key = "unix:" + out.path;
         return true;
     }
