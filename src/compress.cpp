@@ -284,10 +284,16 @@ ZstdContext& zstd_context() {
 
 #ifdef AGENSIO_HAS_BROTLI
 namespace {
+// The padding's metadata meta-block is never one byte long: libbrotli before 1.1.0 (1.0.9, Debian 12's
+// and Ubuntu 22.04's, which the .deb links) writes that block without its length byte, a stream no
+// decoder takes (google/brotli 04f294b18a; docs/third-party-bugs.md). A padding of 1 is sent as 2.
+constexpr unsigned brotli_padding(unsigned padding) noexcept { return padding == 1 ? 2 : padding; }
+
 // brotli for one answer: an encoder made and freed here (its state is sized by the window), the
 // window the smallest that holds the answer up to the cap (design 3; a window is 2^bits - 16 bytes),
 // the padding as a metadata meta-block the decoder skips (RFC 7932 9.2), then the data, finished.
 bool brotli_buffered(int quality, unsigned padding, std::string_view in, std::string& out) {
+    padding = brotli_padding(padding);
     int lgwin = BROTLI_MIN_WINDOW_BITS;
     while (lgwin < kBrotliWindowBits && (static_cast<std::size_t>(1) << lgwin) - 16 < in.size()) ++lgwin;
     BrotliEncoderState* enc = BrotliEncoderCreateInstance(nullptr, nullptr, nullptr);
@@ -617,8 +623,8 @@ bool StreamEncoder::begin(Encoding e, int level, Kind kind, unsigned padding, st
                 s->br = nullptr;
                 return false;
             }
-            s->meta_left = padding;
-            s->meta_open = padding > 0;
+            s->meta_left = brotli_padding(padding);
+            s->meta_open = s->meta_left > 0;
             s->level = level;
             break;
 #else

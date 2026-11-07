@@ -46,7 +46,9 @@ inline constexpr int kBrotliWindowBits = 18;
 // Heal the Breach mitigation; Rails' Thruster pads up to 32 bytes by default, Django up to 100).
 // What protects is the spread of the random part, so the bound is the padding's own, 32, and the
 // coding's framing (6 bytes for gzip, 8 for zstd, up to 4 for brotli) comes on top. A length of 0
-// adds nothing. padding_length() draws one from the calling thread's generator.
+// adds nothing; brotli sends 1 as 2 (brotli_padding in compress.cpp: libbrotli before 1.1.0 writes a
+// one-byte metadata block without its length). padding_length() draws one from the calling thread's
+// generator.
 inline constexpr unsigned kPaddingMax = 32;
 unsigned padding_length() noexcept;
 

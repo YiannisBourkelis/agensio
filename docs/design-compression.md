@@ -379,7 +379,8 @@ visitor and does two things no mainstream server does by default:
 - **Every answer compressed per request is padded** with a length drawn per answer, 0 to 32 bytes
   (a draw of 0 leaves the field out), where the coding's decoders skip it (gzip's FEXTRA field,
   RFC 1952 2.3.1.1; a zstd skippable frame, RFC 8878 3.1.2; a brotli metadata meta-block, RFC 7932
-  9.2): the Heal the Breach mitigation, as Rails' Thruster (32 bytes) and Django's GZipMiddleware
+  9.2, never one byte long, since libbrotli before 1.1.0 writes that block without its length: brotli
+  sends a draw of 1 as 2, `docs/third-party-bugs.md`): the Heal the Breach mitigation, as Rails' Thruster (32 bytes) and Django's GZipMiddleware
   (100) apply it by default. What protects is the spread of the random part, not the bytes on the
   wire: an attacker averaging the length pays with the square of it, so 32 costs him 1.7 times the
   samples of 24 and hundreds of times those of no padding, for four more bytes on average per

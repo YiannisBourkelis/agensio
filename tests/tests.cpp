@@ -962,6 +962,54 @@ static void test_stream_encoder() {
         CHECK(ZSTD_getFrameContentSize(out.data(), out.size()) == small.size());
     }
 #endif
+    // Every padding length decodes, buffered and in pieces, in every coding. libbrotli before 1.1.0
+    // (1.0.9: Debian 12's and Ubuntu 22.04's, which the .deb links) writes a metadata meta-block of one
+    // byte without its length (google/brotli 04f294b18a, docs/third-party-bugs.md), so an answer padded
+    // by 1 decoded nowhere: one brotli answer in 33 from an application on those hosts, since
+    // 0.1.0-alpha.118 (found by the release run of 0.1.0-alpha.140, where this file's checks failed one
+    // run in eight). brotli is never asked for that block, on any library: a padding of 1 gives what 2 gives.
+    {
+        const std::string small = piece_text(20000);
+        for (const Encoding e : {Encoding::zstd, Encoding::br, Encoding::gzip}) {
+            if (!coding_built(e)) continue;
+            const int level = e == Encoding::gzip ? 5 : 3;
+            const auto pieces = [&](Kind kind, unsigned padding) {
+                StreamEncoder enc;
+                std::string out;
+                if (!enc.begin(e, level, kind, padding, kind == Kind::answer ? small.size() : 0)) return out;
+                std::vector<char> buf(65536);
+                const char* in = small.data();
+                std::size_t len = small.size();
+                for (const Op op : {Op::process, Op::finish}) {
+                    bool done = false;
+                    do {
+                        char* o = buf.data();
+                        std::size_t room = buf.size();
+                        if (!enc.run(op, in, len, o, room, done)) return std::string();
+                        out.append(buf.data(), buf.size() - room);
+                    } while (!done);
+                }
+                return out;
+            };
+            std::vector<unsigned> failed;
+            for (unsigned padding = 0; padding <= kPaddingMax; ++padding) {
+                std::string whole;
+                bool ok = compress_buffered(e, level, padding, small, whole);
+                for (const std::string& sent : {whole, pieces(Kind::answer, padding), pieces(Kind::events, padding)}) {
+                    const test::Decoded d = test::decode_stream(e, sent);
+                    ok = ok && !sent.empty() && (!d.available || (d.ok && d.ended && d.out == small));
+                }
+                if (!ok) failed.push_back(padding);
+            }
+            for (const unsigned padding : failed) std::printf("padding %u in %s does not decode\n", padding, encoding_name(e).data());
+            CHECK(failed.empty());
+            if (e == Encoding::br) {
+                std::string one, two;
+                CHECK(compress_buffered(e, level, 1, small, one) && compress_buffered(e, level, 2, small, two) && one == two);
+                CHECK(pieces(Kind::answer, 1) == pieces(Kind::answer, 2) && pieces(Kind::events, 1) == pieces(Kind::events, 2));
+            }
+        }
+    }
     // The budget: encoders taken until the worker's is spent, the next refused and counted; one given
     // back makes room again. Nothing compressed meanwhile: the charge is counted at begin.
     const Encoding any = coding_built(Encoding::gzip) ? Encoding::gzip : coding_built(Encoding::zstd) ? Encoding::zstd : Encoding::identity;

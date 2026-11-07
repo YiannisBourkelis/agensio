@@ -113,6 +113,42 @@ When asked to check the third-party bugs:
 - **When fixed:** nothing to change here; move the entry to the fixed list.
 - **Search terms:** `78405`, `request_terminate_timeout keepalive`, `fpm_request_check_timeouts`.
 
+### libbrotli: a metadata meta-block of one byte is written without its length
+
+- **Upstream:** google/brotli commit
+  [04f294b18a](https://github.com/google/brotli/commit/04f294b18a1695a6052db26becb85bde1b8ae4a4) "Fix
+  emitting 1-byte long metadata block" (2023-01-29, no issue or pull request attached), first released
+  in [v1.1.0](https://github.com/google/brotli/releases/tag/v1.1.0) (2023-08-31). Debian 12 ships
+  1.0.9-2+deb12u1 and Ubuntu 22.04 1.0.9-2ubuntu0.1, both without it; Debian 13, Ubuntu 24.04, Fedora
+  and Arch ship 1.1.0 or later.
+- **Last checked:** 2026-11-07. **Status:** fixed in 1.1.0; unfixed in Debian 12 and Ubuntu 22.04.
+- **The bug:** `WriteMetadataHeader` in `c/enc/encode.c` sizes the length field of a metadata
+  meta-block (RFC 7932 9.2: `MSKIPBYTES`, then `MSKIPLEN - 1`) as `nbits = (block_size == 1) ? 0 : ...`,
+  so a block of one byte gets `MSKIPBYTES = 0`, which means an empty block, followed by the byte the
+  decoder then reads as the next meta-block's header. Every decoder, 1.0.9's and 1.1.0's alike, refuses
+  the stream. 1.1.0 has `? 1 :`.
+- **How it showed in agensio:** the release run of 0.1.0-alpha.140 (its `packages` job builds on
+  Ubuntu 22.04) failed one check of the compressed-body tests; on 22.04 the unit tests failed one run
+  in eight, at five different checks, always a brotli answer that did not decode from its first byte.
+  Every padding length was then tried: only 1 failed, buffered and in pieces, and a standalone program
+  showed the 1.0.9 encoder's output 72 bytes where 1.1.0's is 73. In production: since 0.1.0-alpha.118
+  (`compress_signed_in`) and on every compressed answer since alpha.119, an application's answer
+  (PHP, proxied, CGI) compressed with brotli carries a padding of 0 to 32 bytes drawn per answer as
+  such a block, so on a host with libbrotli 1.0.9 (the .deb links the host's library) one brotli answer
+  in 33 was a body the browser could not decode. Static files' cached copies carry no padding and were
+  never affected.
+- **How agensio handles it:** since 0.1.0-alpha.141 the padding's block is never one byte long, on any
+  library: a padding of 1 is sent as 2 (`brotli_padding` in `src/compress.cpp`, used by
+  `brotli_buffered` and the stream encoder's brotli branch). The length still differs from answer to
+  answer; 2 is drawn twice as often as any other length. `test_stream_encoder` decodes every padding
+  length in every coding, buffered and in pieces, and holds brotli's padding of 1 to the bytes of 2, so
+  the workaround is checked on hosts with a fixed library too.
+- **When fixed:** once no distribution the packages support ships libbrotli before 1.1.0 (Ubuntu 22.04's
+  standard support ends in April 2027, Debian 12's LTS in June 2028), `brotli_padding` can go; it costs
+  one comparison per answer, so keeping it is also fine. Before removing it, run the padding test on the
+  oldest supported distribution.
+- **Search terms:** `metadata block`, `WriteMetadataHeader`, `MSKIPBYTES`, `EMIT_METADATA`.
+
 ## Checked: fixed upstream
 
 - **php-fpm [bug #69860](https://bugs.php.net/bug.php?id=69860)** "php-fpm process accounting is

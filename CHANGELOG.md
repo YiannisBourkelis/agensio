@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.0-alpha.141 (2026-11-07)
+
+- **Fix: brotli answers from applications decode on Debian 12 and Ubuntu 22.04.** libbrotli before
+  1.1.0, which those two distributions ship and the .deb links, writes a metadata block of one byte
+  without its length, and agensio pads each compressed answer from an application (PHP, proxied, CGI)
+  with such a block of 0 to 32 bytes drawn per answer: when the draw was 1, the answer was a body no
+  browser could decode. One brotli answer in 33 since 0.1.0-alpha.119 (since alpha.118 with
+  `compress_signed_in`); hosts with libbrotli 1.1.0 or later (Debian 13, Ubuntu 24.04, Fedora, Arch)
+  and static files were never affected. A padding of 1 is now sent as 2. Found by the release run of
+  0.1.0-alpha.140, whose `packages` job (Ubuntu 22.04) failed the compressed-body tests; that release
+  published no packages for Debian 12 and Ubuntu 22.04, the RPM or the APT repository's update. The
+  upstream fix and what to do when the distributions carry it: `docs/third-party-bugs.md`.
+
 ## 0.1.0-alpha.140 (2026-11-07)
 
 - **Fix: a client that leaves a streamed answer gives back its place to the application.** An
