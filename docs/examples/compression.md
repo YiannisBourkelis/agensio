@@ -254,7 +254,9 @@ proxy = { buffering = false }   # each event goes on as the application sends it
 
 **What it does.** Each event is compressed as it arrives and sent at once: agensio flushes the
 coding whenever the application pauses, so the browser's `EventSource` sees every event when it was
-sent, and the repeated keys cost a few bytes after the first. A stream gets an encoder sized for a
+sent, and the repeated keys cost a few bytes after the first. The location's `buffering = false` is
+what sends each event on: with buffering on, the default, the whole stream is collected and reaches
+the browser at its end, compressed or not. A stream gets an encoder sized for a
 connection held open (386 KB with zstd, 86 KB with gzip), and each worker gives such encoders at
 most 32 MB: past it a stream goes out uncompressed, counted in `status`. Off by default, because
 every event's compressed size is visible on its own: turn it on only for streams that never carry
@@ -269,14 +271,33 @@ curl -sS -o /dev/null -D - -H 'Accept-Encoding: zstd' --max-time 2 https://live.
 agensio ctl status | grep -o '"streams_[a-z_]*":[0-9]*'
 ```
 
-**On a managed site.**
+**On a managed site.** The compression is two fields:
 
 ```sh
 agensio ctl site-update live.example.com --compression on --compression-events on --yes --reason "compress the price stream"
 ```
 
+No field of `site-update` adds a location or turns buffering off, so the `/events` location goes into
+the site's root additions file, root's and writable by root alone; without it the events wait for the
+stream's end:
+
+```sh
+cat > /etc/agensio/sites.d/live.example.com.root.toml <<'EOF'
+site = "live.example.com"
+
+[[location]]
+path = "/events"
+upstream = "http://127.0.0.1:3000"
+proxy = { buffering = false }
+EOF
+chmod 644 /etc/agensio/sites.d/live.example.com.root.toml
+agensio reload
+agensio ctl site live.example.com          # root_additions: the file and the location it added
+```
+
 Through MCP, `site_update` with `response_compression: {"enabled": true, "compress_event_streams": true}`,
-after the user confirmed what the stream carries.
+after the user confirmed what the stream carries; `site_show` names the root additions file, and the
+agent hands root this block, since no tool writes it.
 
 **Reference:** [Response compression](../configuration.md#20-response-compression-response_compression).
 

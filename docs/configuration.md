@@ -4492,7 +4492,7 @@ site's defaults.
 | `enabled` | yes | yes | `false` | compression on or off; a site's `response_compression = true` or `false` says this alone |
 | `exclude_paths` | no | yes | `[]` | path prefixes never compressed (at most 32, `/`-rooted) |
 | `compress_signed_in` | yes | yes | `false` | compress the answers agensio knows to be a signed-in visitor's too (BREACH below) |
-| `compress_event_streams` | yes | yes | `false` | compress `text/event-stream` too, each event sent as it comes |
+| `compress_event_streams` | yes | yes | `false` | compress `text/event-stream` too, each event sent as it comes where the location streams (`buffering = false`) |
 | `offload` | yes | yes | `false` | keep `Accept-Encoding` from the application, so agensio compresses |
 | `codings` | yes | yes | `["zstd", "br", "gzip"]` | the codings offered and their order; a site's list replaces the main file's |
 | `levels` | yes | yes | `{ zstd = 3, br = 3, gzip = 5 }` | the levels of answers compressed per request; a site names the ones it changes |
@@ -4554,7 +4554,9 @@ does the same from its side: Next.js with `compress: false`, Ghost with `compres
 with `enable_gzip = false`.
 
 `compress_event_streams = true` compresses `text/event-stream` answers too, each event sent as it
-comes. It is off by default for a reason of its own: on one long stream every event's compressed
+comes where the location streams them: `buffering = false` in its `proxy` or `php` table. With
+buffering on, the default, the whole stream is collected first and reaches the browser at its end,
+compressed or not. It is off by default for a reason of its own: on one long stream every event's compressed
 size is visible by itself, so a stream that carries a secret beside something a visitor sent gives
 an attacker a sample per event, with no new request and no padding between them (the padding is
 drawn once per answer). Turn it on for streams of live prices, metrics or notifications; leave it

@@ -281,7 +281,7 @@ struct CompressionConfig {
     // rule's admission, a browser-replayed Authorization) is compressed too: false is the BREACH guard
     // (section 7); an application's own login is invisible to the server, its pages are padded.
     bool compress_signed_in = false;
-    bool compress_event_streams = false;  // text/event-stream too, each event sent as it comes (handlers/compressed_body.hpp)
+    bool compress_event_streams = false;  // text/event-stream too, each event sent as it comes where buffering = false (handlers/compressed_body.hpp)
     bool offload = false;                 // the browser's Accept-Encoding kept from the application, so agensio compresses
     std::vector<std::string> codings = {"zstd", "br", "gzip"};  // offered, the order decides a tie
     // The list was written, in the main file or on the site: it then decides the .br and .gz files

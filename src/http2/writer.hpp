@@ -267,7 +267,13 @@ private:
             if (bytes > before || !inflight_.empty()) note_inflight(*s);
         }
         building_ = false;
-        if (out_.empty() && external_.empty()) return;
+        if (out_.empty() && external_.empty()) {
+            // Nothing to write, but work came while the cycle was built: a pull answered inline
+            // re-queued its stream after its turn (the source's last read, 0 bytes: the stream
+            // waited for its END_STREAM until the client sent something), or a control frame.
+            if (again_) schedule();
+            return;
+        }
         writing_ = true;
         auto done = immediate([self = self(), this](const asio::error_code& ec, std::size_t) { on_written(ec); });
         if (external_.empty()) {  // the whole cycle in the one buffer: one send, on TLS a run of records
@@ -365,12 +371,17 @@ private:
         write_frame_header(reinterpret_cast<unsigned char*>(out_.data() + at), length, type, flags, stream_id);  // NOLINT: bytes
     }
     // A DATA frame: the header into the buffer; the payload copied behind it when small
-    // (on TLS always), else written from where it is.
-    void data_frame(std::uint32_t stream_id, std::string_view payload, bool end) {
+    // (on TLS always), else written from where it is. True when the cycle refers to the
+    // payload's bytes, which must then stay as they are until the write completes.
+    bool data_frame(std::uint32_t stream_id, std::string_view payload, bool end) {
         frame_header(static_cast<std::uint32_t>(payload.size()), FrameType::data, end ? flag::end_stream : 0, stream_id);
-        if (payload.empty()) return;
-        if (IsTlsStream<Socket>::value || payload.size() <= kCopyMax) out_.append(payload);
-        else external_.push_back({out_.size(), payload.data(), payload.size()});
+        if (payload.empty()) return false;
+        if (IsTlsStream<Socket>::value || payload.size() <= kCopyMax) {
+            out_.append(payload);
+            return false;
+        }
+        external_.push_back({out_.size(), payload.data(), payload.size()});
+        return true;
     }
 
     static StreamBody* source_of(Response& r) noexcept {
@@ -399,6 +410,7 @@ private:
             }
         }
         std::size_t quantum = kQuantum;
+        bool chunk_referenced = false;  // this cycle writes bytes of the stream's chunk from where they are
         while (external_.size() < kMaxExternal) {
             std::string_view data;
             bool last = false;
@@ -461,6 +473,16 @@ private:
             } else if (StreamBody* source = source_of(r)) {
                 if (s.chunk_pos == s.chunk_len) {
                     if (!s.source_done) {
+                        // A read in flight: a WINDOW_UPDATE or a SETTINGS change re-queues every
+                        // answering stream, this one too, and its completion re-queues it. A second
+                        // read on the source, into the same chunk, lost the first one's answer (the
+                        // upstream keeps one waiter: pulls_ never came back down, and the connection's
+                        // next answer got a second HEADERS frame) or mixed two reads' bytes (a source
+                        // answering through the loop: the compressed body's yield).
+                        if (s.pulling) return Emit::pulling;
+                        // The chunk's bytes go out from where they are in this cycle (h2c, above
+                        // kCopyMax): the next read waits for the write, which takes them first.
+                        if (chunk_referenced) return Emit::more;
                         if (pulls_ >= kPullBudget) {
                             waiting_.push_back(&s);
                             return Emit::pulling;
@@ -489,10 +511,13 @@ private:
             n = std::min<std::size_t>(n, static_cast<std::size_t>(conn_window_));
             if (n == 0) return quantum == 0 ? Emit::more : Emit::blocked;
             const bool end = last && n == data.size();
-            data_frame(s.id, data.substr(0, n), end);
+            const bool referenced = data_frame(s.id, data.substr(0, n), end);
             s.body_offset += n;
             s.body_sent += n;
-            if (source_of(r)) s.chunk_pos += n;
+            if (source_of(r)) {
+                s.chunk_pos += n;
+                chunk_referenced = chunk_referenced || referenced;
+            }
             s.send_window -= static_cast<std::int32_t>(n);
             conn_window_ -= static_cast<std::int32_t>(n);
             quantum -= n;

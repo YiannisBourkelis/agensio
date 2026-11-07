@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.0-alpha.139 (2026-11-07)
+
+- **Fix: answers pulled from an application over HTTP/2 arrive whole.** The test VPS's report on
+  0.1.0-alpha.138: answers compressed in pieces (above 256 KB, spilled or streamed) often failed to
+  decode over HTTP/2, on h2c and over TLS, or decoded to wrong bytes, while HTTP/1.1 and HTTP/3 got
+  them whole. Three faults of the HTTP/2 writer, older than the compression, which made them
+  common: a WINDOW_UPDATE re-queued a stream whose read of its application was still in flight and
+  the writer read again into the same buffer, which lost the first read's answer (the connection's
+  next answer got a second HEADERS frame) or, for a compressed answer, mixed two reads' bytes; on
+  h2c a chunk sent from where it lies was read over before the write took it; and a write cycle
+  whose only work was the application's last read waited for the client's next frame before the
+  stream's end went out. A proxied, PHP or CGI answer streamed over HTTP/2 (`buffering = false`)
+  could meet the first two without compression, a burst of window updates or a fast application.
+- **The texts say what `compress_event_streams` needs.** Each event goes out as it comes only where
+  the location streams (`buffering = false` in its `proxy` or `php` table); with buffering on, the
+  default, the whole stream reaches the browser at its end, compressed or not. The key's reference
+  rows, the MCP text of `site_update` and the cookbook's recipe say so, and the recipe's managed-site
+  way now adds the streaming location through the site's root additions file. The reference row of a
+  site's `response_compression` names every field `site_update` sets (`compress_event_streams` and
+  `offload` were missing).
+- **Testing:** `tests/h2-streamed-bodies.py` (run by the integration suite) fetches answers
+  compressed in pieces over h2c and TLS and compares them decoded, and runs ten streamed answers on
+  one connection with a WINDOW_UPDATE in every pause; on 0.1.0-alpha.138 three of its four rows fail.
+  The suite's h2c compression rows compare the decoded bytes, not their count.
+
 ## 0.1.0-alpha.138 (2026-11-07)
 
 - **Fix: the encoder budget of answers compressed in pieces counts what the library holds, not only

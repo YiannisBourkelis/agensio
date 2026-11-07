@@ -512,6 +512,19 @@ than the client takes (Netflix's "internal data buffering", CVE-2019-9517). A wi
 zero parks the stream until a `WINDOW_UPDATE` of at least 1 KB, or the end of the body;
 smaller updates are not progress (6.9).
 
+One read per stream at a time, into a chunk no write still refers to (0.1.0-alpha.139, the
+alpha.138 report's corrupt answers compressed in pieces, `tests/h2-streamed-bodies.py`). A
+`WINDOW_UPDATE` or a change of `SETTINGS_INITIAL_WINDOW_SIZE` re-queues every answering stream,
+also one whose read is in flight: `emit` answers it `pulling` (its completion re-queues it), where
+it used to start a second read on the source into the same chunk (the upstream keeps one waiter,
+so the first read was never answered and the connection's next answer got a second HEADERS frame;
+a compressed body, whose read yields through the loop, was answered twice and its bytes mixed). On
+h2c a payload above `kCopyMax` goes out from the chunk itself, so a chunk framed in a cycle is read
+into again only in the next one, after the write took it (before, the same cycle pulled the next
+chunk over it). A cycle that writes nothing but saw work arrive while it was built (a read answered
+inline re-queued its stream, the source's last 0 bytes) runs the next one at once; before, the
+END_STREAM waited for whatever the client sent next.
+
 **Emit at respond (designed and built 2026-09-24).** With the cycle one buffer, an answer
 that is complete when `respond()` runs and small enough to be copied (a memory body up
 to `kCopyMax`, or no body, within the windows) needs nothing of its stream once its

@@ -75,7 +75,10 @@
 #             of the page's markup, past the whole-answer limit: compressed in pieces since step 6,
 #             sent as it came before, so its ratio is the cost of compressing it, not a regression;
 #             8 connections keep it under the worker's 32 MB encoder budget, which 64 interleaved
-#             answers of this size pass, sending most of them as they came).
+#             answers of this size pass, sending most of them as they came). With -2 too
+#             "proxy-comp-h2c:/pages:8:1": the same answer over h2c, a source pulled by the HTTP/2
+#             writer (0.1.0-alpha.139: a chunk sent from where it lies is read into again only in
+#             the next write cycle).
 #             A side whose binary lacks the key skips the rows.
 #   -r        rounds of base/new alternation (default 2)
 #   -d        wrk duration per case (default 5s)
@@ -110,6 +113,7 @@ if [ $PROXY = 1 ]; then
   # (above the whole-answer limit: identity with Vary until step 6, must be flat), and the page
   # without a header (the decision runs, nothing is compressed, must be flat).
   [ $COMP = 1 ] && SPECS+=("proxy-comp:/json:64" "proxy-comp:/page:64" "proxy-comp-br:/page:64" "proxy-comp-gzip:/page:64" "proxy-comp:/big:64" "proxy-comp-plain:/page:64" "proxy-comp:/pages:8")
+  [ $COMP = 1 ] && [ $H2 = 1 ] && SPECS+=("proxy-comp-h2c:/pages:8:1")
 fi
 
 if [ $H2 = 1 ]; then
@@ -451,7 +455,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
   for spec in "${SPECS[@]}"; do
     proto="${spec%%:*}"; rest="${spec#*:}"; streams=""
     case $proto in
-      h2|h2c|h3|comp-h2) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
+      h2|h2c|h3|comp-h2|proxy-comp-h2c) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
       *) conns="${rest##*:}"; path="${rest%:*}" ;;
     esac
     case $proto in
@@ -472,6 +476,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       comp|comp-gzip|comp-plain) [ $SIDE_COMP = 1 ] || continue; url="http://127.0.0.1:8087$path" ;;
       comp-tls) [ $SIDE_COMP = 1 ] || continue; url="https://127.0.0.1:8486$path" ;;
       proxy-comp|proxy-comp-br|proxy-comp-gzip|proxy-comp-plain) [ $SIDE_COMP = 1 ] && [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8085$path" ;;
+      proxy-comp-h2c) [ $SIDE_COMP = 1 ] && [ $SIDE_PROXY = 1 ] && [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8085$path" ;;
       comp-h2) [ $SIDE_COMP = 1 ] && [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8486$path" ;;
       h2c) [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8080$path" ;;
       h2) [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;
@@ -486,7 +491,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       $H2LOAD_H3 --alpn-list=h3 -D "${DURATION%s}" -c"$conns" -m"$streams" -t"$t" "$url" > "$raw" 2>&1 || true
       n=$(awk '/^requests:/{print $6}' "$raw"); rps=$(awk '/^finished in/{print $4}' "$raw")
     elif [ -n "$streams" ]; then
-      hdr=(); [ "$proto" = comp-h2 ] && hdr=(-H "accept-encoding: gzip, deflate, br, zstd")
+      hdr=(); case $proto in comp-h2|proxy-comp-h2c) hdr=(-H "accept-encoding: gzip, deflate, br, zstd") ;; esac
       h2load -D "${DURATION%s}" -c"$conns" -m"$streams" -t"$t" "${hdr[@]}" "$url" > "$raw" 2>&1 || true
       n=$(awk '/^requests:/{print $6}' "$raw"); rps=$(awk '/^finished in/{print $4}' "$raw")  # "N done", "X req/s"
     else
@@ -525,7 +530,7 @@ done
   for spec in "${SPECS[@]}"; do
     proto="${spec%%:*}"; rest="${spec#*:}"; streams=""
     case $proto in
-      h2|h2c|h3|comp-h2) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
+      h2|h2c|h3|comp-h2|proxy-comp-h2c) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
       *) conns="${rest##*:}"; path="${rest%:*}" ;;
     esac
     LC_NUMERIC=C awk -v k="$proto $path $conns${streams:+x$streams}" -v label="$proto $path c=$conns${streams:+ m=$streams}" '

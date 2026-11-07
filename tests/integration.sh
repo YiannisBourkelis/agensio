@@ -3263,6 +3263,17 @@ else
   echo "skip abandoned requests (Linux and python3-h2 required; run in the devbox)"
 fi
 
+# Answers pulled from a source over HTTP/2 (the alpha.138 VPS report, F1): compressed in pieces over
+# h2c and TLS they decode to the same bytes, and a WINDOW_UPDATE while a pull waits starts no second read.
+if [ "$(uname -s)" = Linux ] && python3 -c 'import h2' 2>/dev/null; then
+  python3 tests/h2-streamed-bodies.py "$BIN" > bench/tmp/h2-streamed-bodies.log 2>&1
+  h2_streamed_result=$?
+  cat bench/tmp/h2-streamed-bodies.log
+  check "HTTP/2 answers pulled from a source: compressed in pieces over h2c and TLS each decodes to what was sent, ten streamed answers on one connection with a WINDOW_UPDATE in every pause each whole" "0" "$h2_streamed_result"
+else
+  echo "skip HTTP/2 streamed bodies (Linux and python3-h2 required; run in the devbox)"
+fi
+
 # The site's files (F12): list, read, write, edit, mkdir, move, delete, history, restore on a private
 # server without the helper, every change approved with a code (tests/site-files.py).
 if [ "$(uname -s)" = Linux ]; then
@@ -3976,6 +3987,7 @@ FPMCONF
   f() { cut -d'|' -f"$1"; }
   c3b() { curl -sS -o "$2" -H 'Host: c3.test' "${@:3}" "http://127.0.0.1:8065$1"; }
   IDLEN=$(curl -sS -H 'Host: c3.test' http://127.0.0.1:8065/page.php | wc -c)
+  IDSUM=$(curl -sS -H 'Host: c3.test' http://127.0.0.1:8065/page.php | md5sum | cut -c1-32)
   c3b /page.php bench/tmp/comp3/page.zst -H 'Accept-Encoding: gzip, deflate, br, zstd'
   c3b /page.php bench/tmp/comp3/page.br -H 'Accept-Encoding: gzip, deflate, br'
   c3b /page.php bench/tmp/comp3/page.gz -H 'Accept-Encoding: gzip'
@@ -4019,14 +4031,15 @@ FPMCONF
   c3b /large.php bench/tmp/comp3/large.zst -H 'Accept-Encoding: zstd'
   check "compression: a 112 KB page, a CMS home page's size, is compressed whole and decodes to itself" "200|zstd|Accept-Encoding between yes" \
     "$(c3 /large.php -H 'Accept-Encoding: zstd' | f 1-3) $([ "$LGLEN" -gt 65536 ] && [ "$LGLEN" -lt 262144 ] && echo between) $([ "$(zstd -dc bench/tmp/comp3/large.zst 2>/dev/null | wc -c)" = "$LGLEN" ] && echo yes)"
-  check "compression: over HTTP/2 (h2c) the compressed page carries its coding and decodes whole" "2 zstd $IDLEN" \
-    "$(curl -sS --http2-prior-knowledge -D - -o /dev/null -H 'Host: c3.test' -H 'Accept-Encoding: zstd' http://127.0.0.1:8065/page.php | tr -d '\r' | awk 'NR==1{v=$1} tolower($1)=="content-encoding:"{e=$2} END{sub(/HTTP\//, "", v); printf "%s %s", v, e}') $(curl -sS --http2-prior-knowledge --compressed -H 'Host: c3.test' http://127.0.0.1:8065/page.php | wc -c)"
+  check "compression: over HTTP/2 (h2c) the compressed page carries its coding and decodes to the same bytes" "2 zstd $IDSUM" \
+    "$(curl -sS --http2-prior-knowledge -D - -o /dev/null -H 'Host: c3.test' -H 'Accept-Encoding: zstd' http://127.0.0.1:8065/page.php | tr -d '\r' | awk 'NR==1{v=$1} tolower($1)=="content-encoding:"{e=$2} END{sub(/HTTP\//, "", v); printf "%s %s", v, e}') $(curl -sS --http2-prior-knowledge --compressed -H 'Host: c3.test' http://127.0.0.1:8065/page.php | md5sum | cut -c1-32)"
   # Step 6 (docs/design-compression.md 6, 0.1.0-alpha.137): answers above 256 KB, spilled ones and
   # streamed ones are compressed as they are sent, chunked on HTTP/1.1 (no Content-Length), DATA frames
   # on HTTP/2; an HTTP/1.0 client gets them as they came, with Vary. c5.test streams (buffering = false)
   # with compress_event_streams and offload: each event reaches the client decoded while the stream
   # goes on (the flush at the application's pause), and PHP never sees the browser's Accept-Encoding.
   HULEN=$(curl -sS -H 'Host: c3.test' http://127.0.0.1:8065/huge.php | wc -c)
+  HUSUM=$(curl -sS -H 'Host: c3.test' http://127.0.0.1:8065/huge.php | md5sum | cut -c1-32)
   c3te() { curl -sS -D - -o "$2" -H 'Host: c3.test' "${@:3}" "http://127.0.0.1:8065$1" | tr -d '\r' | awk 'tolower($1)=="transfer-encoding:"{t=$2} tolower($1)=="content-length:"{l=$2} END{printf "%s/%s", t?t:"-", (l=="")?"-":l}'; }
   pieces="" dec=0
   for e in zstd br gzip; do pieces="$pieces $(c3 /huge.php -H "Accept-Encoding: $e" | f 2,3) $(c3te /huge.php bench/tmp/comp3/huge.$e -H "Accept-Encoding: $e")"; done
@@ -4035,9 +4048,9 @@ FPMCONF
   [ "$(gzip -dc bench/tmp/comp3/huge.gzip 2>/dev/null | wc -c)" = "$HULEN" ] && dec=$((dec+1))
   check "compression in pieces: a PHP answer above 256 KB goes zstd, brotli and gzip, chunked with no Content-Length and Vary, each decoding to the page with its tool" \
     " zstd|Accept-Encoding chunked/- br|Accept-Encoding chunked/- gzip|Accept-Encoding chunked/- 3 yes" "$pieces $dec $([ "$HULEN" -gt 262144 ] && echo yes)"
-  check "compression in pieces: an HTTP/1.0 client gets the answer as it came, with Vary and its length; over h2c it goes zstd and decodes whole" \
-    "200|-|Accept-Encoding|$HULEN 2 zstd $HULEN" \
-    "$(c3 /huge.php --http1.0 -H 'Accept-Encoding: zstd' | f 1,2,3,5) $(curl -sS --http2-prior-knowledge -D - -o /dev/null -H 'Host: c3.test' -H 'Accept-Encoding: zstd' http://127.0.0.1:8065/huge.php | tr -d '\r' | awk 'NR==1{v=$1} tolower($1)=="content-encoding:"{e=$2} END{sub(/HTTP\//, "", v); printf "%s %s", v, e}') $(curl -sS --http2-prior-knowledge --compressed -H 'Host: c3.test' http://127.0.0.1:8065/huge.php | wc -c)"
+  check "compression in pieces: an HTTP/1.0 client gets the answer as it came, with Vary and its length; over h2c it goes zstd and decodes to the same bytes" \
+    "200|-|Accept-Encoding|$HULEN 2 zstd $HUSUM" \
+    "$(c3 /huge.php --http1.0 -H 'Accept-Encoding: zstd' | f 1,2,3,5) $(curl -sS --http2-prior-knowledge -D - -o /dev/null -H 'Host: c3.test' -H 'Accept-Encoding: zstd' http://127.0.0.1:8065/huge.php | tr -d '\r' | awk 'NR==1{v=$1} tolower($1)=="content-encoding:"{e=$2} END{sub(/HTTP\//, "", v); printf "%s %s", v, e}') $(curl -sS --http2-prior-knowledge --compressed -H 'Host: c3.test' http://127.0.0.1:8065/huge.php | md5sum | cut -c1-32)"
   SPLEN=$(curl -sS -H 'Host: c3.test' http://127.0.0.1:8065/spill.php | wc -c)
   check "compression in pieces: an answer past the FastCGI buffer's 1 MB, spilled to a temp file, goes zstd from the file and decodes whole; so does a streamed one (buffering = false)" \
     "yes zstd $SPLEN zstd $HULEN" \
