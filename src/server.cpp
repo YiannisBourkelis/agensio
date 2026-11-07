@@ -416,7 +416,10 @@ void Server::arm_flush(Worker& w) {
         // glibc keeps freed chunks of that size mapped: a trim once a second, only when
         // something was freed, gives the pages back (measured: 3,000 idle connections held
         // 75 MB of RSS until this ran, and a burst of closes left the peak mapped for good).
-        if (w.sheds) {
+        // The encoders of answers compressed in pieces, kept for the next answer, are freed once the
+        // worker took none for a tick (design 6): an idle worker holds none.
+        const bool released = release_idle_encoders();
+        if (w.sheds || released) {
             w.sheds = 0;
             trim_heap();
         }
@@ -1347,8 +1350,9 @@ json::Value Server::status() {
             d.set("first_s_ago", std::chrono::duration<double>(now - first).count()).set("last_s_ago", std::chrono::duration<double>(now - last).count());
         v.set("tls_handshakes_refused", static_cast<double>(total)).set("tls_handshakes_refused_detail", std::move(d));
     }
-    // response_compression (docs/design-compression.md 9): the copies of cached files made once, and
-    // what the build offers; the per-request counters come with the encoders.
+    // response_compression (docs/design-compression.md 9): the copies of cached files made once, what
+    // the build offers, and the answers compressed in pieces (now, since the start, and sent as they
+    // came because a worker's encoders were at their budget, design 6).
     {
         json::Value c = json::Value::object();
         json::Value codings = json::Value::array();
@@ -1359,6 +1363,9 @@ json::Value Server::status() {
         c.set("copies_made", static_cast<double>(k.made)).set("copies_bytes", static_cast<double>(k.bytes))
             .set("copies_queue_full", static_cast<double>(k.queue_full)).set("copies_budget_refused", static_cast<double>(k.budget_refused))
             .set("copies_failed", static_cast<double>(k.failed));
+        const StreamCounts sc = stream_counts();
+        c.set("streams_active", static_cast<double>(sc.active)).set("streams_started", static_cast<double>(sc.started))
+            .set("streams_over_budget", static_cast<double>(sc.over_budget));
         v.set("compression", std::move(c));
     }
     // The file cache as it stands: what a reload kept or started over shows here (12b).

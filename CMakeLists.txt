@@ -149,6 +149,9 @@ if(PKG_CONFIG_FOUND)
   endif()
   if(AGENSIO_BROTLI)
     pkg_check_modules(BROTLIENC IMPORTED_TARGET libbrotlienc)
+    # The decoder, from the same package, for the tests and the fuzzers alone: what they compress in
+    # pieces is decoded back at every flush (the server never decodes).
+    pkg_check_modules(BROTLIDEC IMPORTED_TARGET libbrotlidec)
     if(BROTLIENC_FOUND)
       set(AGENSIO_HAS_BROTLI ON)
     endif()
@@ -168,6 +171,7 @@ set(AGENSIO_CORE_SOURCES
   src/http_date.cpp
   src/mime.cpp
   src/compress.cpp
+  src/handlers/compressed_body.cpp
   src/services/copy_maker.cpp
   src/file.cpp
   src/path.cpp
@@ -286,6 +290,10 @@ if(AGENSIO_TESTS)
   enable_testing()
   add_executable(agensio_tests tests/tests.cpp)
   target_link_libraries(agensio_tests PRIVATE agensio_core)
+  if(AGENSIO_HAS_BROTLI AND BROTLIDEC_FOUND)
+    target_link_libraries(agensio_tests PRIVATE PkgConfig::BROTLIDEC)
+    target_compile_definitions(agensio_tests PRIVATE AGENSIO_TEST_BROTLIDEC=1)
+  endif()
   target_compile_definitions(agensio_tests PRIVATE AGENSIO_REGRESSIONS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/regressions"
                                                    AGENSIO_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   add_test(NAME unit COMMAND agensio_tests)
@@ -382,6 +390,16 @@ if(AGENSIO_FUZZ)
   target_link_libraries(fuzz_response_headers PRIVATE agensio_core_fuzz)
   target_compile_options(fuzz_response_headers PRIVATE -fsanitize=fuzzer)
   target_link_options(fuzz_response_headers PRIVATE -fsanitize=fuzzer)
+  # An answer compressed in pieces (handlers/compressed_body.hpp): a source's pieces, pauses and end
+  # from the input, the output decoded back at every flush and at the end (2026-11-07).
+  add_executable(fuzz_compressed_body tests/fuzz/fuzz_compressed_body.cpp)
+  target_link_libraries(fuzz_compressed_body PRIVATE agensio_core_fuzz)
+  if(AGENSIO_HAS_BROTLI AND BROTLIDEC_FOUND)
+    target_link_libraries(fuzz_compressed_body PRIVATE PkgConfig::BROTLIDEC)
+    target_compile_definitions(fuzz_compressed_body PRIVATE AGENSIO_TEST_BROTLIDEC=1)
+  endif()
+  target_compile_options(fuzz_compressed_body PRIVATE -fsanitize=fuzzer -UNDEBUG)
+  target_link_options(fuzz_compressed_body PRIVATE -fsanitize=fuzzer)
   # A Laravel site's .env and the masking of a credential file's diff, and the scheduler's crontab
   # reader: text a site's account writes, read by the provisioning helper as root (2026-11-04).
   foreach(t dotenv cron_lines)

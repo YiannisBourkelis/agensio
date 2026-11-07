@@ -190,7 +190,8 @@ curl -sS -o /dev/null -D - -H 'Accept-Encoding: gzip, deflate, br, zstd' https:/
 ## An application that compresses its own answers
 
 **When:** Next.js, Ghost, Grafana or a PHP site with `zlib.output_compression` behind agensio;
-they compress with gzip themselves.
+they compress with gzip themselves, so visitors never get zstd or brotli and the padding never
+reaches those answers.
 
 ```toml
 # /etc/agensio/sites.d/app.example.com.toml
@@ -199,25 +200,85 @@ server_name = ["app.example.com"]
 app = "proxy"
 upstream = "http://127.0.0.1:3000"
 tls = { cert = "/etc/letsencrypt/live/app.example.com/fullchain.pem", key = "/etc/letsencrypt/live/app.example.com/privkey.pem" }
-response_compression = true
+response_compression = { enabled = true, offload = true }
 ```
 
-**What it does.** agensio hands the browser's `Accept-Encoding` on to the application. An answer
-the application compressed passes through untouched, with `Vary` merged; one it left plain
-agensio compresses. To have agensio compress everything, with zstd or brotli and the padding,
-switch the application's own compression off: `compress: false` in Next.js's `next.config.js` and
-in Ghost's configuration, `enable_gzip = false` in Grafana, `zlib.output_compression = Off` for
-PHP. Answers up to 256 KB are then compressed whole; larger ones go out plain until step 6 of
-`docs/design-compression.md` 11 compresses streamed answers. `offload = true` will do the same
-without touching the application, from that step on; it is accepted now and changes nothing yet.
+**What it does.** `offload = true` keeps the browser's `Accept-Encoding` from the application (the
+proxied field; `HTTP_ACCEPT_ENCODING` for PHP and CGI), so it answers plain and agensio compresses
+every answer with the coding the browser takes, padded and under the signed-in guard: answers up to
+256 KB whole, larger and streamed ones as they are sent, what the application flushes going out at
+once. Without `offload`, agensio hands `Accept-Encoding` on: an answer the application compressed
+passes through untouched, with `Vary` merged, and one it left plain agensio compresses. The
+application's own switch does the same from its side: `compress: false` in Next.js's
+`next.config.js` and in Ghost's configuration, `enable_gzip = false` in Grafana,
+`zlib.output_compression = Off` for PHP.
 
 **Check it.**
 
 ```sh
-curl -sS -o /dev/null -D - -H 'Accept-Encoding: zstd, br, gzip' https://app.example.com/ | grep -i '^content-encoding\|^vary'   # gzip: the application's own; zstd once it is off there
+curl -sS -o /dev/null -D - -H 'Accept-Encoding: zstd, br, gzip' https://app.example.com/ | grep -i '^content-encoding\|^vary'   # zstd: agensio's, not the application's gzip
+curl -sS --compressed https://app.example.com/ | head -c 200       # decodes to the page
 ```
 
+**On a managed site.**
+
+```sh
+agensio ctl site-update app.example.com --compression on --compression-offload on --yes --reason "zstd and brotli for the app's visitors"
+agensio ctl site app.example.com               # response_compression: offload true, own lists it
+```
+
+Through MCP, `site_update` with `response_compression: {"enabled": true, "offload": true}`;
+`--compression-offload main` hands the field back to the main file.
+
 **Reference:** [Response compression](../configuration.md#20-response-compression-response_compression), [Applications behind the proxy](../examples.md#applications-behind-the-proxy).
+
+## Server-sent events, compressed as they come
+
+**When:** a dashboard, a price ticker or a notification feed streams `text/event-stream` to many
+open pages, and the events repeat the same JSON keys over and over.
+
+```toml
+# /etc/agensio/sites.d/live.example.com.toml
+[[site]]
+server_name = ["live.example.com"]
+app = "proxy"
+upstream = "http://127.0.0.1:3000"
+tls = { cert = "/etc/letsencrypt/live/live.example.com/fullchain.pem", key = "/etc/letsencrypt/live/live.example.com/privkey.pem" }
+response_compression = { enabled = true, compress_event_streams = true }
+
+[[site.location]]
+path = "/events"
+upstream = "http://127.0.0.1:3000"
+proxy = { buffering = false }   # each event goes on as the application sends it
+```
+
+**What it does.** Each event is compressed as it arrives and sent at once: agensio flushes the
+coding whenever the application pauses, so the browser's `EventSource` sees every event when it was
+sent, and the repeated keys cost a few bytes after the first. A stream gets an encoder sized for a
+connection held open (386 KB with zstd, 86 KB with gzip), and each worker gives such encoders at
+most 32 MB: past it a stream goes out uncompressed, counted in `status`. Off by default, because
+every event's compressed size is visible on its own: turn it on only for streams that never carry
+a secret beside something a visitor sent (prices, metrics, notifications; not a chat that echoes
+messages next to a token).
+
+**Check it.**
+
+```sh
+curl -sS -N --compressed -H 'Accept: text/event-stream' https://live.example.com/events | head -5   # events as they come
+curl -sS -o /dev/null -D - -H 'Accept-Encoding: zstd' --max-time 2 https://live.example.com/events | grep -i '^content-encoding'   # zstd
+agensio ctl status | grep -o '"streams_[a-z_]*":[0-9]*'
+```
+
+**On a managed site.**
+
+```sh
+agensio ctl site-update live.example.com --compression on --compression-events on --yes --reason "compress the price stream"
+```
+
+Through MCP, `site_update` with `response_compression: {"enabled": true, "compress_event_streams": true}`,
+after the user confirmed what the stream carries.
+
+**Reference:** [Response compression](../configuration.md#20-response-compression-response_compression).
 
 ## A staging site behind a password, compressed anyway
 

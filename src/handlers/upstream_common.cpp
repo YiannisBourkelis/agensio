@@ -1,6 +1,7 @@
 #include "handlers/upstream_common.hpp"
 #include "compress.hpp"
 #include "handlers/compress_answer.hpp"
+#include "handlers/compressed_body.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -172,7 +173,7 @@ static bool vary_lists_accept_encoding(std::string_view v) noexcept {
 }
 
 void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<StreamBody> source, const char* log_name,
-                           const LocationConfig& loc, ErrorLog* log) {
+                           const LocationConfig& loc, ErrorLog* log, asio::io_context* ctx) {
     Response& r = s.response;
     const bool proxied = loc.kind == HandlerKind::proxy;
     r.reset();
@@ -217,7 +218,7 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
     // that qualifies is compressed whole after the loop; its ETag is weakened and Vary merged inside it.
     compress_answer::Answer ca;
     ca.status = res.status;
-    ca.body_size = res.body_size;
+    ca.body_size = res.streamed ? 0 : res.body_size;
     ca.streamed = res.streamed;
     ca.head = s.request.method == Method::head;
     if (s.site_compression) {
@@ -226,20 +227,37 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
             else if (Headers::iequals(h.name, "content-encoding")) ca.content_encoding = h.value;
             else if (Headers::iequals(h.name, "cache-control")) ca.cache_control = h.value;
             else if (Headers::iequals(h.name, "content-range")) ca.content_range = true;
+            else if (res.streamed && Headers::iequals(h.name, "content-length") && !h.value.empty() &&
+                     h.value.size() <= 19 && h.value.find_first_not_of("0123456789") == std::string_view::npos) {
+                ca.length_known = true;  // a stream measured by the length it declares (min_size); 19 digits fit
+                ca.body_size = 0;
+                for (const char c : h.value) ca.body_size = ca.body_size * 10 + static_cast<std::uint64_t>(c - '0');
+            }
         }
+        ca.streams_ok = compress_answer::streams_unknown_length(s.request);
     }
-    const compress_answer::Reason why = compress_answer::decide(s, ca);
+    compress_answer::Reason why = compress_answer::decide(s, ca);
     // The coding is the client's choice among the site's, made once at routing (Stream::coding). A
     // HEAD gets the GET's negotiation (docs/design-compression.md 8): the same head, nothing to compress.
-    const bool compressing = why == compress_answer::Reason::compress || why == compress_answer::Reason::head;
     const Encoding coding = static_cast<Encoding>(s.coding);
+    // An answer compressed in pieces takes its encoder now, before the head is written: past the
+    // worker's budget it goes out as it came, its ETag strong, its Vary kept (design 6, decision 11).
+    // An event stream gets the small encoder of a stream held open (StreamEncoder::Kind::events).
+    StreamEncoder pieces;
+    if (why == compress_answer::Reason::pieces) {
+        const auto* settings = static_cast<const CompressionConfig*>(s.site_compression);
+        const auto kind = compress_answer::is_event_stream(ca.content_type) ? StreamEncoder::Kind::events : StreamEncoder::Kind::answer;
+        if (!pieces.begin(coding, compress_answer::level_for(*settings, coding), kind, padding_length(), res.streamed ? 0 : res.body_size))
+            why = compress_answer::Reason::budget;
+    }
+    const bool compressing = why == compress_answer::Reason::compress || why == compress_answer::Reason::pieces || why == compress_answer::Reason::head;
     // An answer that could have been compressed for another client gets Vary too (RFC 9110 12.5.5):
     // one for a client without an acceptable coding, a HEAD, one the application compressed itself
-    // (PHP's zlib layer leaves Vary off the identity variant), one under min_size, one above the
-    // whole-answer limit (compressed from step 6 on).
+    // (PHP's zlib layer leaves Vary off the identity variant), one under min_size, one whose client's
+    // protocol cannot take it in pieces, one past the worker's budget.
     const bool vary = s.site_compression && (compressing || why == compress_answer::Reason::no_accept || why == compress_answer::Reason::head ||
-                                             why == compress_answer::Reason::already_encoded || why == compress_answer::Reason::large ||
-                                             (why == compress_answer::Reason::size && ca.body_size > 0));
+                                             why == compress_answer::Reason::already_encoded || why == compress_answer::Reason::no_streaming ||
+                                             why == compress_answer::Reason::budget || (why == compress_answer::Reason::size && ca.body_size > 0));
     bool vary_seen = false;
     const bool rewrite = proxied && loc.proxy.rewrite_redirects;
     std::string kept;  // the application's Cache-Control directives a protected answer keeps
@@ -324,7 +342,17 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
         r.prebuilt_headers = r.scratch;
         return;
     }
-    if (compressing && !no_body_status && !res.spill.is_open()) {
+    if (why == compress_answer::Reason::pieces) {
+        // Compressed as the writer pulls it (handlers/compressed_body.hpp): no Content-Length, the
+        // writer frames it (chunked on HTTP/1.1, DATA frames on HTTP/2), padded like every answer.
+        r.scratch.append("Content-Encoding: ").append(encoding_name(coding)).append("\r\n");
+        r.prebuilt_headers = r.scratch;
+        if (res.streamed) r.body = std::make_unique<CompressedBody>(std::move(pieces), std::move(source), ctx);
+        else if (res.spill.is_open()) r.body = std::make_unique<CompressedBody>(std::move(pieces), std::move(res.spill), res.body_size, ctx);
+        else r.body = std::make_unique<CompressedBody>(std::move(pieces), std::move(res.body), ctx);
+        return;
+    }
+    if (why == compress_answer::Reason::compress && !no_body_status && !res.spill.is_open()) {
         // The whole buffered body through the coding's encoder (docs/design-compression.md 6), padded
         // by a length drawn per answer so that one page's compressed length differs from request to
         // request (design 7, the Heal the Breach mitigation: every answer, as Thruster and Django pad);

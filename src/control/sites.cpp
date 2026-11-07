@@ -1186,15 +1186,11 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         } else if (g.is_object()) {
             for (const auto& [k, v] : g.members()) {
                 if (k == "levels" || k == "min_size" || k == "extra_types") {
-                    error = "response_compression." + k + " is the host's tuning, the main file's [response_compression] (root's file, docs/configuration.md 20); a managed site sets enabled, exclude_paths, compress_signed_in and codings";
+                    error = "response_compression." + k + " is the host's tuning, the main file's [response_compression] (root's file, docs/configuration.md 20); a managed site sets enabled, exclude_paths, compress_signed_in, compress_event_streams, offload and codings";
                     return needs;
                 }
-                if (k == "offload" || k == "compress_event_streams") {
-                    error = "response_compression." + k + " is not offered on a managed site yet: it acts once agensio compresses streamed answers (docs/configuration.md 20)";
-                    return needs;
-                }
-                if (k != "enabled" && k != "exclude_paths" && k != "compress_signed_in" && k != "codings") {
-                    error = "response_compression has no field '" + k + "'; a managed site sets enabled, exclude_paths, compress_signed_in and codings";
+                if (k != "enabled" && k != "exclude_paths" && k != "compress_signed_in" && k != "compress_event_streams" && k != "offload" && k != "codings") {
+                    error = "response_compression has no field '" + k + "'; a managed site sets enabled, exclude_paths, compress_signed_in, compress_event_streams, offload and codings";
                     return needs;
                 }
                 if (v.is_null() || (k == "exclude_paths" && v.is_array() && v.items().empty())) own = without(own, k);
@@ -1707,7 +1703,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         } else {
             out += "response_compression = { ";
             bool first = true;
-            for (const char* k : {"enabled", "exclude_paths", "compress_signed_in", "codings"}) {
+            for (const char* k : {"enabled", "exclude_paths", "compress_signed_in", "compress_event_streams", "offload", "codings"}) {
                 const json::Value& v = rc[k];
                 if (v.is_null()) continue;
                 out += std::string(first ? "" : ", ") + k + " = " +

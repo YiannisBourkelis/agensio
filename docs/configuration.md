@@ -4492,8 +4492,8 @@ site's defaults.
 | `enabled` | yes | yes | `false` | compression on or off; a site's `response_compression = true` or `false` says this alone |
 | `exclude_paths` | no | yes | `[]` | path prefixes never compressed (at most 32, `/`-rooted) |
 | `compress_signed_in` | yes | yes | `false` | compress the answers agensio knows to be a signed-in visitor's too (BREACH below) |
-| `compress_event_streams` | yes | yes | `false` | compress `text/event-stream`, each event flushed (from step 6) |
-| `offload` | yes | yes | `false` | keep `Accept-Encoding` from the application, so agensio compresses (from step 6) |
+| `compress_event_streams` | yes | yes | `false` | compress `text/event-stream` too, each event sent as it comes |
+| `offload` | yes | yes | `false` | keep `Accept-Encoding` from the application, so agensio compresses |
 | `codings` | yes | yes | `["zstd", "br", "gzip"]` | the codings offered and their order; a site's list replaces the main file's |
 | `levels` | yes | yes | `{ zstd = 3, br = 3, gzip = 5 }` | the levels of answers compressed per request; a site names the ones it changes |
 | `min_size` | yes | yes | `"1KB"` | smaller answers are not compressed |
@@ -4504,12 +4504,12 @@ fields that are its own named in a comment, the rest marked as the main file's.
 
 **A managed site** (0.1.0-alpha.119) gets its own `response_compression` through `site_create` and
 `site_update`, or `agensio ctl site-update NAME --compression on --yes`: the switch, `exclude_paths`,
-`compress_signed_in` and `codings`, each field changed on its own and the others kept, and `main`
-(or `null` in the field) handing a field back to the main file; `--compression-reset` drops them
-all. The managed file carries only the fields set, so a later change of the main file still reaches
-the rest. `levels`, `min_size` and `extra_types` stay the main file's, and `offload` and
-`compress_event_streams` come to managed sites with step 6, where they act. `site_show` gives the
-values in force and, in `own`, the fields the site sets.
+`compress_signed_in`, `compress_event_streams` (`--compression-events`), `offload`
+(`--compression-offload`, both since 0.1.0-alpha.137) and `codings`, each field changed on its own
+and the others kept, and `main` (or `null` in the field) handing a field back to the main file;
+`--compression-reset` drops them all. The managed file carries only the fields set, so a later
+change of the main file still reaches the rest. `levels`, `min_size` and `extra_types` stay the main
+file's. `site_show` gives the values in force and, in `own`, the fields the site sets.
 
 **BREACH, and what agensio does about it.** A compressed page that holds a secret (a CSRF token,
 an account number) beside something the attacker got reflected into it leaks the secret, byte by
@@ -4544,17 +4544,23 @@ stay uncompressed whatever the visitor: on a Laravel or plain PHP site, the page
 token sits beside what a visitor typed (an account page, a checkout, a search with its form). The
 application can always opt an answer out with `Cache-Control: no-transform`.
 
-`offload = true` will keep the browser's `Accept-Encoding` from the application, so an
-application that would compress itself (Next.js, Ghost, Grafana, a PHP site with
-`zlib.output_compression` on) sends plain answers and agensio compresses them, padded: the way a
-gzip-only application's visitors get zstd or brotli. `compress_event_streams = true` will
-compress `text/event-stream` answers, each event flushed as it comes; off by default, since a
-stream holds its compressor for its whole life. Both are accepted now and act from step 6 of
-`docs/design-compression.md` 11, which compresses streamed answers: until then an event stream
-goes uncompressed either way, and keeping `Accept-Encoding` back would leave an application's
-large answers uncompressed where it compressed them before. Meanwhile an application's own switch
-hands the work to agensio: Next.js with `compress: false`, Ghost with `compress: false`, Grafana
+`offload = true` keeps the browser's `Accept-Encoding` from the application (the proxied field,
+and `HTTP_ACCEPT_ENCODING` for FastCGI and CGI), so an application that would compress itself
+(Next.js, Ghost, Grafana, a PHP site with `zlib.output_compression` on) sends plain answers and
+agensio compresses them, padded and under the guard above: the way a gzip-only application's
+visitors get zstd or brotli, and the one way the guard reaches a PHP site whose `php.ini` turns
+`zlib.output_compression` on. It acts only on a site that compresses. An application's own switch
+does the same from its side: Next.js with `compress: false`, Ghost with `compress: false`, Grafana
 with `enable_gzip = false`.
+
+`compress_event_streams = true` compresses `text/event-stream` answers too, each event sent as it
+comes. It is off by default for a reason of its own: on one long stream every event's compressed
+size is visible by itself, so a stream that carries a secret beside something a visitor sent gives
+an attacker a sample per event, with no new request and no padding between them (the padding is
+drawn once per answer). Turn it on for streams of live prices, metrics or notifications; leave it
+off for a chat that echoes what users type next to a token. An event stream gets an encoder sized
+for a stream held open: 386 KB with zstd 3, 872 KB with brotli 3, 86 KB with gzip, against 2.1 MB,
+1.3 MB and 326 KB for a large answer.
 
 The tuning applies to every site that compresses, and a site may set its own:
 
@@ -4582,8 +4588,22 @@ zstd 3 within 2 % of gzip 6's size at eight times its speed; brotli 3 within 2 %
 at a third of its speed, brotli 4 five to seven per cent smaller on HTML at 1.5 to 1.8 times
 brotli 3's cost; gzip 5 gzip 6's size at 0.6 of its cost, gzip 1 seven to seventeen per cent larger
 at half of gzip 5's). A buffered answer up to 256 KB is compressed whole on the worker (a CMS home
-page is 70 to 82 KB; at 256 KB zstd 3 holds the worker 0.35 ms, gzip 5 2 ms); a larger one goes
-out uncompressed until the streamed path compresses it in pieces. The copies of cached files are
+page is 70 to 82 KB; at 256 KB zstd 3 holds the worker 0.35 ms, gzip 5 2 ms) and goes out with its
+exact length. A larger one, one spilled to a temporary file and a streamed one (`buffering =
+false`, or an application streaming its answer) are compressed as they are sent, 64 KB of the
+application's bytes at a time, framed chunked on HTTP/1.1 and in DATA frames on HTTP/2 (0.1.0-alpha.137):
+while the application keeps sending, nothing is flushed, which gives the best ratio; when it pauses
+(its `flush()`, the end of an event, a slow query), everything compressed so far goes to the client
+at once, so a page that streams its head first still shows it first. A streamed answer is measured
+against `min_size` only by the length it declares, as nginx's `gzip_min_length`. An HTTP/1.0 client
+(no chunked framing) and an HTTP/3 one (no streamed body yet) get those answers as they came, with
+`Vary`. A large answer gives the worker back after every 256 KB it compressed, so it holds the
+worker no longer than a whole-compressed one (about 0.5 ms with zstd, 2 ms with gzip) and the
+worker's other connections are served between its pieces. Each worker gives the encoders of such
+answers at most 32 MB (about fifteen large answers at once with zstd 3, eighty event streams);
+past it an answer goes as it came, with `Vary`, never refused, and `status`'s `compression` block
+counts it (`streams_over_budget`, beside `streams_active` and `streams_started`): a site that sends
+many large answers at once and shows the count growing does better with lower `levels`. The copies of cached files are
 made once at brotli 11 and gzip 9, which is not a setting, and the encoders' windows are fixed for
 the memory each stream takes. A coding the build lacks (`libzstd`, `libbrotli` missing at build
 time) is refused by `agensio -t` when a list names it, naming the package; the default list holds

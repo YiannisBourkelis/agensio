@@ -60,10 +60,13 @@ std::string FcgiHandler::prebuild_params(const SiteConfig& site, const LocationC
     return out;
 }
 
-void FcgiHandler::append_http_params(std::string& out, const Headers& headers, std::string& scratch) {
+void FcgiHandler::append_http_params(std::string& out, const Headers& headers, std::string& scratch, bool offload) {
     for (std::size_t i = 0; i < headers.size(); ++i) {
         const HeaderField& h = headers[i];
         if (h.name.find('_') != std::string_view::npos || Headers::iequals(h.name, "proxy")) continue;
+        // offload (docs/design-compression.md 6): PHP's zlib.output_compression and an application's
+        // own compressor read HTTP_ACCEPT_ENCODING; without it they answer plain and agensio compresses.
+        if (offload && Headers::iequals(h.name, "accept-encoding")) continue;
         bool seen = false;
         for (std::size_t j = 0; j < i && !seen; ++j)
             seen = Headers::iequals(headers[j].name, h.name);
@@ -130,7 +133,8 @@ void FcgiHandler::append_request_params(std::string& out, Stream& s, const SiteC
     const bool https = s.conn.tls || s.conn.forwarded_https;
     add("REQUEST_SCHEME", https ? "https" : "http");
     if (https) add("HTTPS", "on");
-    append_http_params(out, req.headers, tmp);
+    append_http_params(out, req.headers, tmp,
+                       s.site_compression && static_cast<const CompressionConfig*>(s.site_compression)->offload);
 }
 
 std::shared_ptr<FcgiRequest> FcgiHandler::start(Stream& s, const SiteConfig& site, const LocationConfig& loc,
@@ -286,7 +290,7 @@ void FcgiHandler::finish(Exchange& x, FcgiResult& res) {
     }
     if (res.failure == FcgiFailure::primary_script_unknown) log_failure(x, res);
     apply_upstream_result(s, res, res.streamed ? x.req->body_source() : nullptr,
-                          to_string(res.failure), loc, &log_);  // "ok" or "primary_script_unknown"
+                          to_string(res.failure), loc, &log_, &x.req->context());  // "ok" or "primary_script_unknown"
     x.completed = true;
     x.done();
 }

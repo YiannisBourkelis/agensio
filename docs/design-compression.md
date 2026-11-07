@@ -263,23 +263,43 @@ bytes. An application's error page is one of its answers and is compressed like 
   (`bench/results/compression-levels-20261030.md`; 64 KB until that measurement, which left
   the CMS pages out). Cost on the WordPress home page (70 KB): 54 µs with zstd 3, 191 µs with
   brotli 3, 399 µs with gzip 5.
-- **A larger buffered answer, a spilled body or a stream** is compressed as the writer pulls it:
-  a `CompressedBody` wraps the source as a `StreamBody`, compressing each 64 KB piece as it is
-  asked for, so HTTP/2 and HTTP/3 backpressure holds and a slow client holds one piece and one
-  context, never a whole compressed body. Framing is the writer's as for any `StreamBody`:
-  chunked on HTTP/1.1, DATA frames on HTTP/2 and HTTP/3. In a 64 KB step zstd 3 costs under
-  0.1 ms and gzip 5 about 0.5 ms, under the yield budget that governs memory bodies, so no thread
-  hop and no pool.
-- **Flushes:** an upstream read that empties the socket, a FastCGI record boundary and the end of
-  a chunk each end with the encoder flushed (`ZSTD_e_flush`, `BROTLI_OPERATION_FLUSH`,
-  `Z_SYNC_FLUSH`), so what the application flushed reaches the client. brotli 1 loses 7 to 42 %
-  when flushed per 16 KB (its one-pass mode); from quality 2 up a flush costs 0 to 4 %, as it
-  does gzip 5 and zstd 3 (`bench/results/compression-levels-20261030.md`), so the dynamic
-  default is 3 (the note first said 4, from the research's measurement of quality 1 alone).
-- **Streams:** `text/event-stream` is not compressed unless `compress_event_streams = true`; when it is,
-  the head goes out at once and each event is flushed. An answer with `X-Accel-Buffering: no`
-  or `Incremental: ?1` has its head sent before the minimum-size decision. Separately and
-  regardless of compression, agensio should start honouring those two fields and
+- **A larger buffered answer, a spilled body or a stream** (step 6, 0.1.0-alpha.137) is compressed
+  as the writer pulls it: `CompressedBody` (`handlers/compressed_body.*`) wraps the source as a
+  `StreamBody`, so HTTP/1.1 frames it chunked and HTTP/2 in DATA frames with their backpressure,
+  and a slow client holds one piece and one encoder, never a whole compressed body. The encoder
+  writes straight into the writer's buffer; a source not already in memory is read into the
+  encoder's pooled input buffer (64 KB, 16 KB for an event stream), and one read takes about one
+  piece of input whatever the ratio: no thread hop and no pool of threads. The writers chain a
+  body's reads inline while the socket takes them, and a socket buffer holds a whole compressed
+  answer, so once 256 KB of input was compressed since the last time a read answers through the
+  worker's loop (`asio::post`): one answer holds the worker at most as long as one compressed whole
+  may (0.35 to 0.7 ms with zstd 3, about 2 ms with gzip 5), where a 5 MB export with gzip would have
+  held it 50 ms. Measured on the benchmark upstream's 512 KB page (2026-11-07, one worker): 1.40 ms
+  of CPU per answer alone, 1.67 ms when eight interleave (their encoders push each other's tables
+  out of the cache; 1.41 ms without the yield), and at 64 such answers at once most pass the budget
+  and go as they came (53 ms average latency, against 90 to 97 ms compressing them one after
+  another). Yielding after every piece cost the same 14 to 18 %: the cost is interleaving itself.
+  HTTP/1.0 (no chunked framing) and HTTP/3 (no streamed
+  body yet, `docs/design-http3.md` I1b) get these answers as they came, with `Vary`
+  (`Reason::no_streaming`); a buffered answer up to 256 KB is compressed whole for them as for
+  anyone.
+- **Flushes: one rule** (decision 12). While the upstream has bytes ready, pieces are compressed
+  without a flush; when it has none (`StreamBody::ready`, what the upstream source would answer at
+  once: held bytes, spilled bytes or its end), what was compressed is flushed (`ZSTD_e_flush`,
+  `BROTLI_OPERATION_FLUSH`, `Z_SYNC_FLUSH`) before the read waits. An application's `flush()`, the
+  end of an event, a slow query: each is a pause, so what the application sent reaches the client.
+  The first draft also flushed at every FastCGI record and every upstream chunk; PHP fills 8 KB
+  records whether it flushed or not, so that cost ratio for nothing. brotli 1 loses 7 to 42 % when
+  flushed per 16 KB (its one-pass mode); from quality 2 up a flush costs 0 to 4 %, as it does gzip
+  5 and zstd 3 (`bench/results/compression-levels-20261030.md`), so the dynamic default is 3.
+- **Streams:** `text/event-stream` is not compressed unless `compress_event_streams = true`
+  (decision 13), and then like any answer: `no-transform`, `exclude_paths` and the guard hold for it
+  (before step 6 the decision returned for an event stream before those rules). Each event is
+  flushed by the rule above. Its encoder is sized for a stream held open (`StreamEncoder::Kind::events`:
+  zstd 2^15 with 2^14 tables, brotli 2^16, gzip 2^13 with memLevel 6). A stream is measured against
+  `min_size` by the length it declares, else compressed (decision 14, nginx's `gzip_min_length`):
+  waiting for the first piece to measure it would hold the head back. Separately and regardless of
+  compression, agensio should start honouring `X-Accel-Buffering: no`, `Incremental: ?1` and
   `text/event-stream` by switching a buffered FastCGI or proxy exchange to streaming when the head
   arrives: Laravel's `eventStream`, Symfony's `EventStreamResponse` and Next.js send them, and the
   cookbook asks for `buffering = false` per location today. That is its own step (section 11).
@@ -293,10 +313,19 @@ bytes. An application's error page is one of its answers and is compressed like 
   the one way the signed-in guard can protect a PHP site with `zlib.output_compression` on, and
   the way a gzip-only application's visitors get zstd or brotli. Health recommends it by name
   (section 9).
-- **Budget:** at most 64 compressed streams in flight per worker (a `CompressedBody` counts from
-  creation to end); past it, the answer goes out uncompressed with `Vary` kept, and the worker
-  counts it. A context is 0.3 MB (zlib), 2.1 MB (zstd 3) or 1.4 MB (brotli 4) at the capped
-  windows, so a worker holds at most about 130 MB of encoder memory.
+- **Budget** (decision 11): 32 MB of encoder memory per worker, counted per answer from its
+  encoder's charge (`stream_charge`: a table per coding, kind and level, the peaks each library
+  reported over a stream plus about 6 %, held by `test_stream_encoder` at every level the keys
+  allow); past it the answer goes out as it came, `Vary` kept, never refused, and status counts it
+  (`compression.streams_over_budget`, beside `streams_active` and `streams_started`). The level
+  decides the charge more than the coding: zstd 3 holds 2.1 MB for an answer, zstd 9 11.6 MB (its
+  search tables grow whatever the window), brotli 3 1.3 MB, brotli 6 3.8 MB, gzip 326 KB at any
+  level; an event stream 386 KB with zstd 3, 872 KB with brotli 3, 86 KB with gzip. At the
+  defaults a worker carries about fifteen large answers at once, or eighty event streams. The first
+  draft counted streams (64) and put a worker at 130 MB; a byte budget follows the levels the
+  administrator chose. Encoders are pooled per worker (four kept, matched by coding, kind and level,
+  since zstd keeps the workspace its level grew) and freed after an idle second with the worker's
+  heap trim; brotli has no reset and is made per answer, its blocks under glibc's mmap threshold.
 - **Request bodies:** unchanged, nothing decoded; `Content-Encoding` on a request passes to the
   application, `max_body_size` applies to the bytes as sent. If decoding is ever wanted, Apache's
   limits (decoded size, a 200:1 ratio checked per slice, one layer) and a fuzz target come with
@@ -513,9 +542,12 @@ Each step: unit and integration suites green, the A/B flat on the rows it touche
    gone, `-t --explain`, a site's `codings` deciding its copies and twins, the copy maker started
    whatever the sites say (before it, a site that turned compression on at a reload, or any site of
    a build without libxcrypt, got no copy of a cached file).
-6. **Streamed answers** (section 6): `CompressedBody`, flushes, the budget, SSE and
-   `compress_event_streams`, `offload`, and those two fields on a managed site (`site_update`,
-   `ctl --compression-offload`, `--compression-events`). The memory and streams rows measured.
+6. **Streamed answers** (section 6), built 2026-11-07 for 0.1.0-alpha.137 with decisions 11 to 14:
+   `StreamEncoder` and its budget, `CompressedBody`, the flush rule over `StreamBody::ready`, SSE and
+   `compress_event_streams`, `offload` (the proxied field, FastCGI's and CGI's
+   `HTTP_ACCEPT_ENCODING`), those two fields on a managed site (`site_update`, `ctl
+   --compression-offload`, `--compression-events`), status's stream counters, `fuzz_compressed_body`.
+   HTTP/3 takes no streamed body yet, so its large answers stay as they came.
 7. **The agent interface** (section 9). Its first part was built before step 6, in 0.1.0-alpha.119,
    when the test VPS could not turn compression on for one managed site: `site_create` and
    `site_update` take the site's `enabled`, `exclude_paths`, `compress_signed_in` and `codings`,
@@ -568,6 +600,18 @@ All taken by the owner on 2026-10-30:
    already allowed; a site may override the tuning too (a site behind a CDN puts brotli first); the
    copies of cached files follow the site's codings with no test on the hit path, since a reload
    replaces the cache entries anyway; brotli over gzip between two copies whatever the order.
+
+11. 2026-11-07, step 6 (the owner, on the recommendation): the encoders of answers compressed in
+   pieces get a budget of 32 MB per worker in bytes, no key; past it an answer goes as it came with
+   `Vary`, counted in status. Measured the same day, the charge is per level (zstd 9 holds 11.6 MB,
+   five times zstd 3).
+12. Same day: one flush rule, the upstream's pause (`StreamBody::ready`), not the first draft's flush
+   at every FastCGI record and upstream chunk.
+13. Same day: event streams stay opt-in (`compress_event_streams`), the key's text, the MCP text and
+   the cookbook saying to turn it on only for streams that never carry a secret beside what a
+   visitor sent; no per-event padding, which costs ratio and works cleanly for brotli alone.
+14. Same day: a streamed answer is measured against `min_size` by its declared length alone, nginx's
+   rule; waiting for its first piece would hold the head back.
 
 ## 13. Sources
 

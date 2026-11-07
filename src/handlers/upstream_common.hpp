@@ -35,8 +35,10 @@ void collect_request_body(Stream& s, UpstreamBodyInput& body, std::size_t memory
 // streaming body when the result is streamed. `log_name` is the access log's upstream field.
 // On a site with hsts the application's own is replaced; a stronger one is noted once per
 // generation of the site for health and `log` (docs/redirects.md 4.1).
+// `ctx`: the worker's loop, where an answer compressed in pieces yields between them
+// (handlers/compressed_body.hpp).
 void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<StreamBody> source, const char* log_name,
-                           const LocationConfig& loc, ErrorLog* log);
+                           const LocationConfig& loc, ErrorLog* log, asio::io_context* ctx = nullptr);
 
 // docs/redirects.md 2.5: an application's own http:// Location naming one of the site's names (with
 // no port, port 80 or the site's TLS port, as the Host it was given) appended to `out` as https://

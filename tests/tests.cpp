@@ -21,6 +21,8 @@
 #include "cache.hpp"
 #include "compress.hpp"
 #include "handlers/compress_answer.hpp"
+#include "handlers/compressed_body.hpp"
+#include "decode_stream.hpp"
 #include "http1/chunked.hpp"
 #include "config.hpp"
 #include "control/php.hpp"
@@ -597,8 +599,25 @@ static void test_compress_answer() {
     a.body_size = kWholeMax;
     CHECK(decide(s, a) == Reason::compress);
     a.body_size = kWholeMax + 1;
-    CHECK(decide(s, a) == Reason::large);  // step 6's, identity with Vary until then
+    CHECK(decide(s, a) == Reason::pieces);  // larger: compressed as it is sent (step 6)
+    // HTTP/1.0 has no chunked framing and HTTP/3 no streamed body yet: those clients get it as it came.
+    a.streams_ok = false;
+    CHECK(decide(s, a) == Reason::no_streaming);
     a.body_size = 4096;
+    CHECK(decide(s, a) == Reason::compress);  // whole, with its exact length: any protocol takes that
+    a.streams_ok = true;
+    {
+        Request r;
+        CHECK(streams_unknown_length(r));  // HTTP/1.1
+        r.version_minor = 0;
+        CHECK(!streams_unknown_length(r));
+        r.protocol = "HTTP/2.0";
+        CHECK(streams_unknown_length(r));
+        r.protocol = "HTTP/3.0";
+        CHECK(!streams_unknown_length(r));
+        r.protocol = "hq-interop";
+        CHECK(!streams_unknown_length(r));
+    }
     a.content_type = "image/png";
     CHECK(decide(s, a) == Reason::type);
     a.content_type = "application/x-ndjson; charset=utf-8";
@@ -670,14 +689,36 @@ static void test_compress_answer() {
           !browser_credential("Bearer x") && !browser_credential("Basicx y") && !browser_credential(""));
     CHECK(reason_name(Reason::signed_in) == "signed_in");
     a.content_type = "text/event-stream";
+    a.streamed = true;
     CHECK(decide(s, a) == Reason::event_stream);
     site.compress_event_streams = true;
-    CHECK(decide(s, a) == Reason::streamed);
+    CHECK(decide(s, a) == Reason::pieces);
+    // Once opted in, an event stream meets the other rules like any answer (before step 6 it returned
+    // before them: no_transform, exclude_paths and the guard would not have held for it).
+    a.cache_control = "no-transform";
+    CHECK(decide(s, a) == Reason::no_transform);
+    a.cache_control = "";
+    s.auth.protected_path = true;
+    CHECK(decide(s, a) == Reason::signed_in);
+    s.auth.protected_path = false;
+    a.content_type = "Text/Event-Stream; charset=utf-8";
+    CHECK(is_event_stream(a.content_type) && decide(s, a) == Reason::pieces);
+    CHECK(!is_event_stream("text/event-streamx") && !is_event_stream("text/event") && is_event_stream("text/event-stream"));
     site.compress_event_streams = false;
     a.content_type = "text/html";
-    a.streamed = true;
-    CHECK(decide(s, a) == Reason::streamed);
+    // A stream: compressed in pieces whatever its size, unless it declares a length under min_size
+    // (nginx's gzip_min_length reads Content-Length alone).
+    a.body_size = 0;
+    CHECK(decide(s, a) == Reason::pieces);
+    a.length_known = true;
+    a.body_size = 100;
+    CHECK(decide(s, a) == Reason::size);
+    a.body_size = 5000000;
+    CHECK(decide(s, a) == Reason::pieces);
+    a.length_known = false;
+    CHECK(reason_name(Reason::pieces) == "pieces" && reason_name(Reason::no_streaming) == "no_streaming" && reason_name(Reason::budget) == "budget");
     a.streamed = false;
+    a.body_size = 4096;
     a.head = true;
     a.body_size = 0;
     CHECK(decide(s, a) == Reason::head);  // not size: a HEAD answer has no body to measure
@@ -795,6 +836,409 @@ static void test_compress_buffered() {
     // loss the design feared below 4 is quality 1's alone).
     CHECK(compress_answer::level_for(root, Encoding::zstd) == 3 && compress_answer::level_for(root, Encoding::br) == 3 &&
           compress_answer::level_for(root, Encoding::gzip) == 5 && compress_answer::level_for(root, Encoding::identity) == 0);
+}
+
+// A page of text for the encoders in pieces: varied enough that a window matters (numbers from an
+// LCG among repeated words), `n` bytes.
+static std::string piece_text(std::size_t n) {
+    std::string t;
+    std::uint32_t x = 12345;
+    while (t.size() < n) {
+        x = x * 1664525u + 1013904223u;
+        t += "<li class=\"row\">item " + std::to_string(x % 100000) + " of the list, with words that repeat and " + std::to_string(x >> 20) + "</li>\n";
+    }
+    t.resize(n);
+    return t;
+}
+
+// The encoders of answers compressed in pieces (docs/design-compression.md 6, step 6): every coding
+// and kind decodes back at each flush and at the end, padded or not; what each holds, as its library
+// reports it, stays under the charge the budget counts; the budget refuses past kStreamBudget and
+// counts it; the pool frees its encoders after an idle tick.
+static void test_stream_encoder() {
+    const std::string text = piece_text(1024 * 1024);
+    using Kind = StreamEncoder::Kind;
+    using Op = StreamEncoder::Op;
+    for (const Encoding e : {Encoding::zstd, Encoding::br, Encoding::gzip}) {
+        for (const Kind kind : {Kind::answer, Kind::events}) {
+            StreamEncoder enc;
+            if (!coding_built(e)) {
+                CHECK(!enc.begin(e, 3, kind, 0, 0));
+                continue;
+            }
+            const int level = e == Encoding::gzip ? 5 : 3;
+            CHECK(enc.begin(e, level, kind, 17, 0) && enc.input() && enc.input_capacity() == (kind == Kind::events ? kPieceEvents : kPieceAnswer));
+            std::string out;
+            std::vector<char> buf(65536);
+            std::size_t peak = 0, given = 0;
+            bool ok = true, prefixes = true;
+            // Pieces of 1 to 16 KB, a flush after every fourth, the output read in 64 KB buffers.
+            std::uint32_t r = 7;
+            int step = 0;
+            const auto drain = [&](Op op, const char*& in, std::size_t& in_len) {
+                bool done = false;
+                do {
+                    char* o = buf.data();
+                    std::size_t room = buf.size();
+                    ok = ok && enc.run(op, in, in_len, o, room, done);
+                    out.append(buf.data(), buf.size() - room);
+                    peak = std::max(peak, enc.memory());
+                } while (ok && !done);
+            };
+            while (given < text.size() && ok) {
+                r = r * 1103515245u + 12345u;
+                const std::size_t n = std::min<std::size_t>(text.size() - given, 1024 + (r >> 16) % 15360);
+                const char* in = text.data() + given;
+                std::size_t len = n;
+                drain(Op::process, in, len);
+                given += n;
+                if (++step % 4 == 0) {
+                    const char* none = nullptr;
+                    std::size_t zero = 0;
+                    drain(Op::flush, none, zero);
+                    const test::Decoded d = test::decode_stream(e, out);
+                    prefixes = prefixes && (!d.available || (d.ok && !d.ended && d.out == std::string_view(text).substr(0, given)));
+                }
+            }
+            const char* none = nullptr;
+            std::size_t zero = 0;
+            drain(Op::finish, none, zero);
+            CHECK(ok && prefixes);
+            const test::Decoded d = test::decode_stream(e, out);
+            CHECK(!d.available || (d.ok && d.ended && d.out == text));
+            CHECK(out.size() < text.size() / 3);
+            CHECK(peak > 0 && peak <= stream_charge(e, kind, level));
+        }
+    }
+    // The budget's charge at every level the keys allow (config.cpp: zstd 1 to 9, brotli 1 to 6,
+    // gzip 1 to 9) stays above what the library holds over a stream: a library that grows fails here,
+    // not in a worker's memory.
+    const std::string window = piece_text(768 * 1024);
+    for (const Encoding e : {Encoding::zstd, Encoding::br, Encoding::gzip}) {
+        if (!coding_built(e)) continue;
+        for (const Kind kind : {Kind::answer, Kind::events})
+            for (int level = 1; level <= (e == Encoding::br ? 6 : 9); ++level) {
+                StreamEncoder enc;
+                CHECK(enc.begin(e, level, kind, 32, 0));
+                std::vector<char> buf(65536);
+                std::size_t peak = 0;
+                for (std::size_t at = 0; at < window.size(); at += 16384) {
+                    const char* in = window.data() + at;
+                    std::size_t len = std::min<std::size_t>(16384, window.size() - at);
+                    bool done = false;
+                    const Op op = (at / 16384) % 8 == 7 ? Op::flush : Op::process;
+                    do {
+                        char* o = buf.data();
+                        std::size_t room = buf.size();
+                        CHECK(enc.run(op, in, len, o, room, done));
+                        peak = std::max(peak, enc.memory());
+                    } while (!done);
+                }
+                if (peak > stream_charge(e, kind, level))
+                    std::printf("stream encoder %s %s level %d: %zu bytes held, charged %zu\n", encoding_name(e).data(),
+                                kind == Kind::events ? "events" : "answer", level, peak, stream_charge(e, kind, level));
+                CHECK(peak <= stream_charge(e, kind, level));
+            }
+    }
+    if (coding_built(Encoding::zstd)) {
+        // A known size: the frame carries it, and the encoder holds what that size needs, no more.
+        StreamEncoder enc;
+        const std::string small = piece_text(100 * 1024);
+        CHECK(enc.begin(Encoding::zstd, 3, Kind::answer, 0, small.size()));
+        std::string out(ZSTD_compressBound(small.size()), '\0');
+        const char* in = small.data();
+        std::size_t len = small.size(), room = out.size();
+        char* o = out.data();
+        bool done = false;
+        CHECK(enc.run(Op::finish, in, len, o, room, done) && done);
+        out.resize(out.size() - room);
+        CHECK(ZSTD_getFrameContentSize(out.data(), out.size()) == small.size());
+    }
+    // The budget: encoders taken until the worker's is spent, the next refused and counted; one given
+    // back makes room again. Nothing compressed meanwhile: the charge is counted at begin.
+    const Encoding any = coding_built(Encoding::gzip) ? Encoding::gzip : coding_built(Encoding::zstd) ? Encoding::zstd : Encoding::identity;
+    if (any != Encoding::identity) {
+        std::vector<StreamEncoder> held;
+        const std::size_t fit = kStreamBudget / stream_charge(any, Kind::answer, 5);
+        for (std::size_t i = 0; i < fit; ++i) {
+            held.emplace_back();
+            CHECK(held.back().begin(any, 5, Kind::answer, 0, 0));
+        }
+        const StreamCounts before = stream_counts();
+        StreamEncoder over;
+        CHECK(!over.begin(any, 5, Kind::answer, 0, 0) && !over);
+        CHECK(stream_counts().over_budget == before.over_budget + 1 && stream_counts().active == before.active);
+        held.pop_back();
+        CHECK(over.begin(any, 5, Kind::answer, 0, 0));
+        held.clear();
+        over = StreamEncoder();
+        CHECK(stream_counts().active == before.active - fit);
+        // The pool: taken during this tick, so the first idle check keeps it; the next one frees it.
+        CHECK(!release_idle_encoders());
+        CHECK(release_idle_encoders());
+        CHECK(!release_idle_encoders());
+    }
+}
+
+// A source scripted by the test: its pieces handed out on request, each ready (answered inside the
+// call, as an upstream holding bytes) or late (answered when the test delivers it, as one still
+// waiting on the application), a declared length or none, a failure in place of the end.
+namespace {
+class ScriptedSource final : public StreamBody {
+public:
+    struct Piece {
+        std::string bytes;
+        bool ready = true;
+    };
+    std::vector<Piece> pieces;
+    bool sized = false, fail_at_end = false;
+    std::uint64_t declared = 0;
+    std::string given;  // what was handed out so far
+    bool length(std::uint64_t& out) const noexcept override {
+        out = declared;
+        return sized;
+    }
+    bool ready() const noexcept override { return next_ >= pieces.size() || pieces[next_].ready; }
+    void async_read(char* buf, std::size_t len, ReadHandler h) override {
+        if (next_ < pieces.size() && !pieces[next_].ready) {
+            wbuf_ = buf;
+            wlen_ = len;
+            waiting_ = std::move(h);
+            return;
+        }
+        give(buf, len, h);
+    }
+    bool waiting() const { return static_cast<bool>(waiting_); }
+    // The reader went away with a read in flight: the read is forgotten, never answered.
+    void abandon_read() noexcept override {
+        if (waiting_ && abandoned) *abandoned = true;
+        waiting_ = nullptr;
+        wbuf_ = nullptr;
+    }
+    std::shared_ptr<bool> abandoned;
+    void deliver() {
+        pieces[next_].ready = true;
+        ReadHandler h = std::move(waiting_);
+        waiting_ = nullptr;
+        give(wbuf_, wlen_, h);
+    }
+
+private:
+    void give(char* buf, std::size_t len, ReadHandler& h) {
+        if (next_ >= pieces.size()) {
+            h(fail_at_end ? std::make_error_code(std::errc::connection_reset) : std::error_code{}, 0);
+            return;
+        }
+        Piece& p = pieces[next_];
+        const std::size_t n = std::min(len, p.bytes.size() - pos_);
+        std::memcpy(buf, p.bytes.data() + pos_, n);
+        given.append(p.bytes, pos_, n);
+        pos_ += n;
+        if (pos_ == p.bytes.size()) {
+            ++next_;
+            pos_ = 0;
+        }
+        h({}, n);
+    }
+    std::size_t next_ = 0, pos_ = 0;
+    char* wbuf_ = nullptr;
+    std::size_t wlen_ = 0;
+    ReadHandler waiting_;
+};
+
+// The writer's side: reads of `chunk` bytes until the end or an error, delivering the source's late
+// pieces when a read waits on them, and at each such wait holding the flush rule: everything the
+// source gave so far decodes from what was sent. Returns the bytes sent; `error` set on a failure.
+std::string pull_all(CompressedBody& body, ScriptedSource* src, Encoding e, std::size_t chunk, bool& error, bool& flushed_ok, int& waits) {
+    std::string sent;
+    std::vector<char> buf(chunk);
+    error = false;
+    for (int guard = 0; guard < 100000; ++guard) {
+        bool called = false;
+        std::error_code ec;
+        std::size_t got = 0;
+        body.async_read(buf.data(), buf.size(), [&](std::error_code c, std::size_t n) {
+            called = true;
+            ec = c;
+            got = n;
+        });
+        if (!called) {
+            if (!src || !src->waiting()) {
+                error = true;
+                return sent;
+            }
+            ++waits;
+            const test::Decoded d = test::decode_stream(e, sent);
+            flushed_ok = flushed_ok && (!d.available || (d.ok && d.out == src->given));
+            src->deliver();
+            if (!called) {
+                error = true;
+                return sent;
+            }
+        }
+        if (ec) {
+            error = true;
+            return sent;
+        }
+        if (got == 0) return sent;
+        sent.append(buf.data(), got);
+    }
+    error = true;
+    return sent;
+}
+}  // namespace
+
+// CompressedBody (handlers/compressed_body.hpp): a buffered answer, a spilled one and a stream, each
+// compressed as the writer pulls and decoded back whole; a stream's pauses flush everything given so
+// far (the one flush rule) and a stream that is always ready is never flushed midway (fewer bytes
+// than the same stream with pauses); a declared length is held both ways; a source's failure fails
+// the read; a writer reading small buffers gets the same bytes.
+static void test_compressed_body() {
+    const std::string text = piece_text(700 * 1024);
+    for (const Encoding e : {Encoding::zstd, Encoding::br, Encoding::gzip}) {
+        if (!coding_built(e)) continue;
+        const int level = e == Encoding::gzip ? 5 : 3;
+        const auto encoder = [&](StreamEncoder::Kind kind, std::uint64_t size, unsigned padding = padding_length()) {
+            StreamEncoder enc;
+            CHECK(enc.begin(e, level, kind, padding, size));
+            return enc;
+        };
+        bool error = false, flushed = true;
+        int waits = 0;
+        {  // memory, read in 64 KB and in 1 KB buffers
+            for (const std::size_t chunk : {std::size_t{65536}, std::size_t{1024}}) {
+                CompressedBody body(encoder(StreamEncoder::Kind::answer, text.size()), text);
+                const std::string sent = pull_all(body, nullptr, e, chunk, error, flushed, waits);
+                const test::Decoded d = test::decode_stream(e, sent);
+                CHECK(!error && (!d.available || (d.ok && d.ended && d.out == text)));
+            }
+        }
+        {  // a spilled answer: its temp file
+            File f = File::temporary();
+            CHECK(f.is_open() && f.append(text.data(), text.size()));
+            CompressedBody body(encoder(StreamEncoder::Kind::answer, text.size()), std::move(f), text.size());
+            const std::string sent = pull_all(body, nullptr, e, 65536, error, flushed, waits);
+            const test::Decoded d = test::decode_stream(e, sent);
+            CHECK(!error && (!d.available || (d.ok && d.ended && d.out == text)));
+        }
+        // A stream in pieces of 3 to 40 KB, every third one late (the application paused before it).
+        const auto script = [&](bool pauses) {
+            auto src = std::make_unique<ScriptedSource>();
+            std::size_t at = 0, i = 0;
+            while (at < text.size()) {
+                const std::size_t n = std::min<std::size_t>(text.size() - at, 3000 + (i * 7919) % 37000);
+                src->pieces.push_back({text.substr(at, n), !(pauses && i % 3 == 2)});
+                at += n;
+                ++i;
+            }
+            return src;
+        };
+        std::size_t paused_size = 0, ready_size = 0;
+        for (const bool pauses : {true, false}) {
+            auto owned = script(pauses);
+            ScriptedSource* src = owned.get();
+            CompressedBody body(encoder(StreamEncoder::Kind::answer, 0, 0), std::move(owned));  // no padding: the sizes compare
+            flushed = true;
+            waits = 0;
+            const std::string sent = pull_all(body, src, e, 65536, error, flushed, waits);
+            const test::Decoded d = test::decode_stream(e, sent);
+            CHECK(!error && flushed && (!d.available || (d.ok && d.ended && d.out == text)));
+            CHECK(pauses ? waits > 10 : waits == 0);
+            (pauses ? paused_size : ready_size) = sent.size();
+        }
+        CHECK(ready_size < paused_size);  // flushed only where the application paused
+        {  // server-sent events: each late, each out as it came
+            auto owned = std::make_unique<ScriptedSource>();
+            std::string all;
+            for (int i = 0; i < 50; ++i) {
+                const std::string ev = "id: " + std::to_string(i) + "\nevent: price\ndata: {\"symbol\":\"ABC\",\"price\":" + std::to_string(100 + i % 7) + "}\n\n";
+                owned->pieces.push_back({ev, false});
+                all += ev;
+            }
+            ScriptedSource* src = owned.get();
+            CompressedBody body(encoder(StreamEncoder::Kind::events, 0), std::move(owned));
+            flushed = true;
+            waits = 0;
+            const std::string sent = pull_all(body, src, e, 65536, error, flushed, waits);
+            const test::Decoded d = test::decode_stream(e, sent);
+            CHECK(!error && flushed && waits == 50 && (!d.available || (d.ok && d.ended && d.out == all)));
+        }
+        {  // a declared length: surplus bytes are not the answer's, a short one fails
+            auto owned = std::make_unique<ScriptedSource>();
+            owned->sized = true;
+            owned->declared = 5000;
+            owned->pieces.push_back({text.substr(0, 6000), true});
+            CompressedBody body(encoder(StreamEncoder::Kind::answer, 0), std::move(owned));
+            const std::string sent = pull_all(body, nullptr, e, 65536, error, flushed, waits);
+            const test::Decoded d = test::decode_stream(e, sent);
+            CHECK(!error && (!d.available || d.out == text.substr(0, 5000)));
+        }
+        {
+            auto owned = std::make_unique<ScriptedSource>();
+            owned->sized = true;
+            owned->declared = 9000;
+            owned->pieces.push_back({text.substr(0, 4000), true});
+            CompressedBody body(encoder(StreamEncoder::Kind::answer, 0), std::move(owned));
+            pull_all(body, nullptr, e, 65536, error, flushed, waits);
+            CHECK(error);
+        }
+        {  // once 256 KB of input was compressed since the last yield, a read's answer comes from the worker's
+           // loop, not inside the call, so one large answer cannot hold the worker for its whole encode
+           // (design 6); before that, and for a small answer, reads answer inline; the answer is whole either way
+            asio::io_context ctx;
+            CompressedBody body(encoder(StreamEncoder::Kind::answer, text.size()), text, &ctx);
+            std::vector<char> buf(65536);
+            std::string sent;
+            std::size_t inline_reads = 0, posted_reads = 0;
+            for (int guard = 0; guard < 1000; ++guard) {
+                bool called = false;
+                std::size_t got = 0;
+                body.async_read(buf.data(), buf.size(), [&](std::error_code, std::size_t n) {
+                    called = true;
+                    got = n;
+                });
+                if (called) {
+                    ++inline_reads;
+                } else {
+                    ++posted_reads;
+                    ctx.restart();
+                    ctx.run();  // the posted answer
+                    if (!called) break;
+                }
+                if (got == 0) break;
+                sent.append(buf.data(), got);
+            }
+            const test::Decoded d = test::decode_stream(e, sent);
+            CHECK(inline_reads >= 1 && posted_reads >= 1 && posted_reads <= 4 && (!d.available || (d.ok && d.ended && d.out == text)));
+            bool called = false;
+            CompressedBody small(encoder(StreamEncoder::Kind::answer, 100), text.substr(0, 100), &ctx);
+            called = false;
+            small.async_read(buf.data(), buf.size(), [&](std::error_code, std::size_t) { called = true; });
+            CHECK(called);
+        }
+        {  // the connection closed while the body waited on the application: the source is told to forget the
+           // read, its buffer and its handler, before the body (and the encoder's pooled buffer) is gone
+            auto owned = std::make_unique<ScriptedSource>();
+            owned->pieces.push_back({text.substr(0, 3000), false});
+            auto abandoned = std::make_shared<bool>(false);
+            owned->abandoned = abandoned;
+            auto body = std::make_unique<CompressedBody>(encoder(StreamEncoder::Kind::answer, 0), std::move(owned));
+            std::vector<char> buf(65536);
+            bool called = false;
+            body->async_read(buf.data(), buf.size(), [&](std::error_code, std::size_t) { called = true; });
+            CHECK(!called);
+            body.reset();
+            CHECK(*abandoned);
+        }
+        {
+            auto owned = std::make_unique<ScriptedSource>();
+            owned->fail_at_end = true;
+            owned->pieces.push_back({text.substr(0, 4000), true});
+            CompressedBody body(encoder(StreamEncoder::Kind::answer, 0), std::move(owned));
+            pull_all(body, nullptr, e, 65536, error, flushed, waits);
+            CHECK(error);
+        }
+    }
 }
 
 static void test_compress_whole() {
@@ -9372,8 +9816,7 @@ static void test_managed_response_compression() {
         };
         refused(R"J({"response_compression": {"levels": {"zstd": 9}}})J", "host's tuning");
         refused(R"J({"response_compression": {"min_size": "2KB"}})J", "host's tuning");
-        refused(R"J({"response_compression": {"offload": true}})J", "not offered on a managed site yet");
-        refused(R"J({"response_compression": {"compress_event_streams": true}})J", "not offered on a managed site yet");
+        refused(R"J({"response_compression": {"offload": "yes"}})J", "response_compression.offload must be true or false, or null");
         refused(R"J({"response_compression": {"codings": ["deflate"]}})J", "is not a coding agensio offers");
         refused(R"J({"response_compression": {"codings": ["gzip", "gzip"]}})J", "twice");
         refused(R"J({"response_compression": {"exclude_paths": ["checkout"]}})J", "exclude_paths");
@@ -9382,6 +9825,19 @@ static void test_managed_response_compression() {
         refused(R"J({"response_compression": {"enabeld": true}})J", "no field 'enabeld'");
         refused(R"J({"response_compression": "on"})J", "must be true, false");
     }
+    // offload and compress_event_streams (step 6, 0.1.0-alpha.137): set, kept, rendered, in force and in own.
+    CHECK(json::parse(R"J({"response_compression": {"offload": true, "compress_event_streams": true}})J", body, err));
+    CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty() && spec.response_compression["offload"].boolean() &&
+          spec.response_compression["compress_event_streams"].boolean() && spec.response_compression.members().size() == 5);
+    text = control::render_site(spec, "x");
+    CHECK(text.find("compress_event_streams = true, offload = true") != std::string::npos);
+    {
+        SiteConfig loaded;
+        CHECK(load_site_compression(spec.response_compression, cfg.compression, loaded).empty() && loaded.compression.offload &&
+              loaded.compression.compress_event_streams);
+    }
+    CHECK(json::parse(R"J({"response_compression": {"offload": null, "compress_event_streams": null}})J", body, err));
+    CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty() && spec.response_compression.members().size() == 3);
     // [] clears exclude_paths; enabled alone renders as the bare key; null drops every field.
     CHECK(json::parse(R"J({"response_compression": {"exclude_paths": [], "compress_signed_in": null, "enabled": true}})J", body, err));
     CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty() && spec.response_compression.members().size() == 1);
@@ -15443,6 +15899,8 @@ int main() {
     test_compressible_type();
     test_compress_whole();
     test_compress_answer();
+    test_stream_encoder();
+    test_compressed_body();
     test_compress_buffered();
     test_precompressed();
     test_chunked();

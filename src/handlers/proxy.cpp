@@ -126,6 +126,10 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
     // Connection or the configuration sets itself never gets this far, so it is not.
     bool xff_lines = false, forwarded_lines = false;
     bool cookie_sent = false;
+    // response_compression's offload (docs/design-compression.md 6): the browser's Accept-Encoding kept
+    // from the application, which then answers plain and agensio compresses, under its guard and with
+    // the site's codings. Only on a site that compresses; one test per field when it is on.
+    const bool offload = s.site_compression && static_cast<const CompressionConfig*>(s.site_compression)->offload;
     for (const HeaderField& h : req.headers) {
         if (http::is_hop_by_hop(h.name) || Headers::iequals(h.name, "expect") ||
             (!connection.empty() && http::connection_lists(connection, h.name)))
@@ -137,6 +141,7 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
         // (underscores_in_headers off).
         if (h.name.find('_') != std::string_view::npos) continue;
         if (configured(h.name)) continue;  // set below from the configuration
+        if (offload && Headers::iequals(h.name, "accept-encoding")) continue;
         // One Cookie line for the origin, the crumbs in the order received (RFC 6265 5.4:
         // at most one Cookie field; Rack reads the first line only). HTTP/2 and HTTP/3 join
         // theirs at assembly (RFC 9113 8.2.3); this folds the second Cookie line an HTTP/1.1
@@ -308,7 +313,7 @@ void ProxyHandler::finish(Exchange& x, UpstreamResult& res) {
         return;
     }
     if (!x.req->health_note().empty()) log_.warn("proxy " + x.req->health_note());  // a member down or back
-    apply_upstream_result(s, res, res.streamed ? x.req->body_source() : nullptr, "ok", loc, &log_);
+    apply_upstream_result(s, res, res.streamed ? x.req->body_source() : nullptr, "ok", loc, &log_, &x.req->context());
     if (res.upgraded) {
         s.response.upgrade = true;
         s.response.tunnel_timeout_s = loc.proxy.tunnel_timeout_s;

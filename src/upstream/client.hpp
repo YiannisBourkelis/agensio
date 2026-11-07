@@ -226,6 +226,7 @@ public:
 
     // Streaming mode: the response body as a pull source (valid after `done` ran).
     std::unique_ptr<StreamBody> body_source();
+    asio::io_context& context() noexcept { return pool_.context(); }  // the worker's loop, the exchange's own
     // After a 101: the origin connection, with any bytes that followed the head still in
     // its `in` buffer. The exchange is over; the pool slot was already given back.
     std::unique_ptr<UpstreamConnection> take_connection() noexcept { return std::move(conn_); }
@@ -304,6 +305,8 @@ private:
     void arm(std::chrono::milliseconds d);
     void deliver_head();
     void pull(char* buf, std::size_t len, StreamBody::ReadHandler handler);
+    bool ready() const noexcept;  // a pull now would be answered at once (Source::ready)
+    void abandon_waiter() noexcept;  // the pull's reader is gone (Source::abandon_read)
     void satisfy_waiter();
     void release_connection(bool reusable);
 

@@ -2,12 +2,13 @@
 // the copies of cached files made once at fill (brotli 11, gzip 9), and `coding_built` for what
 // this binary offers. Each library optional at build time (CMakeLists.txt: AGENSIO_HAS_ZLIB,
 // AGENSIO_HAS_ZSTD, AGENSIO_HAS_BROTLI); a coding the build lacks is refused where it is named.
-// The streaming encoders for answers compressed per request come with a later step. Levels and
-// windows are set explicitly here, never left to a library's default, so a library upgrade never
-// changes what agensio sends (the Traefik regression of 2026).
+// StreamEncoder for answers compressed in pieces (step 6). Levels and windows are set explicitly
+// here, never left to a library's default, so a library upgrade never changes what agensio sends
+// (the Traefik regression of 2026).
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -92,5 +93,85 @@ ZstdContext& zstd_context();
 // capped as above, `padding` bytes carried as the coding skips them. False when the build lacks the
 // coding or the encoder fails, `out` then empty.
 bool compress_buffered(Encoding e, int level, unsigned padding, std::string_view in, std::string& out);
+
+// ---- answers compressed in pieces (docs/design-compression.md 6, step 6) ----
+
+// What one worker's encoders for answers compressed in pieces may hold at once (design 12, decision
+// 11): past it an answer goes out uncompressed, Vary kept, and is counted in status. No key: an
+// answer is never refused for it, and the count says when a worker meets it.
+inline constexpr std::size_t kStreamBudget = 32u * 1024 * 1024;
+// The input piece an encoder takes from its source at a time: 64 KB for an answer (zstd 3 under
+// 0.1 ms, gzip 5 about 0.5 ms, inside the writer's own pieces), 16 KB for an event stream, whose
+// events are small.
+inline constexpr std::size_t kPieceAnswer = 64 * 1024;
+inline constexpr std::size_t kPieceEvents = 16 * 1024;
+
+// The encoder of one answer compressed in pieces: taken from the calling thread's pool (zlib and
+// zstd contexts are reset, never made per answer; brotli has no reset and is made per answer, its
+// blocks under glibc's mmap threshold, tune_heap in server.cpp), set up with the coding's level, a
+// window fixed here, and the answer's padding, and given back to the pool when it is destroyed.
+// Every call runs on the thread that began it (a connection never leaves its worker).
+class StreamEncoder {
+public:
+    // answer: the windows above (zstd 2^19, brotli 2^18 or the answer's size, gzip 2^15). events: a
+    // text/event-stream held open for a long time, so small encoders (zstd 2^15, brotli 2^16, gzip
+    // 2^13) that a thousand open streams can afford; an event is a few hundred bytes.
+    enum class Kind : std::uint8_t { answer, events };
+    // process: compress what is given, the coding keeping what it has not emitted; flush: everything
+    // given so far emitted, decodable by the client as it stands (Z_SYNC_FLUSH, ZSTD_e_flush,
+    // BROTLI_OPERATION_FLUSH); finish: the coding's end written.
+    enum class Op : std::uint8_t { process, flush, finish };
+
+    StreamEncoder() = default;
+    ~StreamEncoder();
+    StreamEncoder(StreamEncoder&& o) noexcept : slot_(o.slot_) { o.slot_ = nullptr; }
+    StreamEncoder& operator=(StreamEncoder&& o) noexcept;
+    StreamEncoder(const StreamEncoder&) = delete;
+    StreamEncoder& operator=(const StreamEncoder&) = delete;
+
+    // Set up for one answer of `size` bytes (0: not known): false when the build lacks the coding,
+    // the worker's budget would be passed (counted), or the library fails. `padding` bytes (at most
+    // kPaddingMax) go where every decoder skips them, before the data (design 7).
+    bool begin(Encoding e, int level, Kind kind, unsigned padding, std::uint64_t size);
+    // One step of `op`: input taken from `in`, output written to `out`, both advanced. False on a
+    // failure of the library (the answer cannot go on: its head named the coding). `done`: process,
+    // the input consumed; flush and finish, the op complete (else call again with more room, the
+    // same op, no new input).
+    bool run(Op op, const char*& in, std::size_t& in_len, char*& out, std::size_t& out_len, bool& done);
+    // The input buffer the pool keeps with the encoder (kPieceAnswer or kPieceEvents bytes), for a
+    // source that is not already in memory.
+    char* input() const noexcept;
+    std::size_t input_capacity() const noexcept;
+    // The bytes the encoder holds now, as its library reports them (zlib's formula, ZSTD_sizeof_CCtx,
+    // brotli's blocks counted through its allocator), the input buffer included: what stream_charge
+    // must stay above.
+    std::size_t memory() const noexcept;
+    explicit operator bool() const noexcept { return slot_ != nullptr; }
+
+    struct Slot;
+
+private:
+    Slot* slot_ = nullptr;
+};
+
+// The bytes the budget counts for one answer's encoder of the coding, kind and level, its input
+// buffer included: what the library holds at most for a stream, measured per level on 2026-11-07
+// (Debian 13: zstd 1.5.7, brotli 1.1.0, zlib 1.3.1) with headroom, and held there by
+// test_stream_encoder at every level the keys allow. The level decides it more than the coding:
+// zstd 3 holds 2.1 MB for an answer, zstd 9 11.6 MB (its search tables grow whatever the window);
+// an event stream 386 KB with zstd 3, 872 KB with brotli 3, 86 KB with gzip.
+std::size_t stream_charge(Encoding e, StreamEncoder::Kind kind, int level) noexcept;
+
+// For status: answers being compressed in pieces now, since the start, and sent uncompressed for
+// the budget, over every worker.
+struct StreamCounts {
+    std::uint64_t active = 0;
+    std::uint64_t started = 0;
+    std::uint64_t over_budget = 0;
+};
+StreamCounts stream_counts() noexcept;
+// The calling thread's pooled encoders freed when it took none since the last call (the worker's
+// one-second tick); true when it freed any, so the worker trims its heap.
+bool release_idle_encoders() noexcept;
 
 }  // namespace agensio

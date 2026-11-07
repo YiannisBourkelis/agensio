@@ -1377,6 +1377,8 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
                                           .set("codings", list(c.codings))
                                           .set("exclude_paths", list(c.exclude_paths))
                                           .set("compress_signed_in", c.compress_signed_in)
+                                          .set("compress_event_streams", c.compress_event_streams)
+                                          .set("offload", c.offload)
                                           .set("min_size", static_cast<double>(c.min_size))
                                           .set("levels", json::Value::object().set("zstd", c.level_zstd).set("br", c.level_br).set("gzip", c.level_gzip))
                                           .set("extra_types", list(c.extra_types))

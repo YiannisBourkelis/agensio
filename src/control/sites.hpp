@@ -82,7 +82,8 @@ struct SiteSpec {
     // The offered fields the owner declined (docs/headers.md 7): canonical names, the list sent whole.
     std::vector<std::string> response_headers_offer_declined;
     // The site's own response_compression (docs/design-compression.md 9, 0.1.0-alpha.119): the fields
-    // the owner set, an object of enabled, exclude_paths, compress_signed_in and codings, each other
+    // the owner set, an object of enabled, exclude_paths, compress_signed_in, compress_event_streams,
+    // offload (0.1.0-alpha.137, with the streamed answers they act on) and codings, each other
     // field the main file's [response_compression]; empty: the site follows the main file whole.
     // Judged by load_site_compression, rendered as the site's response_compression key.
     json::Value response_compression;

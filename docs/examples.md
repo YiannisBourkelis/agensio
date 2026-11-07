@@ -157,7 +157,8 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [Compress every site of the host, one kept off](examples/compression.md#compress-every-site-of-the-host-one-kept-off): the main file's `[response_compression]` with `enabled = true`, managed sites included, and a site's `false`.
 - [A shop: account and checkout pages left uncompressed](examples/compression.md#a-shop-account-and-checkout-pages-left-uncompressed): `exclude_paths` against BREACH, the Laravel pages to name.
 - [Behind Cloudflare, CloudFront or Fastly: brotli first](examples/compression.md#behind-cloudflare-cloudfront-or-fastly-brotli-first): a site's own `codings` while the others keep zstd first.
-- [An application that compresses its own answers](examples/compression.md#an-application-that-compresses-its-own-answers): passed through; the application's switch that hands the work to agensio; `offload` from step 6.
+- [An application that compresses its own answers](examples/compression.md#an-application-that-compresses-its-own-answers): `offload` keeps `Accept-Encoding` from it, so agensio compresses with zstd or brotli; or the application's own switch.
+- [Server-sent events, compressed as they come](examples/compression.md#server-sent-events-compressed-as-they-come): `compress_event_streams`, each event sent at once, when the stream carries no secret.
 - [A staging site behind a password, compressed anyway](examples/compression.md#a-staging-site-behind-a-password-compressed-anyway): the signed-in guard and `compress_signed_in`.
 - [A type the built-in list leaves out](examples/compression.md#a-type-the-built-in-list-leaves-out): `extra_types` with `mime_types`, for NDJSON and YAML.
 - [Fewer bytes or less CPU: the levels](examples/compression.md#fewer-bytes-or-less-cpu-the-levels): `levels` in the main file and per site, with the measured trade.

@@ -3960,7 +3960,7 @@ FPMCONF
     printf 'secret\n' | "$BIN" passwd anna > bench/tmp/comp3/users; chmod 640 bench/tmp/comp3/users
     C3AUTH=$(printf '[[site.auth]]\npath = "/priv/"\nusers = "%s/bench/tmp/comp3/users"\nskip_for = ["127.0.0.1"]\n' "$ROOT")
   fi
-  printf '[server]\nworkers = 1\nprotocols = ["h1", "h2c"]\n[log]\naccess = "off"\nerror = "%s/bench/tmp/comp3/error.log"\n[[site]]\nserver_name = ["c3.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { enabled = true, exclude_paths = ["/off/"] }\n[[site.access]]\npath = "/adm/"\nallow = ["127.0.0.1"]\n[[site.access]]\npath = "/adm/open/"\nallow = ["any"]\n[[site.access]]\npath = "/rep/"\nallow = ["127.0.0.1"]\nmode = "report"\n%s\n[[site]]\nserver_name = ["c4.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { enabled = true, compress_signed_in = true }\n' "$ROOT" "$ROOT" "$ROOT" "$C3AUTH" "$ROOT" "$ROOT" > bench/tmp/comp3/agensio.toml
+  printf '[server]\nworkers = 1\nprotocols = ["h1", "h2c"]\n[log]\naccess = "off"\nerror = "%s/bench/tmp/comp3/error.log"\n[control]\nsocket = "%s/bench/tmp/comp3/control.sock"\naudit = "%s/bench/tmp/comp3/audit.log"\n[[site]]\nserver_name = ["c3.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { enabled = true, exclude_paths = ["/off/"] }\n[[site.access]]\npath = "/adm/"\nallow = ["127.0.0.1"]\n[[site.access]]\npath = "/adm/open/"\nallow = ["any"]\n[[site.access]]\npath = "/rep/"\nallow = ["127.0.0.1"]\nmode = "report"\n%s\n[[site]]\nserver_name = ["c4.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock" }\nresponse_compression = { enabled = true, compress_signed_in = true }\n[[site]]\nserver_name = ["c5.test"]\nlisten = ["127.0.0.1:8065"]\nroot = "%s/tests/compress"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/comp3/fpm.sock", buffering = false }\nresponse_compression = { enabled = true, compress_event_streams = true, offload = true }\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$C3AUTH" "$ROOT" "$ROOT" "$ROOT" "$ROOT" > bench/tmp/comp3/agensio.toml
   mkdir -p tests/compress/off tests/compress/adm/open tests/compress/priv tests/compress/rep
   for d in off adm adm/open priv rep; do cp tests/compress/page.php tests/compress/$d/page.php; done
   rm -f bench/tmp/comp3/error.log
@@ -4011,8 +4011,8 @@ FPMCONF
   check "compression: no-transform in the answer and in the request is honoured; the application's own gzip passes through with Vary merged; Content-Encoding: identity is dropped and the body left alone" \
     "200|- ; 200|- ; 200|gzip|Cookie, Accept-Encoding ; 200|-|Accept-Encoding" \
     "$(c3 /nt.php -H 'Accept-Encoding: gzip' | f 1,2) ; $(c3 /page.php -H 'Accept-Encoding: gzip' -H 'Cache-Control: no-transform' | f 1,2) ; $(c3 /gz.php -H 'Accept-Encoding: gzip' | f 1-3) ; $(c3 /ident.php -H 'Accept-Encoding: gzip' | f 1-3)"
-  check "compression: an excluded path, a 206, an image and a body under min_size are left alone; one above 256 KB too (step 6's), with Vary" "- - - - -|Accept-Encoding" \
-    "$(c3 /off/page.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /range.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /img.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /small.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /huge.php -H 'Accept-Encoding: gzip' | f 2,3)"
+  check "compression: an excluded path, a 206, an image and a body under min_size are left alone" "- - - -" \
+    "$(c3 /off/page.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /range.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /img.php -H 'Accept-Encoding: gzip' | f 2) $(c3 /small.php -H 'Accept-Encoding: gzip' | f 2)"
   # The whole-answer limit is 256 KB (compress_answer::kWholeMax; 64 KB until the measurement of
   # bench/results/compression-levels-20261030.md): a page of a CMS home page's size is compressed whole.
   LGLEN=$(curl -sS -H 'Host: c3.test' http://127.0.0.1:8065/large.php | wc -c)
@@ -4021,6 +4021,58 @@ FPMCONF
     "$(c3 /large.php -H 'Accept-Encoding: zstd' | f 1-3) $([ "$LGLEN" -gt 65536 ] && [ "$LGLEN" -lt 262144 ] && echo between) $([ "$(zstd -dc bench/tmp/comp3/large.zst 2>/dev/null | wc -c)" = "$LGLEN" ] && echo yes)"
   check "compression: over HTTP/2 (h2c) the compressed page carries its coding and decodes whole" "2 zstd $IDLEN" \
     "$(curl -sS --http2-prior-knowledge -D - -o /dev/null -H 'Host: c3.test' -H 'Accept-Encoding: zstd' http://127.0.0.1:8065/page.php | tr -d '\r' | awk 'NR==1{v=$1} tolower($1)=="content-encoding:"{e=$2} END{sub(/HTTP\//, "", v); printf "%s %s", v, e}') $(curl -sS --http2-prior-knowledge --compressed -H 'Host: c3.test' http://127.0.0.1:8065/page.php | wc -c)"
+  # Step 6 (docs/design-compression.md 6, 0.1.0-alpha.137): answers above 256 KB, spilled ones and
+  # streamed ones are compressed as they are sent, chunked on HTTP/1.1 (no Content-Length), DATA frames
+  # on HTTP/2; an HTTP/1.0 client gets them as they came, with Vary. c5.test streams (buffering = false)
+  # with compress_event_streams and offload: each event reaches the client decoded while the stream
+  # goes on (the flush at the application's pause), and PHP never sees the browser's Accept-Encoding.
+  HULEN=$(curl -sS -H 'Host: c3.test' http://127.0.0.1:8065/huge.php | wc -c)
+  c3te() { curl -sS -D - -o "$2" -H 'Host: c3.test' "${@:3}" "http://127.0.0.1:8065$1" | tr -d '\r' | awk 'tolower($1)=="transfer-encoding:"{t=$2} tolower($1)=="content-length:"{l=$2} END{printf "%s/%s", t?t:"-", (l=="")?"-":l}'; }
+  pieces="" dec=0
+  for e in zstd br gzip; do pieces="$pieces $(c3 /huge.php -H "Accept-Encoding: $e" | f 2,3) $(c3te /huge.php bench/tmp/comp3/huge.$e -H "Accept-Encoding: $e")"; done
+  [ "$(zstd -dc bench/tmp/comp3/huge.zstd 2>/dev/null | wc -c)" = "$HULEN" ] && dec=$((dec+1))
+  [ "$(brotli -dc bench/tmp/comp3/huge.br 2>/dev/null | wc -c)" = "$HULEN" ] && dec=$((dec+1))
+  [ "$(gzip -dc bench/tmp/comp3/huge.gzip 2>/dev/null | wc -c)" = "$HULEN" ] && dec=$((dec+1))
+  check "compression in pieces: a PHP answer above 256 KB goes zstd, brotli and gzip, chunked with no Content-Length and Vary, each decoding to the page with its tool" \
+    " zstd|Accept-Encoding chunked/- br|Accept-Encoding chunked/- gzip|Accept-Encoding chunked/- 3 yes" "$pieces $dec $([ "$HULEN" -gt 262144 ] && echo yes)"
+  check "compression in pieces: an HTTP/1.0 client gets the answer as it came, with Vary and its length; over h2c it goes zstd and decodes whole" \
+    "200|-|Accept-Encoding|$HULEN 2 zstd $HULEN" \
+    "$(c3 /huge.php --http1.0 -H 'Accept-Encoding: zstd' | f 1,2,3,5) $(curl -sS --http2-prior-knowledge -D - -o /dev/null -H 'Host: c3.test' -H 'Accept-Encoding: zstd' http://127.0.0.1:8065/huge.php | tr -d '\r' | awk 'NR==1{v=$1} tolower($1)=="content-encoding:"{e=$2} END{sub(/HTTP\//, "", v); printf "%s %s", v, e}') $(curl -sS --http2-prior-knowledge --compressed -H 'Host: c3.test' http://127.0.0.1:8065/huge.php | wc -c)"
+  SPLEN=$(curl -sS -H 'Host: c3.test' http://127.0.0.1:8065/spill.php | wc -c)
+  check "compression in pieces: an answer past the FastCGI buffer's 1 MB, spilled to a temp file, goes zstd from the file and decodes whole; so does a streamed one (buffering = false)" \
+    "yes zstd $SPLEN zstd $HULEN" \
+    "$([ "$SPLEN" -gt 1048576 ] && echo yes) $(c3 /spill.php -H 'Accept-Encoding: zstd' | f 2) $(curl -sS --compressed -H 'Host: c3.test' -H 'Accept-Encoding: zstd' http://127.0.0.1:8065/spill.php | wc -c) $(curl -sS -D - -o /dev/null -H 'Host: c5.test' -H 'Accept-Encoding: zstd' http://127.0.0.1:8065/huge.php | tr -d '\r' | awk 'tolower($1)=="content-encoding:"{print $2}') $(curl -sS --compressed -H 'Host: c5.test' -H 'Accept-Encoding: zstd' http://127.0.0.1:8065/huge.php | wc -c)"
+  cat > bench/tmp/comp3/events.py <<'EVPY'
+import http.client, time, zlib
+def read(host, enc):
+    c = http.client.HTTPConnection("127.0.0.1", 8065, timeout=10)
+    t0 = time.time()
+    c.request("GET", "/events.php", headers={"Host": host, "Accept-Encoding": enc})
+    r = c.getresponse()
+    coding = r.getheader("Content-Encoding") or "-"
+    d = zlib.decompressobj(16 + zlib.MAX_WBITS) if coding == "gzip" else None
+    out, first = b"", None
+    while True:
+        chunk = r.read1(65536)
+        if not chunk:
+            break
+        out += d.decompress(chunk) if d else chunk
+        if first is None and b"data:" in out:
+            first = time.time() - t0
+    total = time.time() - t0
+    return coding, ("early" if first is not None and first < total - 0.6 else "late %s %.2f" % (first, total)), out.count(b"data:")
+c5 = read("c5.test", "gzip")
+c3 = read("c3.test", "gzip")
+print(c5[0], c5[1], c5[2], c3[0], c3[2])
+EVPY
+  check "compression of an event stream (compress_event_streams): gzip, each event decoded while the stream goes on (the first one long before its end), all five at the end; a site without the key sends it as it came" \
+    "gzip early 5 - 5" "$(python3 bench/tmp/comp3/events.py)"
+  # The offload site streams, and a stream that declares no length is compressed whatever its size
+  # (nginx's gzip_min_length reads Content-Length alone): its four bytes come back brotli, decoded here.
+  check "compression offload: PHP on the offload site never sees the browser's Accept-Encoding; on the other site it does" "none gzip, br" \
+    "$(curl -sS --compressed -H 'Host: c5.test' -H 'Accept-Encoding: gzip, br' http://127.0.0.1:8065/ae.php) $(curl -sS --compressed -H 'Host: c3.test' -H 'Accept-Encoding: gzip, br' http://127.0.0.1:8065/ae.php)"
+  check "compression status: the answers compressed in pieces counted, none in progress, none over the budget" "yes 0 0" \
+    "$(curl -sS --unix-socket bench/tmp/comp3/control.sock http://control/v1/status | python3 -c 'import json,sys; c=json.load(sys.stdin)["compression"]; print("yes" if c["streams_started"] >= 8 else c["streams_started"], int(c["streams_active"]), int(c["streams_over_budget"]))')"
   kill $C3PID; wait $C3PID 2>/dev/null
   kill $C3FPM 2>/dev/null; wait $C3FPM 2>/dev/null
   rm -rf tests/compress/off tests/compress/adm tests/compress/priv tests/compress/rep

@@ -103,7 +103,8 @@ void usage(std::ostream& out = std::cout) {
                  "                           --no-response-headers-baseline | --response-headers-baseline (the preset's own fields)\n"
                  "                           --decline-response-header NAME ... | --no-declined-response-headers (offered, declined)\n"
                  "                      site-update NAME --compression on|off|main [--compression-codings br,zstd,gzip|main]\n"
-                 "                           [--compression-exclude PATH ...] [--compression-signed-in on|off|main] | --compression-reset\n"
+                 "                           [--compression-exclude PATH ...] [--compression-signed-in on|off|main]\n"
+                 "                           [--compression-events on|off|main] [--compression-offload on|off|main] | --compression-reset\n"
                  "                      site-update NAME --restrict PATH=ADDR[,ADDR...] ... (only those addresses reach PATH)\n"
                  "                      site-update NAME --restrict-admin ADDR[,ADDR...] [--admin-login] [--admin-language L]...\n"
                  "                      site-update NAME --auth PATH | --auth-exact PATH | --auth-open PATH ... [--auth-realm TEXT]\n"
@@ -714,6 +715,10 @@ int main(int argc, char** argv) {
                              "                    Cloudflare, CloudFront or Fastly); --compression-exclude PATH (repeatable, given together\n"
                              "                    they replace the list; --no-compression-exclude clears it) a path prefix never compressed;\n"
                              "                    --compression-signed-in on|off|main the site's password and address-rule answers too;\n"
+                             "                    --compression-events on|off|main its text/event-stream answers too, each event out as\n"
+                             "                    it comes (only for streams that never put a secret beside what a visitor sent);\n"
+                             "                    --compression-offload on|off|main keeps Accept-Encoding from the application, so it\n"
+                             "                    answers plain and agensio compresses (a PHP site with zlib.output_compression, Next.js);\n"
                              "                    each flag changes its own field, the others stay; --compression-reset drops them all, so\n"
                              "                    the site follows the main file whole. site NAME shows the values in force (own: the\n"
                              "                    site's)\n"
@@ -808,7 +813,8 @@ int main(int argc, char** argv) {
             std::vector<std::pair<std::string, agensio::json::Value>> header_rules;
             agensio::json::Value header_file_rules = agensio::json::Value::array();
             bool headers_given = false;
-            // --compression, --compression-signed-in, --compression-codings, --compression-exclude: the
+            // --compression, --compression-signed-in, --compression-events, --compression-offload,
+            // --compression-codings, --compression-exclude: the
             // fields of the site's own response_compression they name, merged by the server into what the
             // site set; --compression-reset drops them all.
             agensio::json::Value compression = agensio::json::Value::object();
@@ -1092,14 +1098,15 @@ int main(int argc, char** argv) {
                     list.push(v);
                     body.set("response_headers_offer_declined", list);
                 } else if (b == "--no-declined-response-headers") body.set("response_headers_offer_declined", agensio::json::Value::array());
-                else if (b == "--compression" || b == "--compression-signed-in") {  // on | off | main (the main file decides)
+                else if (b == "--compression" || b == "--compression-signed-in" || b == "--compression-events" || b == "--compression-offload") {  // on | off | main (the main file decides)
                     std::string v; value(v);
                     if (v != "on" && v != "off" && v != "main") {
                         std::cerr << "ctl: " << b << " takes on, off or main (the main file's [response_compression] decides)\n";
                         return 2;
                     }
-                    compression.set(b == "--compression" ? "enabled" : "compress_signed_in",
-                                    v == "main" ? agensio::json::Value(nullptr) : agensio::json::Value(v == "on"));
+                    const char* field = b == "--compression" ? "enabled" : b == "--compression-signed-in" ? "compress_signed_in"
+                                      : b == "--compression-events" ? "compress_event_streams" : "offload";
+                    compression.set(field, v == "main" ? agensio::json::Value(nullptr) : agensio::json::Value(v == "on"));
                     compression_given = true;
                 } else if (b == "--compression-codings") {  // zstd,br,gzip in the order wanted, or main
                     std::string v; value(v);

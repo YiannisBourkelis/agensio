@@ -16,7 +16,8 @@
 namespace agensio::compress_answer {
 
 enum class Reason : std::uint8_t {
-    compress,         // yes, with Stream::coding
+    compress,         // yes, with Stream::coding: a buffered answer up to kWholeMax, compressed whole
+    pieces,           // yes: a larger buffered answer, a spilled one or a stream, compressed as it is sent
     mode_off,         // compression is not enabled for the site
     no_accept,        // no Accept-Encoding, or none acceptable
     type,             // not a compressible media type (or none)
@@ -27,14 +28,15 @@ enum class Reason : std::uint8_t {
     path_off,         // under one of the site's exclude_paths
     signed_in,        // the request carried a credential agensio itself knows (design 7) and compress_signed_in = false
     event_stream,     // text/event-stream without compress_event_streams = true
-    streamed,         // a streamed answer: compressed in pieces from step 6 on, identity until then
-    large,            // a buffered answer above kWholeMax: in pieces from step 6 on, identity with Vary until then
+    no_streaming,     // in pieces, which the client's protocol cannot carry: HTTP/1.0 (no chunked framing), HTTP/3 (no streamed body yet)
+    budget,           // in pieces, with the worker's encoders at kStreamBudget: sent as it came, counted in status
     head,             // a HEAD answer: the GET's bytes are not here to compress; Vary says what the GET varies on
 };
 
 inline std::string_view reason_name(Reason r) noexcept {
     switch (r) {
         case Reason::compress: return "compress";
+        case Reason::pieces: return "pieces";
         case Reason::mode_off: return "mode_off";
         case Reason::no_accept: return "no_accept_encoding";
         case Reason::type: return "type";
@@ -45,8 +47,8 @@ inline std::string_view reason_name(Reason r) noexcept {
         case Reason::path_off: return "path_off";
         case Reason::signed_in: return "signed_in";
         case Reason::event_stream: return "event_stream";
-        case Reason::streamed: return "streamed";
-        case Reason::large: return "large";
+        case Reason::no_streaming: return "no_streaming";
+        case Reason::budget: return "budget";
         case Reason::head: return "head";
     }
     return "";
@@ -57,7 +59,7 @@ inline std::string_view reason_name(Reason r) noexcept {
 // the worker: at 256 KB about 0.35 ms with zstd 3 (what Chrome and Firefox get), 1.4 ms with brotli 4,
 // 2.1 ms with gzip 5 (bench/results/compression-levels-20261030.md). 256 KB covers a CMS home page
 // (WordPress 70 KB, Laravel's welcome page 82 KB), which the 64 KB of steps 3 and 4 left out; a
-// larger answer is compressed as the writer pulls it, in 64 KB pieces, from step 6 on.
+// larger answer is compressed as the writer pulls it, in 64 KB pieces (handlers/compressed_body.hpp).
 inline constexpr std::uint64_t kWholeMax = 256 * 1024;
 
 // The site's level for the coding (levels = { zstd, br, gzip }, the main file's unless the site sets its own).
@@ -77,13 +79,26 @@ struct Answer {
     std::string_view content_type;
     std::string_view content_encoding;
     std::string_view cache_control;  // the answer's
-    std::uint64_t body_size = 0;     // the buffered body's bytes
+    std::uint64_t body_size = 0;     // the buffered body's bytes; a streamed one's declared length (length_known)
     bool streamed = false;
+    bool length_known = false;       // a streamed answer declared its length (Content-Length)
+    bool streams_ok = true;          // the client's protocol carries a body of unknown length (streams_unknown_length)
     bool content_range = false;  // a Content-Range field: a 206 or a mislabelled one
     bool head = false;           // the request was HEAD: the application sends the head alone
 };
 
 // Cache-Control holds the no-transform directive (RFC 9111 5.2.1.6, 5.2.2.6), as a token.
+// text/event-stream, judged without parameters and in any case (RFC 9110 8.3.1).
+inline bool is_event_stream(std::string_view content_type) noexcept {
+    static constexpr std::string_view kEs = "text/event-stream";
+    if (content_type.size() < kEs.size()) return false;
+    for (std::size_t k = 0; k < kEs.size(); ++k) {
+        const char c = content_type[k];
+        if ((c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : c) != kEs[k]) return false;
+    }
+    return content_type.size() == kEs.size() || content_type[kEs.size()] == ';' || content_type[kEs.size()] == ' ';
+}
+
 inline bool has_no_transform(std::string_view cc) noexcept {
     std::size_t i = 0;
     while (i <= cc.size()) {
@@ -153,6 +168,15 @@ inline bool added_type(std::string_view content_type, const std::vector<std::str
     return false;
 }
 
+// HTTP/1.1 frames a body of unknown length chunked and HTTP/2 in DATA frames; HTTP/1.0 has no
+// chunked framing (RFC 9112 7: a close-delimited body is all it has, and nginx skips 1.0 for that),
+// and HTTP/3 carries no streamed body yet (docs/design-http3.md, I1b), so an answer compressed in
+// pieces goes to those as it came.
+inline bool streams_unknown_length(const Request& r) noexcept {
+    if (r.protocol.empty()) return r.version_minor >= 1;
+    return r.protocol == "HTTP/2.0";
+}
+
 inline Reason decide(const Stream& s, const Answer& a) noexcept {
     if (!s.site_compression) return Reason::mode_off;
     const auto* site = static_cast<const CompressionConfig*>(s.site_compression);
@@ -161,17 +185,24 @@ inline Reason decide(const Stream& s, const Answer& a) noexcept {
     if (a.status < 200 || a.status == 204 || a.status == 304 || a.status == 206 || a.content_range) return Reason::status;
     if (!a.content_encoding.empty()) return Reason::already_encoded;
     if (a.content_type.empty()) return Reason::type;
-    const bool event_stream = a.content_type.size() >= 17 && (a.content_type.substr(0, 17) == "text/event-stream");
-    if (event_stream) return site->compress_event_streams ? Reason::streamed : Reason::event_stream;
-    if (!compressible_type(a.content_type) && !added_type(a.content_type, site->extra_types)) return Reason::type;
+    // An event stream is compressed only when the site says so, and then like any other answer: the
+    // rules below hold for it too.
+    if (is_event_stream(a.content_type)) {
+        if (!site->compress_event_streams) return Reason::event_stream;
+    } else if (!compressible_type(a.content_type) && !added_type(a.content_type, site->extra_types)) {
+        return Reason::type;
+    }
     if (has_no_transform(a.cache_control) || has_no_transform(s.request.headers.get("cache-control"))) return Reason::no_transform;
     if (!site->exclude_paths.empty() && under_off_path(s.request.target, site->exclude_paths)) return Reason::path_off;
     if (!site->compress_signed_in && signed_in_visitor(s)) return Reason::signed_in;
     if (a.head) return Reason::head;  // before the size: a HEAD answer has no body to measure
-    if (a.streamed) return Reason::streamed;
-    if (a.body_size < site->min_size) return Reason::size;
-    if (a.body_size > kWholeMax) return Reason::large;
-    return Reason::compress;
+    if (!a.streamed) {
+        if (a.body_size < site->min_size) return Reason::size;
+        if (a.body_size <= kWholeMax) return Reason::compress;
+    } else if (a.length_known && a.body_size < site->min_size) {
+        return Reason::size;  // a stream is measured by the length it declares, or not at all (nginx's gzip_min_length)
+    }
+    return a.streams_ok ? Reason::pieces : Reason::no_streaming;
 }
 
 }  // namespace agensio::compress_answer

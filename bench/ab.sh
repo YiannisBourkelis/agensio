@@ -71,8 +71,12 @@
 #             "proxy-comp:/big:64" (100 KB of one repeated byte, under the 256 KB whole-answer
 #             limit since the measurement of compression-levels-20261030.md: compressed whole to a
 #             few hundred bytes, cheaper than sending it; identity with Vary while the limit was
-#             64 KB) and "proxy-comp-plain:/page:64" (no header, flat). A side whose
-#             binary lacks the key skips the rows.
+#             64 KB), "proxy-comp-plain:/page:64" (no header, flat) and "proxy-comp:/pages:8" (512 KB
+#             of the page's markup, past the whole-answer limit: compressed in pieces since step 6,
+#             sent as it came before, so its ratio is the cost of compressing it, not a regression;
+#             8 connections keep it under the worker's 32 MB encoder budget, which 64 interleaved
+#             answers of this size pass, sending most of them as they came).
+#             A side whose binary lacks the key skips the rows.
 #   -r        rounds of base/new alternation (default 2)
 #   -d        wrk duration per case (default 5s)
 #   -t        wrk threads (default 4)
@@ -105,7 +109,7 @@ if [ $PROXY = 1 ]; then
   # must be flat), its 32 KB page compressed whole per request (the encoder's cost), its 100 KB body
   # (above the whole-answer limit: identity with Vary until step 6, must be flat), and the page
   # without a header (the decision runs, nothing is compressed, must be flat).
-  [ $COMP = 1 ] && SPECS+=("proxy-comp:/json:64" "proxy-comp:/page:64" "proxy-comp-br:/page:64" "proxy-comp-gzip:/page:64" "proxy-comp:/big:64" "proxy-comp-plain:/page:64")
+  [ $COMP = 1 ] && SPECS+=("proxy-comp:/json:64" "proxy-comp:/page:64" "proxy-comp-br:/page:64" "proxy-comp-gzip:/page:64" "proxy-comp:/big:64" "proxy-comp-plain:/page:64" "proxy-comp:/pages:8")
 fi
 
 if [ $H2 = 1 ]; then

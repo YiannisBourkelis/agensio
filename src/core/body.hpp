@@ -45,6 +45,14 @@ public:
     // Reads up to `len` bytes into `buf`; completes with the byte count, 0 at end of body.
     using ReadHandler = std::function<void(std::error_code, std::size_t)>;
     virtual void async_read(char* buf, std::size_t len, ReadHandler handler) = 0;
+    // Whether a read now would complete at once (bytes held, or the end known): a compressed answer
+    // flushes what it holds before it waits on a source that is not ready (handlers/compressed_body.hpp).
+    // False is always safe: a flush more.
+    virtual bool ready() const noexcept { return false; }
+    // The reader is going away with a read of its in flight (a compressed answer whose connection
+    // closed): the source forgets that read, its buffer and its handler, and never answers it. A
+    // source that cannot outlive its reader needs nothing here.
+    virtual void abandon_read() noexcept {}
 };
 
 using Body = std::variant<NoBody, MemoryBody, FileBody, std::unique_ptr<StreamBody>>;

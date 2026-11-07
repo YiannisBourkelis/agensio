@@ -5,6 +5,8 @@
 //   /big            a large JSON body (-b bytes, default 100 KB): buffering and body copies
 //   /page           a 32 KB HTML page of varied markup (text/html): what a response compressor
 //                   works on per request (the -C rows of bench/ab.sh)
+//   /pages          512 KB of the same markup, past agensio's 256 KB whole-answer limit: an answer
+//                   compressed in pieces as it is sent (step 6 of docs/design-compression.md)
 //   /slow?ms=N      the JSON answer after N ms: a working application, connection pools
 //   /chunked        the JSON body in three chunks: the proxy's chunked decoder
 //   /close          the JSON answer with Connection: close: reconnects
@@ -38,6 +40,7 @@ std::atomic<std::uint64_t> g_connections{0};
 std::atomic<std::uint64_t> g_requests{0};
 std::string g_big;
 std::string g_page;  // /page: 32 KB of HTML, each paragraph its own, as a CMS page compresses
+std::string g_pages;  // /pages: 512 KB of such HTML
 unsigned g_port = 9100;
 
 constexpr std::string_view kJson = R"({"ok":true,"service":"upstream"})";
@@ -217,6 +220,7 @@ private:
         if (path == "/json") return send(head(std::to_string(kJson.size()), close), kJson, close);
         if (path == "/big") return send(head(std::to_string(g_big.size()), close), g_big, close);
         if (path == "/page") return send(head(std::to_string(g_page.size()), close, false, "text/html; charset=utf-8"), g_page, close);
+        if (path == "/pages") return send(head(std::to_string(g_pages.size()), close, false, "text/html; charset=utf-8"), g_pages, close);
         if (path == "/close") return send(head(std::to_string(kJson.size()), true), kJson, true);
         if (path == "/chunked") {
             static const std::string chunks = "d\r\n{\"ok\":true,\"s\r\n" "f\r\nervice\":\"upstre\r\n" "4\r\nam\"}\r\n" "0\r\n\r\n";
@@ -437,6 +441,13 @@ int main(int argc, char** argv) {
             g_page += "<a href=\"/entry/" + std::to_string(i) + "\">more</a></p></article>\n";
         }
         g_page += "</body></html>\n";
+        g_pages = "<!doctype html><html><head><title>Pages</title></head><body>\n";
+        for (unsigned i = 0; g_pages.size() < 512 * 1024; ++i) {
+            g_pages += "<article id=\"entry-" + std::to_string(i) + "\" class=\"post type-post status-publish\"><h2>Entry " + std::to_string(i) + "</h2><p>";
+            for (unsigned w = 0; w < 60; ++w) g_pages += word() + (w % 12 == 11 ? ". " : " ");
+            g_pages += "<a href=\"/entry/" + std::to_string(i) + "\">more</a></p></article>\n";
+        }
+        g_pages += "</body></html>\n";
     }
     g_port = port;
     if (workers == 0) workers = 1;

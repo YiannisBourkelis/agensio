@@ -428,6 +428,8 @@ public:
     void async_read(char* buf, std::size_t len, ReadHandler handler) override {
         req_->pull(buf, len, std::move(handler));
     }
+    bool ready() const noexcept override { return req_->ready(); }
+    void abandon_read() noexcept override { req_->abandon_waiter(); }
 
 private:
     std::shared_ptr<UpstreamRequest> req_;
@@ -991,6 +993,18 @@ void UpstreamRequest::pull(char* buf, std::size_t len, StreamBody::ReadHandler h
     waiter_ = Waiter{buf, len, std::move(handler)};
     satisfy_waiter();
     if (waiter_.handler) read_more();  // nothing pending yet: keep the upstream flowing
+}
+
+void UpstreamRequest::abandon_waiter() noexcept {
+    waiter_.handler = nullptr;  // never answered, and nothing written to its buffer
+    waiter_.buf = nullptr;
+    waiter_.len = 0;
+}
+
+bool UpstreamRequest::ready() const noexcept {
+    // What satisfy_waiter answers at once: spilled bytes, pending bytes, or the exchange's end.
+    return (spill_read_ < spilled_ && result_.spill.is_open()) || pending_pos_ < pending_.size() || phase_ == Phase::finished ||
+           phase_ == Phase::failed;
 }
 
 void UpstreamRequest::satisfy_waiter() {

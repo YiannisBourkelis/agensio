@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.1.0-alpha.137 (2026-11-07)
+
+- **Response compression of large and streamed answers** (step 6 of `docs/design-compression.md`). A
+  PHP, proxied or CGI answer above 256 KB, one spilled to a temporary file and one streamed
+  (`buffering = false`, or an application streaming its answer) went out uncompressed; each is now
+  compressed as it is sent, chunked on HTTP/1.1 and in DATA frames on HTTP/2, the encoder writing
+  straight into the writer's buffer, about 64 KB of the application's bytes per read. One flush
+  rule: while the application keeps sending nothing is flushed; when it pauses (its `flush()`, the
+  end of an event, a slow query) what was compressed goes to the client at once. A stream is held
+  to `min_size` only by the length it declares (nginx's `gzip_min_length`). An HTTP/1.0 client and
+  an HTTP/3 one, which cannot take a body of unknown length here, get these answers as they came,
+  with `Vary`. An answer gives the worker back after every 256 KB it compressed, so no answer holds
+  it longer than a whole-compressed one may. Each worker gives the encoders of such answers at most
+  32 MB, charged per coding and level as measured (zstd 3 2.1 MB an answer, zstd 9 11.6 MB, an event
+  stream 86 to 872 KB); past it an answer goes as it came, never refused, and `status`'s
+  `compression` block counts it (`streams_over_budget`, `streams_active`, `streams_started`).
+- **`compress_event_streams` and `offload` act, and a managed site sets them.** An event stream is
+  compressed when its site says so, each event sent as it comes, with an encoder sized for a stream
+  held open; off by default, since each event's compressed size is visible on its own (the key, the
+  MCP text and the cookbook say for which streams to turn it on). `offload = true` keeps the
+  browser's `Accept-Encoding` from the application (the proxied field, FastCGI's and CGI's
+  `HTTP_ACCEPT_ENCODING`), so it answers plain and agensio compresses with zstd or brotli, padded
+  and guarded. `site_update` takes both in `response_compression`; `agensio ctl site-update NAME
+  --compression-events on|off|main`, `--compression-offload on|off|main`; `site_show` gives them.
+- **Testing:** `fuzz_compressed_body` scripts a source's pieces, pauses and declared length and
+  decodes the output at every wait and at the end; the unit tests decode each coding at every flush
+  (libbrotlidec, from the same package as the encoder, linked to the tests and fuzzers only) and hold
+  the budget's charge to what each library reports at every level the keys allow.
+
 ## 0.1.0-alpha.136 (2026-11-06)
 
 - **Fix: a static site created over PHP files went through at once when the check missed them** (the alpha.135

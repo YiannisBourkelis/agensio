@@ -39,7 +39,8 @@ public:
     // Request headers as HTTP_* pairs, the way nginx does it: names with '_' are dropped
     // (a client could otherwise spoof X-Forwarded-For with X_Forwarded_For), `Proxy` is never
     // forwarded (httpoxy, CVE-2016-5385), repeated fields are joined with ", " (Cookie: "; ").
-    static void append_http_params(std::string& out, const Headers& headers, std::string& scratch);
+    // offload: Accept-Encoding left out (response_compression's offload, on a site that compresses).
+    static void append_http_params(std::string& out, const Headers& headers, std::string& scratch, bool offload = false);
 
     // The per-request pairs (protocol, method, script, path info, query, body length, peer
     // and server addresses, scheme, HTTP_* fields); used by the CGI handler too.
