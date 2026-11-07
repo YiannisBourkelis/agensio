@@ -150,8 +150,18 @@ void check_keys(const toml::table& t, std::initializer_list<std::string_view> ta
         std::string msg = where + ": unknown key '" + std::string(key) + "'";
         if (const std::string nearest = nearest_name(key, keys); !nearest.empty()) msg += " (did you mean '" + nearest + "'?)";
         if (!hint.empty()) msg += "; " + std::string(hint);
-        if (const auto top = by_table.find("top level"); top != by_table.end() && std::find(tables.begin(), tables.end(), "top level") == tables.end() &&
-                                                         std::find(top->second.begin(), top->second.end(), key) != top->second.end())
+        const auto names = [&](std::string_view table) {
+            const auto it = by_table.find(table);
+            return it != by_table.end() && std::find(it->second.begin(), it->second.end(), key) != it->second.end();
+        };
+        // In a location a key of the site is the site's, never the file's top: there `php` is root's
+        // [php] runtimes, and a root additions file has no top (the alpha.139 report, F2).
+        const bool location = std::find(tables.begin(), tables.end(), "[[site.location]]") != tables.end();
+        if (location && names("[[site]]"))
+            msg += "; '" + std::string(key) + "' is a key of the site, not of a location: in a site file it goes in the [[site]] table, above "
+                   "its first [[site.location]] (TOML gives a key to the table above it); a managed site's are set by site_update, not by its "
+                   "root additions file";
+        else if (!location && std::find(tables.begin(), tables.end(), "top level") == tables.end() && names("top level"))
             msg += "; '" + std::string(key) + "' is a top-level key: put it above the first [table] header (TOML gives a key to the table above it)";
         msg += "; the keys here are";
         for (std::size_t i = 0; i < keys.size(); ++i) msg += (i ? ", " : " ") + std::string(keys[i]);
@@ -636,6 +646,13 @@ void parse_upstreams(const toml::node_view<const toml::node>& n, UpstreamConfig&
 }
 
 void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& site, const std::string& where) {
+    // `php` is the site's table (its pool, the FastCGI options of all its PHP); a location's own are its
+    // fastcgi table. Said for this key, since the site's table is the one thing a root additions file
+    // cannot reach (the alpha.139 report, F1 and F2: a managed PHP site's streaming location).
+    if (t.contains("php"))
+        fail(where + ": unknown key 'php': a location's FastCGI options are its fastcgi table, with handler = \"fastcgi\" (without a "
+                     "socket it uses the site's PHP pool), so handler = \"fastcgi\" and fastcgi = { buffering = false } stream its answers; "
+                     "php = { ... } is the site's table, for all of its PHP");
     check_keys(t, {"[[site.location]]"}, {}, where);
     LocationConfig loc;
     auto path = t["path"].value<std::string>();

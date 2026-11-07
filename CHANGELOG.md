@@ -15,6 +15,18 @@
   departed client (or `read_timeout` when the application is quiet). An answer without a body
   (HEAD, 204, 304) or whose declared length the client took whole is left to finish, so php-fpm's
   END_REQUEST and a CGI script's exit come as before.
+- **The texts name the table a PHP stream needs.** A location has no `php` table: a PHP script's
+  answers stream with `handler = "fastcgi"` and `fastcgi = { buffering = false }` in its location
+  (which uses the site's own pool when it names no socket), or for all of a hand-written site's PHP
+  with the site's `php = { buffering = false }`. The test VPS's report on 0.1.0-alpha.139 found the
+  texts' `php` table refused in a managed PHP site's root additions file. The reference rows of
+  `compress_event_streams`, the MCP text of `site_create` and `site_update`, `docs/configuration.md`
+  20 and `docs/mcp.md` say so, and the cookbook's server-sent events recipe gives the PHP form beside
+  the proxy one, with what a front controller's route (Laravel's `eventStream`) still lacks.
+- **A key of the site written in a location says so.** `php` in a `[[location]]` is refused naming
+  the location's `fastcgi` table; any other key of the site there is named as the site's, with
+  where it goes. Before, the refusal said to move it above the file's first table, where `php` is
+  root's `[php]` table of runtimes and where a root additions file refuses it a second time.
 - **Testing:** `fuzz_h2_bodies`, a new fuzz target: the HTTP/2 connection and the proxy in front of
   an origin the fuzzer plays, which sends each answer's head and body in pieces when the input says
   (Content-Length, chunked or close-delimited; text, bytes or an event stream; buffered and
@@ -39,7 +51,9 @@
   stream's end went out. A proxied, PHP or CGI answer streamed over HTTP/2 (`buffering = false`)
   could meet the first two without compression, a burst of window updates or a fast application.
 - **The texts say what `compress_event_streams` needs.** Each event goes out as it comes only where
-  the location streams (`buffering = false` in its `proxy` or `php` table); with buffering on, the
+  the location streams (`buffering = false` in its `proxy` table, or for PHP in a `handler =
+  "fastcgi"` location's `fastcgi` table; this entry and the texts said `php` table until
+  0.1.0-alpha.140, which a location does not have); with buffering on, the
   default, the whole stream reaches the browser at its end, compressed or not. The key's reference
   rows, the MCP text of `site_update` and the cookbook's recipe say so, and the recipe's managed-site
   way now adds the streaming location through the site's root additions file. The reference row of a

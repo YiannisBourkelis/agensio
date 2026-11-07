@@ -6934,6 +6934,14 @@ static void test_control_sites() {
                 put(ra / "sites.d" / "bad.root.toml", "site = \"shop.test\"\n[[location]\n");  // not TOML: its file name says the site
                 CHECK(set_aside("bad.root.toml", "bad.root.toml:"));
                 fs::remove(ra / "sites.d" / "bad.root.toml");
+                // php in a [[location]]: the hint names the location's fastcgi table, not the file's top.
+                put(frag, "site = \"shop.test\"\n[[location]]\npath = \"/sse.php\"\nmatch = \"exact\"\nphp = { buffering = false }\n");
+                CHECK(set_aside("shop.test.toml", "shop.test.root.toml [[location]] #1: unknown key 'php'"));
+                {
+                    const Config c = load_config(ra / "agensio.toml");
+                    const Config::HeldBack* h = c.held((ra / "sites.d" / "shop.test.toml").string());
+                    CHECK(h && h->error.find("fastcgi = { buffering = false }") != npos && h->error.find("top-level") == npos);
+                }
                 put(frag, "site = \"shop.test\"\n[[location]\n");
                 CHECK(set_aside("shop.test.toml", "its root additions file could not be loaded"));
                 put(frag, "site = \"shop.test\"\n[[location]]\npath = \"/own/\"\nfinal = true\n");
@@ -10704,6 +10712,27 @@ static void test_unknown_keys() {
     CHECK(refused(site + "proxy = { tls = { server_nmae = \"a.test\" } }\n", ".proxy.tls: unknown key 'server_nmae' (did you mean 'server_name'?)"));
     CHECK(refused(site + "[[site.location]]\npath = \"/a/\"\nhiden_files = true\n", "unknown key 'hiden_files' (did you mean 'hidden_files'?)"));
     CHECK(refused(site + "[[site.location]]\npath = \"/a/\"\nphp = { socket = \"unix:/run/x.sock\" }\n", "unknown key 'php'"));  // the location key is fastcgi
+    // A key of the site in a location: the hint names the location's own table or the site, never the
+    // file's top level, where `php` is root's [php] runtimes and a root additions file has nothing (the
+    // alpha.139 report, F2: its hint sent a managed PHP site's streaming location to a second refusal).
+    auto message = [&](const std::string& text) -> std::string {
+        write("k.toml", text);
+        try {
+            load_config(dir / "k.toml");
+        } catch (const std::exception& e) {
+            return e.what();
+        }
+        return {};
+    };
+    {
+        const std::string m = message(site + "[[site.location]]\npath = \"/sse.php\"\nmatch = \"exact\"\nphp = { buffering = false }\n");
+        CHECK(m.find("unknown key 'php'") != std::string::npos && m.find("handler = \"fastcgi\"") != std::string::npos &&
+              m.find("fastcgi = { buffering = false }") != std::string::npos && m.find("top-level") == std::string::npos);
+        const std::string r = message(site + "[[site.location]]\npath = \"/a/\"\nresponse_compression = { enabled = true }\n");
+        CHECK(r.find("unknown key 'response_compression'") != std::string::npos && r.find("a key of the site, not of a location") != std::string::npos &&
+              r.find("top-level") == std::string::npos);
+        if (!m.empty() && m.find("top-level") != std::string::npos) std::printf("php in a location: %s\n", m.c_str());
+    }
     CHECK(refused(site + "[[site.location]]\npath = \"/a/\"\nhandler = \"fastcgi\"\nfastcgi = { socket = \"unix:/run/x.sock\", read_timout = 5 }\n",
                   ".fastcgi: unknown key 'read_timout' (did you mean 'read_timeout'?)"));
     CHECK(refused(site + "[[site.location]]\npath = \"/c/\"\ncgi = { interpeter = \"/bin/sh\" }\n", ".cgi: unknown key 'interpeter' (did you mean 'interpreter'?)"));

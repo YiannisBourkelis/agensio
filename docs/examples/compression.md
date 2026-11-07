@@ -295,6 +295,29 @@ agensio reload
 agensio ctl site live.example.com          # root_additions: the file and the location it added
 ```
 
+On a PHP site the stream is a script that calls `flush()` after each event, and its location runs it
+through the site's own pool (`handler = "fastcgi"` with no socket); a location has no `php` table,
+the key there is `fastcgi`:
+
+```sh
+cat > /etc/agensio/sites.d/app.example.com.root.toml <<'EOF'
+site = "app.example.com"
+
+[[location]]
+path = "/sse.php"
+match = "exact"
+handler = "fastcgi"
+fastcgi = { buffering = false }
+EOF
+chmod 644 /etc/agensio/sites.d/app.example.com.root.toml
+agensio reload
+```
+
+This is for a script answered at its own path. A route a front controller answers (Laravel's
+`response()->eventStream()` at `/events`, which runs `index.php`) has no location of its own to give:
+on a hand-written site `php = { buffering = false }` streams all of the site's PHP, and on a managed
+one the stream stays buffered.
+
 Through MCP, `site_update` with `response_compression: {"enabled": true, "compress_event_streams": true}`,
 after the user confirmed what the stream carries; `site_show` names the root additions file, and the
 agent hands root this block, since no tool writes it.

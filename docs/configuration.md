@@ -4554,7 +4554,9 @@ does the same from its side: Next.js with `compress: false`, Ghost with `compres
 with `enable_gzip = false`.
 
 `compress_event_streams = true` compresses `text/event-stream` answers too, each event sent as it
-comes where the location streams them: `buffering = false` in its `proxy` or `php` table. With
+comes where the location streams them: `buffering = false` in a location's `proxy` table, for PHP
+in the `fastcgi` table of a location with `handler = "fastcgi"` (the site's own pool when it names no
+socket; a location has no `php` table), or in the site's `php` table for all of its PHP. With
 buffering on, the default, the whole stream is collected first and reaches the browser at its end,
 compressed or not. It is off by default for a reason of its own: on one long stream every event's compressed
 size is visible by itself, so a stream that carries a secret beside something a visitor sent gives
