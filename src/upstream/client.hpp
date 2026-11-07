@@ -221,11 +221,22 @@ public:
     // Health notes produced along the way ("marked down ..."), for the error log.
     const std::string& health_note() const noexcept { return note_; }
 
-    // Client gone: drop everything, no callbacks.
+    // Client gone: drop everything, no callbacks. A pull in flight is answered with
+    // operation_aborted from the loop, never inside the call: the reader may be closing. An
+    // exchange that has ended (finished, failed) is left as it is.
     void cancel() noexcept;
+    // The reader of the streamed body is gone before its end (its client left, its stream was
+    // reset, its connection closed): cancelled, unless the exchange has ended, or the answer has no
+    // body (HEAD, 204, 304) or the reader took the whole body the origin declared: the end of such
+    // an exchange is on its way (a FastCGI END_REQUEST, a CGI child's exit), and it finishes on
+    // its own, keeping its connection and letting the script run to its end. Before
+    // 0.1.0-alpha.140 nothing ended such an exchange: it read on to its read-ahead, stopped, and
+    // was freed without giving its slot back to the pool (fuzz_h2_bodies, 2026-11-07).
+    void reader_gone() noexcept;
 
-    // Streaming mode: the response body as a pull source (valid after `done` ran).
-    std::unique_ptr<StreamBody> body_source();
+    // Streaming mode: the response body as a pull source (valid after `done` ran). `head`: the
+    // request was a HEAD, so the answer has no body to read (nor has a 204 or 304).
+    std::unique_ptr<StreamBody> body_source(bool head);
     asio::io_context& context() noexcept { return pool_.context(); }  // the worker's loop, the exchange's own
     // After a 101: the origin connection, with any bytes that followed the head still in
     // its `in` buffer. The exchange is over; the pool slot was already given back.
@@ -307,6 +318,7 @@ private:
     void pull(char* buf, std::size_t len, StreamBody::ReadHandler handler);
     bool ready() const noexcept;  // a pull now would be answered at once (Source::ready)
     void abandon_waiter() noexcept;  // the pull's reader is gone (Source::abandon_read)
+    void drop_waiter() noexcept;     // the same when the source itself goes: the handler released from the loop
     void satisfy_waiter();
     void release_connection(bool reusable);
 
@@ -341,6 +353,10 @@ private:
     std::uint64_t spill_read_ = 0;   // bytes of result_.spill already handed to a pull
     std::string pending_;    // body bytes not yet pulled
     std::size_t pending_pos_ = 0;
+    std::uint64_t delivered_ = 0;  // body bytes handed to pulls (reader_gone)
+    std::uint64_t declared_ = 0;   // the body's Content-Length, when body_source() found one
+    bool sized_ = false;
+    bool bodiless_ = false;        // a HEAD's answer, a 204 or 304: nothing for a reader to take
     bool reading_ = false;
     bool in_data_ = false;  // inside on_data(): defers read_more() from re-entrant pulls
     struct Waiter {

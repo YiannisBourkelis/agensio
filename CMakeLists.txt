@@ -400,6 +400,17 @@ if(AGENSIO_FUZZ)
   endif()
   target_compile_options(fuzz_compressed_body PRIVATE -fsanitize=fuzzer -UNDEBUG)
   target_link_options(fuzz_compressed_body PRIVATE -fsanitize=fuzzer)
+  # The HTTP/2 writer pulling answers from a source: the connection and the proxy in front of an
+  # origin the fuzzer plays, its pieces, the client's windows and resets from the input, every answer
+  # decoded and compared with what the origin sent (tests/fuzz/fuzz_h2_bodies.cpp, 2026-11-07).
+  add_executable(fuzz_h2_bodies tests/fuzz/fuzz_h2_bodies.cpp)
+  target_link_libraries(fuzz_h2_bodies PRIVATE agensio_core_fuzz)
+  if(AGENSIO_HAS_BROTLI AND BROTLIDEC_FOUND)
+    target_link_libraries(fuzz_h2_bodies PRIVATE PkgConfig::BROTLIDEC)
+    target_compile_definitions(fuzz_h2_bodies PRIVATE AGENSIO_TEST_BROTLIDEC=1)
+  endif()
+  target_compile_options(fuzz_h2_bodies PRIVATE -fsanitize=fuzzer)
+  target_link_options(fuzz_h2_bodies PRIVATE -fsanitize=fuzzer)
   # A Laravel site's .env and the masking of a credential file's diff, and the scheduler's crontab
   # reader: text a site's account writes, read by the provisioning helper as root (2026-11-04).
   foreach(t dotenv cron_lines)

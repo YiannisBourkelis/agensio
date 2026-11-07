@@ -188,7 +188,7 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   fuzzed), `http_client` (`HttpRequest`: HTTP/1.1 framing both ways, keep-alive rules).
 - top level, not yet moved: `config`, `path`, `mime`, `http_date`, `file`, `cache`,
   `response` (status lines, error pages), `tls_stream.hpp`, `server`, `main`.
-Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-four, each seeded from
+Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded from
 `tests/fuzz/regressions/<name>/`, all run by `scripts/fuzz-all.sh`).
 
 ## Architecture (as implemented)
@@ -530,7 +530,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-four, each seeded f
 - **Client abort** (E9): one client read in flight per connection, routed by state; an
   upstream exchange older than a pool tick registers a slow callback and the connection
   arms an EOF watch, so an abandoned request is cancelled (slot freed, CGI process
-  killed) instead of executed; nothing is armed for fast exchanges.
+  killed) instead of executed; nothing is armed for fast exchanges. A streamed answer whose
+  reader goes first (the body dropped, an HTTP/2 stream reset or closed) ends its exchange
+  (`UpstreamRequest::reader_gone`, alpha.140): before, it read on to its read-ahead and was freed
+  without giving back its pool slot, 503 for the location after `max_connections` such clients.
+  HTTP/1 has no client read during a streamed answer, so a quiet origin's exchange ends at the
+  next write or `read_timeout`.
 - **Range requests** (E1, `src/http1/range.hpp`): one `bytes=` range with If-Range; 206
   as a slice of the cache entry or a `FileBody` with an offset (sendfile keeps the fast
   path), 416 past the end, `Accept-Ranges: bytes` prebuilt into the entry block.

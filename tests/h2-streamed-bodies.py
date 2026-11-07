@@ -19,6 +19,13 @@ writer (src/http2/writer.hpp), older than the compression, which made them commo
 On 0.1.0-alpha.138 h2c-pieces, h2-window-during-pull and h2-tls-pieces fail;
 h2-window-during-pull-compressed passes there too and stays as a guard.
 
+A client that leaves a streamed answer (found by fuzz_h2_bodies, 2026-11-07): the exchange behind it
+read on up to its 256 KB of read-ahead, stopped, and was freed without giving its slot back to the
+location's pool, so after max_connections such clients (16 per worker by default) every request to
+that origin waited queue_wait and got 503, until a restart; and while the exchange lived it held its
+origin connection open, past the client's RST_STREAM or close. On 0.1.0-alpha.139 every left-* row
+fails.
+
 Run inside the Linux devbox: python3 tests/h2-streamed-bodies.py BINARY [--rows a,b]
 One single-worker server, an origin in this script: /rnd/N answers N bytes of base64 (seeded) with
 its length, /pause/K answers K pieces of 20 KB chunked, 0.3 s apart. Rows:
@@ -28,6 +35,11 @@ its length, /pause/K answers K pieces of 20 KB chunked, 0.3 s apart. Rows:
   connection and for the stream sent while each waits on the origin's pause: each whole and in time.
 - h2-window-during-pull-compressed: the same, compressed (gzip) as it streams.
 - h2-tls-pieces: 5 MB compressed in pieces over TLS, a WINDOW_UPDATE after every DATA frame, three times.
+- left-h2-reset, left-h2-close, left-h2-reset-compressed, left-h1-close: on a site whose location has
+  one upstream slot (max_connections = 1, queue_wait = 2), a client takes an event stream and leaves
+  after its first DATA (RST_STREAM, the connection closed; over HTTP/1 the connection closed while
+  the origin keeps sending): the origin's connection closes within 2 s (HTTP/2: the origin quiet
+  after its first event), and the next request through the slot is answered 200.
 Requires python3-h2 and openssl. Exit 1 on any failed row.
 """
 import argparse
@@ -99,6 +111,49 @@ class Origin(socketserver.BaseRequestHandler):
                 piece = pause_piece(i)
                 sock.sendall(b"%x\r\n" % len(piece) + piece + b"\r\n")
             sock.sendall(b"0\r\n\r\n")
+
+
+HOLD_CLOSED = {}  # /hold/NAME: when the server closed the origin's connection
+
+
+class SlotOrigin(socketserver.BaseRequestHandler):
+    """One answer per connection: /quick at once; /hold/NAME an event stream's head and one event,
+    then quiet until the server closes; /flood/S events of 64 KB back to back for S seconds."""
+
+    def handle(self):
+        sock = self.request
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            data = sock.recv(65536)
+            if not data:
+                return
+            buf += data
+        target = buf.split(b"\r\n", 1)[0].split(b" ")[1].decode()
+        if target == "/quick":
+            sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            return
+        sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+        event = b"data: " + b"e" * 2000 + b"\n\n"
+        m = re.fullmatch(r"/(hold|flood)/(\w+)", target)
+        if not m:
+            return
+        if m.group(1) == "hold":
+            sock.sendall(b"%x\r\n" % len(event) + event + b"\r\n")
+            sock.settimeout(10)
+            try:
+                while sock.recv(65536):
+                    pass
+            except OSError:
+                pass
+            HOLD_CLOSED[m.group(2)] = time.monotonic()
+            return
+        event = b"data: " + b"f" * 65536 + b"\n\n"
+        end = time.monotonic() + int(m.group(2))
+        try:
+            while time.monotonic() < end:
+                sock.sendall(b"%x\r\n" % len(event) + event + b"\r\n")
+        except OSError:
+            pass
 
 
 def free_port():
@@ -212,16 +267,26 @@ class Server:
         self.origin.daemon_threads = True
         threading.Thread(target=self.origin.serve_forever, daemon=True).start()
         upstream = f'upstream = "http://127.0.0.1:{self.origin.server_address[1]}"\napp = "proxy"\n'
+        self.slot_origin = socketserver.ThreadingTCPServer(("127.0.0.1", 0), SlotOrigin)
+        self.slot_origin.daemon_threads = True
+        threading.Thread(target=self.slot_origin.serve_forever, daemon=True).start()
+        slots = (f'upstream = "http://127.0.0.1:{self.slot_origin.server_address[1]}"\napp = "proxy"\n'
+                 'proxy = { buffering = false, max_connections = 1, queue_wait = 2 }\n')
         self.ports = {}
         sites = ""
         for name, extra in (("buffered", 'response_compression = { enabled = true }\n'),
                             ("streamed", 'proxy = { buffering = false }\n'),
                             ("streamed-compressed", 'proxy = { buffering = false }\nresponse_compression = { enabled = true }\n'),
-                            ("tls", f'tls = {{ cert = "{root}/cert.pem", key = "{root}/key.pem" }}\nresponse_compression = {{ enabled = true }}\n')):
+                            ("tls", f'tls = {{ cert = "{root}/cert.pem", key = "{root}/key.pem" }}\nresponse_compression = {{ enabled = true }}\n'),
+                            ("slots", None),
+                            ("slots-compressed", 'response_compression = { enabled = true, compress_event_streams = true }\n')):
             port = free_port()
             while port in self.ports.values():
                 port = free_port()
             self.ports[name] = port
+            if name.startswith("slots"):
+                sites += f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{port}"]\n' + slots + (extra or "")
+                continue
             sites += f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{port}"]\n' + upstream + extra
         (root / "agensio.toml").write_text(
             '[server]\nworkers = 1\nprotocols = ["h1", "h2", "h2c"]\n'
@@ -243,6 +308,7 @@ class Server:
                 self.process.kill()
                 self.process.wait(timeout=2)
         self.origin.shutdown()
+        self.slot_origin.shutdown()
         self.log.seek(0)
         out = self.log.read()
         assert "Sanitizer" not in out and "runtime error:" not in out, "sanitizer report:\n" + out[-4096:]
@@ -326,11 +392,93 @@ def row_h2_tls_pieces(srv):
     return None
 
 
+def quick(port):
+    """The status line of GET /quick over HTTP/1.1, or what went wrong."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(b"GET /quick HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            data = b""
+            while True:
+                d = s.recv(65536)
+                if not d:
+                    break
+                data += d
+    except OSError as e:
+        return f"no answer ({e})"
+    return data.split(b"\r\n", 1)[0].decode(errors="replace")
+
+
+def left_h2(srv, site, name, how, coding=None):
+    c = H2(srv.ports[site])
+    try:
+        sid = c.conn.get_next_available_stream_id()
+        headers = [(":method", "GET"), (":scheme", "http"), (":authority", "localhost"), (":path", f"/hold/{name}")]
+        if coding:
+            headers.append(("accept-encoding", coding))
+        c.conn.send_headers(sid, headers, end_stream=True)
+        c.flush()
+        end = time.monotonic() + 5
+        got = False
+        while not got and time.monotonic() < end:
+            for ev in c.conn.receive_data(c.sock.recv(65536)):
+                got = got or (isinstance(ev, h2.events.DataReceived) and ev.stream_id == sid)
+            c.flush()
+        if not got:
+            return "no DATA from the event stream"
+        left = time.monotonic()
+        if how == "reset":
+            c.conn.reset_stream(sid)
+            c.flush()
+        else:
+            c.close()
+        while name not in HOLD_CLOSED and time.monotonic() < left + 3:
+            time.sleep(0.05)
+        closed = HOLD_CLOSED.get(name)
+        if closed is None or closed - left > 2:
+            return f"the origin's connection still open {time.monotonic() - left:.1f} s after the client's {how}"
+    finally:
+        c.close()
+    status = quick(srv.ports[site])
+    return None if status.startswith("HTTP/1.1 200") else f"the next request through the slot: {status}"
+
+
+def row_left_h2_reset(srv):
+    return left_h2(srv, "slots", "r", "reset")
+
+
+def row_left_h2_close(srv):
+    return left_h2(srv, "slots", "c", "close")
+
+
+def row_left_h2_reset_compressed(srv):
+    return left_h2(srv, "slots-compressed", "rc", "reset", "gzip")
+
+
+def row_left_h1_close(srv):
+    with socket.create_connection(("127.0.0.1", srv.ports["slots"]), timeout=5) as s:
+        s.sendall(b"GET /flood/8 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        data = b""
+        while b"\r\n\r\n" not in data or len(data) < 8192:
+            d = s.recv(65536)
+            if not d:
+                break
+            data += d
+            if b"\r\n\r\n" in data and not data.startswith(b"HTTP/1.1 200"):
+                return "the event stream itself: " + data.split(b"\r\n", 1)[0].decode(errors="replace")
+    time.sleep(1)  # the origin keeps sending: the server's next write to the client fails
+    status = quick(srv.ports["slots"])
+    return None if status.startswith("HTTP/1.1 200") else f"the next request through the slot: {status}"
+
+
 ROWS = {
     "h2c-pieces": row_h2c_pieces,
     "h2-window-during-pull": row_h2_window_during_pull,
     "h2-window-during-pull-compressed": row_h2_window_during_pull_compressed,
     "h2-tls-pieces": row_h2_tls_pieces,
+    "left-h2-reset": row_left_h2_reset,
+    "left-h2-close": row_left_h2_close,
+    "left-h2-reset-compressed": row_left_h2_reset_compressed,
+    "left-h1-close": row_left_h1_close,
 }
 
 

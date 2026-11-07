@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.0-alpha.140 (2026-11-07)
+
+- **Fix: a client that leaves a streamed answer gives back its place to the application.** An
+  answer streamed from an application (`buffering = false` on a proxy, PHP or CGI location) whose
+  client left before its end (a tab closed on an event stream, a download cancelled, an HTTP/2
+  stream reset) kept the exchange behind it: it read on up to its 256 KB of read-ahead, stopped,
+  and was freed without giving its slot back to the location's pool. After `max_connections` such
+  clients (16 per worker by default) every request to that application waited `queue_wait` and got
+  503, until a restart; HTTP/3, which answers such a location with a reset until it streams bodies,
+  leaked a slot on every request. Now the exchange ends when its reader drops the body: the slot
+  comes back and the application's connection closes, over HTTP/2 at the client's `RST_STREAM` or
+  close even while the application sends nothing, over HTTP/1 at the server's next write to the
+  departed client (or `read_timeout` when the application is quiet). An answer without a body
+  (HEAD, 204, 304) or whose declared length the client took whole is left to finish, so php-fpm's
+  END_REQUEST and a CGI script's exit come as before.
+- **Testing:** `fuzz_h2_bodies`, a new fuzz target: the HTTP/2 connection and the proxy in front of
+  an origin the fuzzer plays, which sends each answer's head and body in pieces when the input says
+  (Content-Length, chunked or close-delimited; text, bytes or an event stream; buffered and
+  streamed locations; every coding), with the client's windows, frame sizes, resets and reading
+  from the input; every answer decoded and compared with what the origin sent, every stream ended
+  once the origin is done and the client gives room, and no connection to the origin left open
+  when the client goes. It found the fault above in its first minute. `tests/h2-streamed-bodies.py`
+  has four rows for it (an HTTP/2 reset, with and without compression, an HTTP/2 close, an HTTP/1
+  close), which fail on 0.1.0-alpha.139.
+
 ## 0.1.0-alpha.139 (2026-11-07)
 
 - **Fix: answers pulled from an application over HTTP/2 arrive whole.** The test VPS's report on

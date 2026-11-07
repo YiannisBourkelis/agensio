@@ -205,7 +205,7 @@ public:
         for (auto& s : streams_.all()) {
             ++s->gen;
             if (s->upstream) {
-                s->upstream->cancel();
+                s->upstream->reader_gone();
                 s->upstream.reset();
             }
             if (s->dispatched && !s->logged) log_request(*s);  // the client went away, answered or not
@@ -706,8 +706,8 @@ private:
         // 0.1.0-alpha.119 one reset or cut before its HEADERS went out had none (the test VPS's report:
         // a POST to a login path reset before its answer was invisible to the jails).
         if (s.dispatched && !s.logged) log_request(s);
-        if (s.upstream) {
-            s.upstream->cancel();
+        if (s.upstream) {  // still in flight, or the source of an answer streaming: a pull in flight is answered from the loop
+            s.upstream->reader_gone();
             s.upstream.reset();
         }
         if (s.pending_handler) {
@@ -838,7 +838,9 @@ private:
                 auto self = this->shared_from_this();
                 auto done = [self, sp, gen] {
                     if (sp->gen != gen) return;  // reset or closed meanwhile
-                    sp->upstream.reset();
+                    // An answer streaming from the exchange keeps it: a reset or a close ends it at
+                    // once (reader_gone), even while the origin sends nothing and a pull waits on it.
+                    if (!std::holds_alternative<std::unique_ptr<StreamBody>>(sp->stream.response.body)) sp->upstream.reset();
                     self->respond(*sp);
                 };
                 const auto* site = static_cast<const SiteConfig*>(ws.site);
@@ -1145,7 +1147,7 @@ private:
         closing_after_write_ = true;
         for (auto& s : streams_.all()) {  // nothing more is served; the GOAWAY is the last write
             if (s->upstream) {
-                s->upstream->cancel();
+                s->upstream->reader_gone();
                 s->upstream.reset();
             }
             writer_.dequeue(*s);

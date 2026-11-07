@@ -430,6 +430,12 @@ public:
     }
     bool ready() const noexcept override { return req_->ready(); }
     void abandon_read() noexcept override { req_->abandon_waiter(); }
+    // The reader dropped the body. A read of its still in flight is never answered (its handler
+    // belongs to a reader that has moved on), and an exchange short of its end is ended.
+    ~Source() override {
+        req_->drop_waiter();
+        req_->reader_gone();
+    }
 
 private:
     std::shared_ptr<UpstreamRequest> req_;
@@ -507,7 +513,7 @@ void UpstreamRequest::on_slot(std::unique_ptr<UpstreamConnection> conn) {
 }
 
 void UpstreamRequest::cancel() noexcept {
-    if (phase_ == Phase::cancelled) return;
+    if (phase_ == Phase::cancelled || phase_ == Phase::finished || phase_ == Phase::failed) return;
     const Phase was = phase_;
     phase_ = Phase::cancelled;
     slow_fn_ = nullptr;
@@ -518,15 +524,19 @@ void UpstreamRequest::cancel() noexcept {
     if (conn_ && conn_->sock().is_open()) conn_->sock().close(ec);
     conn_.reset();
     on_end(false);
-    if (waiter_.handler) {  // a pull in flight must not hang
-        auto h = std::move(waiter_.handler);
+    if (waiter_.handler) {  // a pull in flight must not hang; its reader may be the caller, in its close
+        asio::post(pool_.context(), [h = std::move(waiter_.handler)] { h(std::error_code(asio::error::operation_aborted), 0); });
         waiter_.handler = nullptr;
-        h(std::error_code(asio::error::operation_aborted), 0);
     }
     done_ = nullptr;
 }
 
-std::unique_ptr<StreamBody> UpstreamRequest::body_source() {
+void UpstreamRequest::reader_gone() noexcept {
+    if (head_delivered_ && (bodiless_ || (sized_ && delivered_ >= declared_))) return;  // its end is on its way
+    cancel();
+}
+
+std::unique_ptr<StreamBody> UpstreamRequest::body_source(bool head) {
     std::uint64_t length = 0;
     bool sized = false;
     if (const std::string_view cl = result_.headers.get("content-length"); !cl.empty()) {
@@ -541,6 +551,9 @@ std::unique_ptr<StreamBody> UpstreamRequest::body_source() {
         }
         length = v;
     }
+    sized_ = sized;
+    declared_ = length;
+    bodiless_ = head || result_.status == 204 || result_.status == 304;
     return std::make_unique<Source>(shared_from_this(), sized, length);
 }
 
@@ -836,7 +849,11 @@ UpstreamRequest::HeadStatus UpstreamRequest::feed_head(std::string_view bytes, s
     head_buf_.shrink_to_fit();
     out_.clear();  // no retry once the head arrived
     out_.shrink_to_fit();
-    if (!options_.buffering) deliver_head();
+    if (!options_.buffering) {
+        deliver_head();
+        // The reader may have closed inside (its client gone) and ended the exchange: stop decoding.
+        if (phase_ == Phase::cancelled) return HeadStatus::error;
+    }
     return HeadStatus::complete;
 }
 
@@ -854,7 +871,9 @@ bool UpstreamRequest::store_body(std::string_view bytes) {
         if (phase_ == Phase::cancelled) return false;
         pending_.append(bytes);
         satisfy_waiter();
-        return true;
+        // The pull answered inline may have ended the exchange (its reader closed: reader_gone), and
+        // with it the connection whose buffer the caller is decoding.
+        return phase_ != Phase::cancelled;
     }
     if (result_.spill.is_open()) {
         if (spilled_ + bytes.size() > options_.buffer_file_max) {
@@ -865,7 +884,7 @@ bool UpstreamRequest::store_body(std::string_view bytes) {
             if (phase_ == Phase::cancelled) return false;
             pending_.append(bytes);
             satisfy_waiter();
-            return true;
+            return phase_ != Phase::cancelled;
         }
         if (!result_.spill.append(bytes.data(), bytes.size())) {
             fail(UpstreamFailure::spill_error, std::error_code(errno, std::generic_category()));
@@ -1001,6 +1020,12 @@ void UpstreamRequest::abandon_waiter() noexcept {
     waiter_.len = 0;
 }
 
+void UpstreamRequest::drop_waiter() noexcept {
+    // The handler may hold its reader's last reference, and the reader is inside its own close.
+    if (waiter_.handler) asio::post(pool_.context(), [h = std::move(waiter_.handler)] { (void)h; });
+    abandon_waiter();
+}
+
 bool UpstreamRequest::ready() const noexcept {
     // What satisfy_waiter answers at once: spilled bytes, pending bytes, or the exchange's end.
     return (spill_read_ < spilled_ && result_.spill.is_open()) || pending_pos_ < pending_.size() || phase_ == Phase::finished ||
@@ -1020,6 +1045,7 @@ void UpstreamRequest::satisfy_waiter() {
             return;
         }
         spill_read_ += static_cast<std::uint64_t>(got);
+        delivered_ += static_cast<std::uint64_t>(got);
         h(std::error_code{}, static_cast<std::size_t>(got));
         return;
     }
@@ -1034,6 +1060,7 @@ void UpstreamRequest::satisfy_waiter() {
         }
         auto h = std::move(waiter_.handler);
         waiter_.handler = nullptr;
+        delivered_ += n;
         h(std::error_code{}, n);
         return;
     }

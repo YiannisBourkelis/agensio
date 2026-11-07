@@ -525,6 +525,18 @@ chunk over it). A cycle that writes nothing but saw work arrive while it was bui
 inline re-queued its stream, the source's last 0 bytes) runs the next one at once; before, the
 END_STREAM waited for whatever the client sent next.
 
+A stream that closes while its answer streams from an application (the client's `RST_STREAM`, the
+connection closed or failed) ends the exchange behind it (0.1.0-alpha.140, found by
+`fuzz_h2_bodies`): the stream keeps its handle on the exchange while the body is a source, and its
+close calls `UpstreamRequest::reader_gone`, which cancels the exchange (its pool slot back, the
+origin's connection closed) and answers a read in flight from the loop, so the read's completion
+releases the stream as any late completion does. Before, the handle was dropped with the head and
+nothing ended the exchange: it read on to its 256 KB of read-ahead and was freed without giving its
+slot back, and after `max_connections` departed clients the location answered 503 until a restart.
+The body's own source does the same when a reader drops it before its end (HTTP/1's close, HTTP/3's
+reset of a streamed answer), so every protocol gives the slot back; an answer without a body or
+whose declared length was taken whole is left to finish.
+
 **Emit at respond (designed and built 2026-09-24).** With the cycle one buffer, an answer
 that is complete when `respond()` runs and small enough to be copied (a memory body up
 to `kCopyMax`, or no body, within the windows) needs nothing of its stream once its

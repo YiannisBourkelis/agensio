@@ -210,7 +210,9 @@ public:
     // The connection is closing: nothing more is written, in-flight completions are ignored.
     void reset() noexcept {
         closed_ = true;
-        ready_head_ = ready_tail_ = nullptr;
+        // Each ready stream unlinked and unmarked: one released after the close (a pull answered
+        // late) is not still marked queued (stream.hpp's reset asserts it; fuzz_h2_bodies 2026-11-07).
+        while (pop_ready()) {}
         ctl_.clear();
         waiting_.clear();
     }
@@ -314,9 +316,10 @@ private:
         ++writes_;
         out_.clear();  // the cycle's bytes are with the kernel; the next cycle builds from empty
         external_.clear();
-        if (closed_) return;
-        if (ec) {
-            owner_.close();
+        if (closed_ || ec) {  // nothing of the cycle's streams is in flight any more, nor will be
+            for (const auto& [p, gen] : inflight_) p->in_cycle = false;
+            inflight_.clear();
+            if (!closed_) owner_.close();
             return;
         }
         owner_.touch();

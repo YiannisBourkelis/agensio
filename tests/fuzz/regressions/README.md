@@ -13,7 +13,8 @@ modulo 3 makes the site php, static or without app, the first two with the secur
 `php_constraint/`: a PHP version on the first line, then a Composer constraint, a composer.json or
 WordPress's version.php; `dotenv/`: a .env's text, a NUL, then a change, one per line, `S NAME=value`,
 `U NAME`, `G NAME`; `cron_lines/`: a byte whose low bit is any_line, a byte for the limit, the project
-directory on the first line, then a crontab), and the
+directory on the first line, then a crontab; `h2_bodies/`: a setup byte, then the script's steps,
+an operation byte and its arguments each, as `fuzz_h2_bodies.cpp`'s `step` reads them), and the
 fuzzers' most interesting corpus entries live here.
 
 Rule: any input that crashes, hangs, or violates an invariant in a fuzzer or in production
