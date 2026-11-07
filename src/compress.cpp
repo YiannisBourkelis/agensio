@@ -426,7 +426,8 @@ EncoderPool& encoder_pool() {
 
 std::size_t stream_charge(Encoding e, StreamEncoder::Kind kind, int level) noexcept {
     // KB per level, the input buffer included: the peaks StreamEncoder::memory reported over a 2 MB
-    // stream flushed every 128 KB, plus about 6 %. Index: the level the keys allow (zstd 1 to 9,
+    // stream flushed every 128 KB with Debian 13's libraries, plus about 6 %; the admission estimate,
+    // which run() grows to what the library holds. Index: the level the keys allow (zstd 1 to 9,
     // brotli 1 to 6, gzip 1 to 9; config.cpp), clamped.
     static constexpr std::uint16_t kZstdAnswer[10] = {1500, 1500, 1700, 2240, 3600, 4150, 4150, 6850, 6850, 12300};
     static constexpr std::uint16_t kZstdEvents[10] = {350, 350, 350, 410, 410, 410, 410, 410, 410, 410};
@@ -637,10 +638,10 @@ bool StreamEncoder::begin(Encoding e, int level, Kind kind, unsigned padding, st
     return true;
 }
 
-bool StreamEncoder::run(Op op, const char*& in, std::size_t& in_len, char*& out, std::size_t& out_len, bool& done) {
-    done = false;
-    if (!slot_) return false;
-    Slot& s = *slot_;
+// One step of the coding's library on the slot (StreamEncoder::run).
+static bool run_slot(StreamEncoder::Slot& s, StreamEncoder::Op op, const char*& in, std::size_t& in_len, char*& out,
+                     std::size_t& out_len, bool& done) {
+    using Op = StreamEncoder::Op;
     // What goes before the data: the skippable frame of the padding (zstd).
     if (s.prefix_pos < s.prefix_len) {
         const std::size_t n = std::min(s.prefix_len - s.prefix_pos, out_len);
@@ -731,9 +732,25 @@ bool StreamEncoder::run(Op op, const char*& in, std::size_t& in_len, char*& out,
     return false;
 }
 
+bool StreamEncoder::run(Op op, const char*& in, std::size_t& in_len, char*& out, std::size_t& out_len, bool& done) {
+    done = false;
+    if (!slot_) return false;
+    const bool ok = run_slot(*slot_, op, in, in_len, out, out_len, done);
+    // The budget counts what the library holds once it allocated (zstd at the first step, brotli over
+    // the first blocks): the table an answer was admitted on is an estimate that another version of
+    // the library can pass (Ubuntu 22.04's libzstd 1.4.8 holds 5.6 MB at level 6 where 1.5.7 holds 3.9;
+    // the .deb links the host's own). Cheap: a sum of the library's own sizes, or a counter.
+    if (const std::size_t m = slot_memory(*slot_); m > slot_->charge) {
+        encoder_pool().charged += m - slot_->charge;
+        slot_->charge = m;
+    }
+    return ok;
+}
+
 char* StreamEncoder::input() const noexcept { return slot_ ? slot_->in.get() : nullptr; }
 
 std::size_t StreamEncoder::memory() const noexcept { return slot_ ? slot_memory(*slot_) : 0; }
+std::size_t StreamEncoder::charge() const noexcept { return slot_ ? slot_->charge : 0; }
 std::size_t StreamEncoder::input_capacity() const noexcept { return slot_ ? slot_->in_cap : 0; }
 
 StreamCounts stream_counts() noexcept {

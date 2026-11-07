@@ -202,6 +202,27 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-11-07, the release check of 0.1.0-alpha.137 (7dee8ae5, response compression's step 6: answers
+compressed in pieces, `CompressedBody`, the new `fuzz_compressed_body`), finished after the tag.
+`scripts/fuzz-all.sh -t 300`, every target at once (twenty-five, one process each on 24 cores, five
+minutes): 664.8 M runs, no finding. Before it, `fuzz_compressed_body` alone on 8 workers: two
+ten-minute campaigns (the first found only its harness's empty pieces, which a source reads as its
+end) and 2.9 M runs on the final code, clean. The sanitizer build (`build-asan`, GCC 14): unit and the
+integration suite (850 checks; no sanitizer report): clean. The release build: unit, integration
+(850, isolation 53 inside it), reload (29), pools (26), control (28), auth (51, in
+`agensio-devbox:php`, after a root-owned `bench/tmp/authsuite` of a run of 2026-11-05 was removed: its
+first attempt failed 48 rows on the leftover, not on the code) and Pebble (21) pass. The builds
+without OpenSSL, without libxcrypt, without libbrotli and without libzstd link and pass their unit
+tests; the one without libzstd first failed to compile the unit tests (a zstd frame-size check guarded
+at run time only), fixed after the tag. The release workflow's `packages` job failed its unit tests on
+Ubuntu 22.04: its libzstd 1.4.8 holds more at levels 5 and 6 (4.5 and 5.6 MB) than the per-level table
+measured on Debian 13's 1.5.7 (3.9), and a test held the table to that; the budget now counts what the
+library reports once it allocated (`StreamEncoder::run`), the table only the admission estimate, so
+alpha.137's release carries only the Debian 13 and Arch packages (no Debian 12/Ubuntu .deb, no Fedora
+package, no APT update) and the fix goes out as alpha.138. The A/B against alpha.136, `bench/ab.sh v0.1.0-alpha.136 -P
+-C` in the devbox (a Dart tool held the upstream's port 9100 on the host): 0.930 to 1.054 on every
+existing row (`ab-20261107-000304.md`), the new 512 KB row the cost of compressing it.
+
 2026-11-05, the release check of 0.1.0-alpha.129, before the tag, on the tree with the log placement (row 59)
 and the alpha.128 report's three fixes (row 58). The release build: unit, integration (every row; h2spec h2c 145 of
 146, the one the suite tolerates), the file tools' (27), tasks (135), reload (29), isolation (48), auth (49,

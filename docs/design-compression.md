@@ -313,10 +313,14 @@ bytes. An application's error page is one of its answers and is compressed like 
   the one way the signed-in guard can protect a PHP site with `zlib.output_compression` on, and
   the way a gzip-only application's visitors get zstd or brotli. Health recommends it by name
   (section 9).
-- **Budget** (decision 11): 32 MB of encoder memory per worker, counted per answer from its
-  encoder's charge (`stream_charge`: a table per coding, kind and level, the peaks each library
-  reported over a stream plus about 6 %, held by `test_stream_encoder` at every level the keys
-  allow); past it the answer goes out as it came, `Vary` kept, never refused, and status counts it
+- **Budget** (decision 11): 32 MB of encoder memory per worker. An answer is admitted on its
+  encoder's estimate (`stream_charge`: a table per coding, kind and level, the peaks Debian 13's
+  libraries reported over a stream plus about 6 %), and once the library allocated the budget counts
+  what it holds (`StreamEncoder::run`: `ZSTD_sizeof_CCtx`, brotli's blocks through its allocator,
+  zlib's formula): the .deb links the host's library, and Ubuntu 22.04's libzstd 1.4.8 holds 5.6 MB at
+  level 6 where 1.5.7 holds 3.9 (the release run of 0.1.0-alpha.137 failed on a test that held the
+  table to one library's numbers; `test_stream_encoder` now holds the count to what the library
+  reports, at every level the keys allow); past it the answer goes out as it came, `Vary` kept, never refused, and status counts it
   (`compression.streams_over_budget`, beside `streams_active` and `streams_started`). The level
   decides the charge more than the coding: zstd 3 holds 2.1 MB for an answer, zstd 9 11.6 MB (its
   search tables grow whatever the window), brotli 3 1.3 MB, brotli 6 3.8 MB, gzip 326 KB at any

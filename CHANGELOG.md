@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.0-alpha.138 (2026-11-07)
+
+- **Fix: the encoder budget of answers compressed in pieces counts what the library holds, not only
+  its estimate.** The release run of 0.1.0-alpha.137 failed its unit tests on Ubuntu 22.04, where the
+  packages are built: its libzstd 1.4.8 holds 4.5 MB at level 5 and 5.6 MB at level 6 where Debian 13's
+  1.5.7, which the per-level table was measured on, holds 3.9. The .deb links the host's own library,
+  so the table is now the estimate an answer is admitted on, and once the library allocated the budget
+  counts what it reports (`ZSTD_sizeof_CCtx`, brotli's blocks, zlib's formula), grown after every step.
+  0.1.0-alpha.137's release carries only the Debian 13 and Arch packages; the APT repository never
+  received it.
+- **Fix: a build without libzstd compiles its unit tests again** (`-DAGENSIO_ZSTD=OFF`); the server was
+  never affected.
+
 ## 0.1.0-alpha.137 (2026-11-07)
 
 - **Response compression of large and streamed answers** (step 6 of `docs/design-compression.md`). A

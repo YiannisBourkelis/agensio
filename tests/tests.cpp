@@ -871,7 +871,7 @@ static void test_stream_encoder() {
             std::string out;
             std::vector<char> buf(65536);
             std::size_t peak = 0, given = 0;
-            bool ok = true, prefixes = true;
+            bool ok = true, prefixes = true, counted = true;
             // Pieces of 1 to 16 KB, a flush after every fourth, the output read in 64 KB buffers.
             std::uint32_t r = 7;
             int step = 0;
@@ -883,6 +883,7 @@ static void test_stream_encoder() {
                     ok = ok && enc.run(op, in, in_len, o, room, done);
                     out.append(buf.data(), buf.size() - room);
                     peak = std::max(peak, enc.memory());
+                    counted = counted && enc.charge() >= enc.memory();
                 } while (ok && !done);
             };
             while (given < text.size() && ok) {
@@ -907,12 +908,15 @@ static void test_stream_encoder() {
             const test::Decoded d = test::decode_stream(e, out);
             CHECK(!d.available || (d.ok && d.ended && d.out == text));
             CHECK(out.size() < text.size() / 3);
-            CHECK(peak > 0 && peak <= stream_charge(e, kind, level));
+            CHECK(peak > 0 && counted);  // the budget counts at least what the library holds, at every step
         }
     }
-    // The budget's charge at every level the keys allow (config.cpp: zstd 1 to 9, brotli 1 to 6,
-    // gzip 1 to 9) stays above what the library holds over a stream: a library that grows fails here,
-    // not in a worker's memory.
+    // At every level the keys allow (config.cpp: zstd 1 to 9, brotli 1 to 6, gzip 1 to 9) the budget
+    // counts at least what the library holds, after every step, whatever the library's version: the
+    // table (stream_charge) is only the estimate an answer is admitted on, measured with Debian 13's
+    // libraries; Ubuntu 22.04's libzstd 1.4.8 holds 4.5 MB at level 5 and 5.6 MB at 6 where 1.5.7 holds
+    // 3.9 (the release run of 0.1.0-alpha.137 failed on the table's first form). An estimate more than
+    // 10 % short is noted, not failed.
     const std::string window = piece_text(768 * 1024);
     for (const Encoding e : {Encoding::zstd, Encoding::br, Encoding::gzip}) {
         if (!coding_built(e)) continue;
@@ -922,6 +926,7 @@ static void test_stream_encoder() {
                 CHECK(enc.begin(e, level, kind, 32, 0));
                 std::vector<char> buf(65536);
                 std::size_t peak = 0;
+                bool counted = true;
                 for (std::size_t at = 0; at < window.size(); at += 16384) {
                     const char* in = window.data() + at;
                     std::size_t len = std::min<std::size_t>(16384, window.size() - at);
@@ -932,16 +937,18 @@ static void test_stream_encoder() {
                         std::size_t room = buf.size();
                         CHECK(enc.run(op, in, len, o, room, done));
                         peak = std::max(peak, enc.memory());
+                        counted = counted && enc.charge() >= enc.memory();
                     } while (!done);
                 }
-                if (peak > stream_charge(e, kind, level))
-                    std::printf("stream encoder %s %s level %d: %zu bytes held, charged %zu\n", encoding_name(e).data(),
+                if (peak > stream_charge(e, kind, level) + stream_charge(e, kind, level) / 10)
+                    std::printf("note: stream encoder %s %s level %d holds %zu bytes, admitted on %zu\n", encoding_name(e).data(),
                                 kind == Kind::events ? "events" : "answer", level, peak, stream_charge(e, kind, level));
-                CHECK(peak <= stream_charge(e, kind, level));
+                CHECK(counted);
             }
     }
-    if (coding_built(Encoding::zstd)) {
-        // A known size: the frame carries it, and the encoder holds what that size needs, no more.
+#ifdef AGENSIO_HAS_ZSTD
+    {
+        // A known size: the frame carries it (RFC 8878 3.1.1.1).
         StreamEncoder enc;
         const std::string small = piece_text(100 * 1024);
         CHECK(enc.begin(Encoding::zstd, 3, Kind::answer, 0, small.size()));
@@ -954,6 +961,7 @@ static void test_stream_encoder() {
         out.resize(out.size() - room);
         CHECK(ZSTD_getFrameContentSize(out.data(), out.size()) == small.size());
     }
+#endif
     // The budget: encoders taken until the worker's is spent, the next refused and counted; one given
     // back makes room again. Nothing compressed meanwhile: the charge is counted at begin.
     const Encoding any = coding_built(Encoding::gzip) ? Encoding::gzip : coding_built(Encoding::zstd) ? Encoding::zstd : Encoding::identity;

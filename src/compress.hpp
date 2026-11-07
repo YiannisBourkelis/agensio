@@ -146,6 +146,9 @@ public:
     // brotli's blocks counted through its allocator), the input buffer included: what stream_charge
     // must stay above.
     std::size_t memory() const noexcept;
+    // What the worker's budget counts for this encoder: the admission estimate (stream_charge), grown
+    // to what the library holds once it allocated.
+    std::size_t charge() const noexcept;
     explicit operator bool() const noexcept { return slot_ != nullptr; }
 
     struct Slot;
@@ -154,10 +157,13 @@ private:
     Slot* slot_ = nullptr;
 };
 
-// The bytes the budget counts for one answer's encoder of the coding, kind and level, its input
-// buffer included: what the library holds at most for a stream, measured per level on 2026-11-07
-// (Debian 13: zstd 1.5.7, brotli 1.1.0, zlib 1.3.1) with headroom, and held there by
-// test_stream_encoder at every level the keys allow. The level decides it more than the coding:
+// The bytes an answer's encoder of the coding, kind and level is admitted on, its input buffer
+// included: what the library held at most for a stream, measured per level on 2026-11-07 (Debian 13:
+// zstd 1.5.7, brotli 1.1.0, zlib 1.3.1) with headroom. An estimate: once the library allocated, the
+// budget counts what it holds (StreamEncoder::run), since the .deb links the host's own library and
+// another version holds more (Ubuntu 22.04's libzstd 1.4.8: 5.6 MB at level 6 against 3.9 here;
+// the release run of 0.1.0-alpha.137 failed on a test that held the table to it). The level decides
+// it more than the coding:
 // zstd 3 holds 2.1 MB for an answer, zstd 9 11.6 MB (its search tables grow whatever the window);
 // an event stream 386 KB with zstd 3, 872 KB with brotli 3, 86 KB with gzip.
 std::size_t stream_charge(Encoding e, StreamEncoder::Kind kind, int level) noexcept;
