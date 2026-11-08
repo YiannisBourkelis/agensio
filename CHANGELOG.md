@@ -1,6 +1,20 @@
 # Changelog
 
-## 0.1.0-alpha.141 (2026-11-08)
+## 0.1.0-alpha.142 (2026-11-08)
+
+- **Fix: the `cgi` table takes the keys a CGI process has, and the reference lists them.** A
+  location's `cgi = { ... }` loaded every key of a PHP pool (`children`, `pm`, `version`,
+  `memory_limit`, `socket`, `keep_conn` and the rest), which did nothing there, while the reference
+  (`config_reference`, `docs/keys.md`) gave the table only `interpreter` and `env`. It now has its own
+  rows, with CGI's defaults: `buffering`, `buffer_max`, `buffer_file_max`, `head_max`,
+  `request_buffering`, `request_buffer_max`, `read_timeout` (30 s), `send_timeout`,
+  `max_connections` (8), `queue_depth` (32), `queue_wait` and `priority_reserve`; a pool's key or a
+  socket's in a `cgi` table is refused as unknown, naming the table's keys. The texts that say where
+  an event stream's `buffering = false` goes (the `compress_event_streams` rows, the MCP text of
+  `site_create` and `site_update`, `docs/configuration.md` 20, the cookbook's recipe) name the `cgi`
+  table beside the proxy and FastCGI ones. Found by the test VPS's report on 0.1.0-alpha.141.
+- **A refusal lists only the keys this build takes.** The list of a location's keys in an unknown-key
+  refusal named `httparena`, the benchmark handler's table, which a release build refuses.
 
 - **Fix: brotli answers from applications decode on Debian 12 and Ubuntu 22.04.** libbrotli before
   1.1.0, which those two distributions ship and the .deb links, writes a metadata block of one byte

@@ -2501,11 +2501,17 @@ variables the FastCGI handler sends (`REQUEST_METHOD`, `SCRIPT_NAME`, `PATH_INFO
 `QUERY_STRING`, `CONTENT_LENGTH`, `REMOTE_ADDR`, `HTTPS`, `HTTP_*` and the rest), the
 location's `env` entries, and a plain `PATH`. The request body is its stdin, its stdout
 is the response (a CGI head with `Status:` or `Location:`, then the body until it exits),
-its stderr goes to the error log. The options are those of section 7 with these
-defaults: `max_connections = 8` processes per worker and `queue_depth = 32` waiting
-(more are a 503), `read_timeout = 30` (no output for that long: the process is killed,
-504), buffering and request buffering on. Every other descriptor of the server is closed
-in the child. Not a fast path: a process per request is what CGI is.
+its stderr goes to the error log. The options are those of section 7 that a process has, with
+these defaults: `max_connections = 8` processes per worker and `queue_depth = 32` waiting
+(more are a 503, `queue_wait` the longest wait, `priority_reserve` the share kept for
+`priority = true`), `read_timeout = 30` (no output for that long: the process is killed, 504, or
+a streamed answer cut), `send_timeout`, `head_max`, buffering and request buffering on
+(`buffer_max`, `buffer_file_max`, `request_buffer_max`). `buffering = false` sends the output as
+the script writes it, for an event stream or a long report (section 20). A pool's keys
+(`children`, `pm`, `version`, ...) and a socket's (`socket`, `keep_conn`, `connect_timeout`,
+`max_idle`, `idle_timeout`, `path_info`, ...) are refused in `cgi = { ... }`: a process has none
+of them, and before 0.1.0-alpha.142 they loaded and did nothing. Every other descriptor of the
+server is closed in the child. Not a fast path: a process per request is what CGI is.
 
 ## 14. TLS
 
@@ -4556,7 +4562,8 @@ with `enable_gzip = false`.
 `compress_event_streams = true` compresses `text/event-stream` answers too, each event sent as it
 comes where the location streams them: `buffering = false` in a location's `proxy` table, for PHP
 in the `fastcgi` table of a location with `handler = "fastcgi"` (the site's own pool when it names no
-socket; a location has no `php` table), or in the site's `php` table for all of its PHP. With
+socket; a location has no `php` table), or in the site's `php` table for all of its PHP, for CGI in
+the location's `cgi` table. With
 buffering on, the default, the whole stream is collected first and reaches the browser at its end,
 compressed or not. It is off by default for a reason of its own: on one long stream every event's compressed
 size is visible by itself, so a stream that carries a secret beside something a visitor sent gives

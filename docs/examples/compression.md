@@ -313,6 +313,10 @@ chmod 644 /etc/agensio/sites.d/app.example.com.root.toml
 agensio reload
 ```
 
+A CGI script streams the same way with `cgi = { buffering = false }` in its location (`path =
+"/cgi-bin/"`, `cgi = { buffering = false }` in that root additions file); the script writes each
+event and flushes its stdout.
+
 This is for a script answered at its own path. A route a front controller answers (Laravel's
 `response()->eventStream()` at `/events`, which runs `index.php`) has no location of its own to give:
 on a hand-written site `php = { buffering = false }` streams all of the site's PHP, and on a managed

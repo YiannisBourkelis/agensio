@@ -10797,6 +10797,34 @@ static void test_unknown_keys() {
     CHECK(refused(site + "[[site.location]]\npath = \"/a/\"\nhandler = \"fastcgi\"\nfastcgi = { socket = \"unix:/run/x.sock\", read_timout = 5 }\n",
                   ".fastcgi: unknown key 'read_timout' (did you mean 'read_timeout'?)"));
     CHECK(refused(site + "[[site.location]]\npath = \"/c/\"\ncgi = { interpeter = \"/bin/sh\" }\n", ".cgi: unknown key 'interpeter' (did you mean 'interpreter'?)"));
+    // The cgi table takes its own rows, the exchange's keys a CGI process uses: a php-fpm pool's
+    // keys and a socket's do nothing there and are refused (until 0.1.0-alpha.142 the table took
+    // every php row; the alpha.141 report, F2).
+    for (const char* key : {"children = 3", "version = \"8.4\"", "pm = \"static\"", "socket = \"unix:/run/x.sock\"", "keep_conn = true",
+                            "max_idle = 2", "path_info = false", "connect_timeout = 5"}) {
+        const std::string m = message(site + "[[site.location]]\npath = \"/c/\"\ncgi = { " + key + " }\n");
+        const std::size_t list = m.find("the keys here are");
+        const bool ok = m.find(".cgi: unknown key '") != std::string::npos && list != std::string::npos &&
+                        m.find("buffering", list) != std::string::npos && m.find("children", list) == std::string::npos &&
+                        m.find("socket", list) == std::string::npos;
+        if (!ok) std::printf("cgi = { %s }: %s\n", key, m.empty() ? "loaded" : m.c_str());
+        CHECK(ok);
+    }
+    {
+        bool buffering = false, read_timeout = false;
+        for (const auto& d : control::key_defs())
+            if (std::string_view(d.table) == "cgi = {}") {
+                buffering = buffering || std::string_view(d.key) == "buffering";
+                read_timeout = read_timeout || std::string_view(d.key) == "read_timeout";
+            }
+        CHECK(buffering && read_timeout);
+#ifndef AGENSIO_HTTPARENA
+        // A refusal lists the keys this binary takes: not the benchmark handler's table, which a build
+        // without it refuses (the alpha.141 report's first nit).
+        const std::string m = message(site + "[[site.location]]\npath = \"/a/\"\nroot_dir = \"x\"\n");
+        CHECK(m.find("the keys here are") != std::string::npos && m.find("httparena") == std::string::npos);
+#endif
+    }
     CHECK(refused(site + "[[site.location]]\npath = \"/api/\"\nupstream = \"http://127.0.0.1:9\"\nproxy = { hide = [\"X-Powered-By\"], read_timout = 5 }\n",
                   ".proxy: unknown key 'read_timout'"));
     // proxy.headers became request_headers (2026-10-13), with no alias: the old key is refused like
@@ -10816,6 +10844,9 @@ static void test_unknown_keys() {
                      "proxy = { request_headers = { \"X-Any-Name\" = \"$host\" }, tls = { verify = false } }\n"
                      "[[site.location]]\npath = \"/a/\"\nadd_headers = { \"X-Custom-Field\" = \"1\" }\n"
                      "[[site.location]]\npath = \"/c/\"\ncgi = { env = { \"ANY_NAME\" = \"1\" }, read_timeout = 5 }\n"
+                     "[[site.location]]\npath = \"/s/\"\ncgi = { buffering = false, buffer_max = \"2MB\", buffer_file_max = \"1GB\", head_max = \"32KB\", "
+                     "request_buffering = false, request_buffer_max = \"1MB\", send_timeout = 10, max_connections = 2, queue_depth = 4, "
+                     "queue_wait = 3, priority_reserve = 0.5 }\n"
                      "[[site.location]]\npath = \"/f/\"\nhandler = \"fastcgi\"\nfastcgi = { socket = \"unix:/run/y.sock\", read_timeout = 9 }\n"
                      "[[site.access]]\npath = \"/admin\"\nallow = [\"@office\"]\n");
     bool loaded = false;

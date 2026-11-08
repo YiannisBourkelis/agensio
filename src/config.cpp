@@ -164,7 +164,14 @@ void check_keys(const toml::table& t, std::initializer_list<std::string_view> ta
         else if (!location && std::find(tables.begin(), tables.end(), "top level") == tables.end() && names("top level"))
             msg += "; '" + std::string(key) + "' is a top-level key: put it above the first [table] header (TOML gives a key to the table above it)";
         msg += "; the keys here are";
-        for (std::size_t i = 0; i < keys.size(); ++i) msg += (i ? ", " : " ") + std::string(keys[i]);
+        bool first = true;
+        for (const std::string_view k : keys) {
+#ifndef AGENSIO_HTTPARENA
+            if (k == "httparena") continue;  // the benchmark handler's table: this build refuses it
+#endif
+            msg += (first ? " " : ", ") + std::string(k);
+            first = false;
+        }
         fail(msg + " (docs/keys.md, agensio ctl reference)");
     }
 }
@@ -782,7 +789,9 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         loc.cgi.options.read_timeout = std::chrono::milliseconds(30000);
         loc.cgi.options.keep_conn = false;
         if (auto ct = t["cgi"].as_table()) {
-            check_keys(*ct, {"cgi = {}", "php = {}"}, {}, where + ".cgi");
+            // Its own rows: the exchange's keys a CGI process uses (until 0.1.0-alpha.142 every php row, a pool's
+            // keys doing nothing here).
+            check_keys(*ct, {"cgi = {}"}, {}, where + ".cgi");
             parse_fcgi_table(*ct, base_dir, loc.cgi, where + ".cgi");
             if (auto ip = (*ct)["interpreter"].value<std::string>()) {
                 loc.cgi.interpreter = resolve(base_dir, *ip).string();
