@@ -41,6 +41,8 @@ private:
     bool on_eof() override;
     bool keep_alive_ok() const noexcept override { return false; }
     void on_end(bool ok) override;  // reap or kill the child
+    const char* kind() const noexcept override { return "cgi"; }
+    std::string peer() const override { return argv_.empty() ? address().key : argv_.back(); }  // the script
     void read_stderr();
 
     std::vector<std::string> env_;

@@ -53,6 +53,11 @@ public:
     // closed): the source forgets that read, its buffer and its handler, and never answers it. A
     // source that cannot outlive its reader needs nothing here.
     virtual void abandon_read() noexcept {}
+    // Why a read ended with an error, for the error log, when the source knows more than its error
+    // code: an upstream exchange names its failure, what it had sent and the key that bounds it
+    // (0.1.0-alpha.142; before, a streamed answer cut by read_timeout left no line, the alpha.141
+    // report's F3). Empty: the error code says all there is. Asked only after a failed read.
+    virtual std::string failure() const { return {}; }
 };
 
 using Body = std::variant<NoBody, MemoryBody, FileBody, std::unique_ptr<StreamBody>>;

@@ -54,6 +54,16 @@ waiting on its origin as an idle connection.
   its length and runs on for a second; its client takes the answer and leaves at once, three times;
   the server lives on. On 0.1.0-alpha.140 the exchange, still waiting for the script's end, called its
   freed connection at its slow tick (the sanitizer build: heap-use-after-free in on_slow_exchange).
+
+A streamed answer cut on its application's side (the alpha.141 report, F3): the client saw the cut
+(HTTP/1: no last chunk; HTTP/2: RST_STREAM), and the error log said nothing over HTTP/1 and only
+"response body failed mid-stream" at info over HTTP/2, where a buffered answer's 504 names the
+failure and the key.
+- cut-h1-logged: an origin quiet past proxy.read_timeout (1 s here) and a CGI script quiet past
+  cgi.read_timeout, over HTTP/1.1: the answer ends without its last chunk and an error-log line
+  names the path, read_timeout and the key. On 0.1.0-alpha.141 no line.
+- cut-h2-logged: the same origin over h2c. On 0.1.0-alpha.141 only the info line, not written at the
+  default level.
 Requires python3-h2 and openssl. Exit 1 on any failed row.
 """
 import argparse
@@ -294,6 +304,9 @@ class Server:
         self.slot_origin = socketserver.ThreadingTCPServer(("127.0.0.1", 0), SlotOrigin)
         self.slot_origin.daemon_threads = True
         threading.Thread(target=self.slot_origin.serve_forever, daemon=True).start()
+        self.cut_origin = socketserver.ThreadingTCPServer(("127.0.0.1", 0), SlotOrigin)  # a pool of its own
+        self.cut_origin.daemon_threads = True
+        threading.Thread(target=self.cut_origin.serve_forever, daemon=True).start()
         slots = (f'upstream = "http://127.0.0.1:{self.slot_origin.server_address[1]}"\napp = "proxy"\n'
                  'proxy = { buffering = false, max_connections = 1, queue_wait = 2 }\n')
         self.ports = {}
@@ -303,13 +316,19 @@ class Server:
                             ("streamed-compressed", 'proxy = { buffering = false }\nresponse_compression = { enabled = true }\n'),
                             ("tls", f'tls = {{ cert = "{root}/cert.pem", key = "{root}/key.pem" }}\nresponse_compression = {{ enabled = true }}\n'),
                             ("slots", None),
-                            ("slots-compressed", 'response_compression = { enabled = true, compress_event_streams = true }\n')):
+                            ("slots-compressed", 'response_compression = { enabled = true, compress_event_streams = true }\n'),
+                            ("cut", None)):
             port = free_port()
             while port in self.ports.values():
                 port = free_port()
             self.ports[name] = port
             if name.startswith("slots"):
                 sites += f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{port}"]\n' + slots + (extra or "")
+                continue
+            if name == "cut":  # a streamed answer whose origin goes quiet past read_timeout
+                sites += (f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{port}"]\n'
+                          f'upstream = "http://127.0.0.1:{self.cut_origin.server_address[1]}"\napp = "proxy"\n'
+                          'proxy = { buffering = false, read_timeout = 1 }\n')
                 continue
             sites += f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{port}"]\n' + upstream + extra
         # A CGI script that prints its whole answer, with its length, and runs on for a second with its
@@ -320,22 +339,29 @@ class Server:
         script = root / "cgi" / "linger.cgi"
         script.write_text("#!/bin/sh\nprintf 'Content-Type: text/plain\\r\\nContent-Length: 2\\r\\n\\r\\nok'\nsleep 1\n")
         script.chmod(0o755)
+        quiet = root / "cgi" / "quiet.cgi"  # its head and a line, then quiet past cgi.read_timeout
+        quiet.write_text("#!/bin/sh\nprintf 'Content-Type: text/event-stream\\r\\n\\r\\ndata: one\\n\\n'\nsleep 3\n")
+        quiet.chmod(0o755)
         self.ports["cgi"] = free_port()
         while list(self.ports.values()).count(self.ports["cgi"]) > 1:
             self.ports["cgi"] = free_port()
         sites += (f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{self.ports["cgi"]}"]\nroot = "{root}/www"\n'
-                  f'[[site.location]]\npath = "/cgi/"\nalias = "{root}/cgi"\ncgi = {{ buffering = false }}\n')
+                  f'[[site.location]]\npath = "/cgi/"\nalias = "{root}/cgi"\ncgi = {{ buffering = false }}\n'
+                  f'[[site.location]]\npath = "/cgi-cut/"\nalias = "{root}/cgi"\ncgi = {{ buffering = false, read_timeout = 1 }}\n')
         # idle_timeout below the quiet of /later/5, so that the HTTP/1 rows tell a stream waiting on its
         # origin from an idle connection quickly.
         (root / "agensio.toml").write_text(
             '[server]\nworkers = 1\nprotocols = ["h1", "h2", "h2c"]\nidle_timeout = 3\n'
             f'pid_file = "{root}/agensio.pid"\nstate_dir = "{root}/state"\n'
             f'[log]\naccess = "off"\nerror = "{root}/error.log"\n' + sites)
+        self.error_log = root / "error.log"
         self.log = (root / "server.log").open("w+")
         self.process = subprocess.Popen([binary, "-c", str(root / "agensio.toml")], stdout=self.log, stderr=subprocess.STDOUT)
         end = time.monotonic() + 10
         while not all(listening(p) for p in self.ports.values()):
-            assert self.process.poll() is None and time.monotonic() < end, "the server did not come up"
+            if self.process.poll() is not None or time.monotonic() > end:
+                self.log.seek(0)
+                raise AssertionError("the server did not come up:\n" + self.log.read()[-2048:])
             time.sleep(0.05)
 
     def stop(self):
@@ -348,6 +374,7 @@ class Server:
                 self.process.wait(timeout=2)
         self.origin.shutdown()
         self.slot_origin.shutdown()
+        self.cut_origin.shutdown()
         self.log.seek(0)
         out = self.log.read()
         assert "Sanitizer" not in out and "runtime error:" not in out, "sanitizer report:\n" + out[-4096:]
@@ -566,6 +593,56 @@ def row_left_h1_cgi(srv):
     return None if status.startswith("HTTP/1.1 200") else f"the next request afterwards: {status}"
 
 
+def logged(srv, words, seconds=4):
+    """The error log's line holding every one of words, waited for; None when none came."""
+    end = time.monotonic() + seconds
+    while True:
+        try:
+            for line in srv.error_log.read_text(errors="replace").splitlines():
+                if all(w in line for w in words):
+                    return line
+        except OSError:
+            pass
+        if time.monotonic() > end:
+            return None
+        time.sleep(0.1)
+
+
+def row_cut_h1_logged(srv):
+    for port, path, words in ((srv.ports["cut"], "/later/3", ["/later/3", "read_timeout", "(proxy.read_timeout)"]),
+                              (srv.ports["cgi"], "/cgi-cut/quiet.cgi", ["/cgi-cut/quiet.cgi", "read_timeout", "(cgi.read_timeout)"])):
+        with socket.create_connection(("127.0.0.1", port), timeout=6) as s:
+            s.sendall(b"GET " + path.encode() + b" HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            data = b""
+            while True:
+                d = s.recv(65536)
+                if not d:
+                    break
+                data += d
+        if not data.startswith(b"HTTP/1.1 200"):
+            return f"{path}: " + data.split(b"\r\n", 1)[0].decode(errors="replace")
+        if data.endswith(b"\r\n0\r\n\r\n"):
+            return f"{path}: the answer ended whole, though its application went quiet past read_timeout"
+        line = logged(srv, words)
+        if line is None:
+            return f"{path}: cut by read_timeout, and no error-log line names it"
+        print("  " + line)
+    return None
+
+
+def row_cut_h2_logged(srv):
+    c = H2(srv.ports["cut"])
+    status, _, _ = c.get("/later/4", seconds=4)
+    c.close()
+    if not str(status).startswith("reset"):
+        return f"/later/4 over h2c: {status}, not a reset, though its origin went quiet past read_timeout"
+    line = logged(srv, ["/later/4", "read_timeout", "(proxy.read_timeout)"])
+    if line is None:
+        return "/later/4 over h2c: cut by read_timeout, and no error-log line names why"
+    print("  " + line)
+    return None
+
+
 ROWS = {
     "h2c-pieces": row_h2c_pieces,
     "h2-window-during-pull": row_h2_window_during_pull,
@@ -578,6 +655,8 @@ ROWS = {
     "left-h1-quiet": row_left_h1_quiet,
     "h1-quiet-stream": row_h1_quiet_stream,
     "left-h1-cgi": row_left_h1_cgi,
+    "cut-h1-logged": row_cut_h1_logged,
+    "cut-h2-logged": row_cut_h2_logged,
 }
 
 

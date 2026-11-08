@@ -45,6 +45,7 @@ private:
     HeadStatus parse_head(std::string_view in, int& status, Headers& headers, std::size_t& length) override;
     bool on_eof() override;
     bool keep_alive_ok() const noexcept override { return keep_alive_; }
+    const char* kind() const noexcept override { return "proxy"; }
     bool on_head_complete();  // decides the framing from the parsed head
 
     std::string head_;

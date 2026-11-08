@@ -558,7 +558,7 @@ private:
                               }
                               if (closed_) return;
                               if (ec || (n == 0 && st.source_sized && st.source_remaining > 0)) {
-                                  owner_.on_stream_failed(st);  // the source failed or ended short
+                                  owner_.on_stream_failed(st, ec);  // the source failed or ended short
                                   return;
                               }
                               if (n == 0) {

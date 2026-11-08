@@ -159,10 +159,20 @@ public:
         if (closing_after_write_ && writer_.idle()) begin_linger();
     }
 
-    // A body source failed or ended short: the client sees the stream cut, not a false end.
-    void on_stream_failed(H2Stream& s) {
-        if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
-            log->info("http2 " + remote_for(&s) + " " + stream_text(s) + ": response body failed mid-stream");
+    // A body source failed or ended short: the client sees the stream cut, not a false end. An
+    // exchange's failure is named with its key at error, as a buffered answer's 502 or 504 is
+    // (0.1.0-alpha.142, the alpha.141 report's F3: before, an answer cut by read_timeout was this
+    // info line alone).
+    void on_stream_failed(H2Stream& s, std::error_code ec = {}) {
+        if (ErrorLog* log = dispatcher_.error_log()) {
+            const auto* body = std::get_if<std::unique_ptr<StreamBody>>(&s.stream.response.body);
+            const std::string why = ec && body && *body ? (*body)->failure() : std::string();
+            if (!why.empty() && log->enabled(LogLevel::error))
+                log->error("http2 " + remote_for(&s) + " " + stream_text(s) + ": the answer was cut mid-stream: " + why);
+            else if (why.empty() && log->enabled(LogLevel::info))
+                log->info("http2 " + remote_for(&s) + " " + stream_text(s) + ": response body failed mid-stream" +
+                          (ec ? " (" + ec.message() + ")" : std::string()));
+        }
         send_rst(s.id, ErrorCode::internal_error, "");
         log_request(s);
         close_stream(s);

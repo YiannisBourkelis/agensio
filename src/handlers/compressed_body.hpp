@@ -46,6 +46,7 @@ public:
 
     bool length(std::uint64_t&) const noexcept override { return false; }  // the coded length is not known ahead
     void async_read(char* buf, std::size_t len, ReadHandler handler) override;
+    std::string failure() const override { return source_ ? source_->failure() : std::string(); }  // the upstream's
 
 private:
     enum class From : std::uint8_t { memory, file, stream };

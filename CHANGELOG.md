@@ -13,6 +13,17 @@
   an event stream's `buffering = false` goes (the `compress_event_streams` rows, the MCP text of
   `site_create` and `site_update`, `docs/configuration.md` 20, the cookbook's recipe) name the `cgi`
   table beside the proxy and FastCGI ones. Found by the test VPS's report on 0.1.0-alpha.141.
+- **Fix: a streamed answer cut on its application's side says why in the error log.** An answer
+  streamed from an application (`buffering = false`) that its application left quiet past
+  `read_timeout`, or whose connection closed early, was cut for the client (HTTP/1.1: no last chunk;
+  HTTP/2: the stream reset) with no line over HTTP/1.1 and only "response body failed mid-stream" at
+  info over HTTP/2, where a buffered answer's 504 names the failure and the key. Both now write an
+  error line like `http1 203.0.113.7 (app.example.com GET /events): the answer was cut mid-stream:
+  proxy 127.0.0.1:3000 read_timeout after 2008 bytes of the answer (Connection timed out): no bytes
+  for 8 s (proxy.read_timeout)`, naming the CGI script or the FastCGI socket for those. Found by the
+  test VPS's report on 0.1.0-alpha.141, which also asked for a line on the client's half-close:
+  `docs/configuration.md` 8 now says that over HTTP/1.1 a client that closes its sending side after its
+  request counts as gone, as nginx and Caddy count it.
 - **A refusal lists only the keys this build takes.** The list of a location's keys in an unknown-key
   refusal named `httparena`, the benchmark handler's table, which a release build refuses.
 

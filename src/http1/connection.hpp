@@ -170,6 +170,28 @@ public:
     // read; a second clock read was visible in profiles and buys nothing for the timer.
     void touch() noexcept { last_activity_ = std::chrono::steady_clock::now(); }
 
+    // A streamed answer's source failed mid-body; the writer closes the connection next. The error
+    // log says why, as a buffered answer's 502 or 504 does: an exchange's failure and its key at
+    // error, anything else at info (0.1.0-alpha.142, the alpha.141 report's F3: an answer cut by
+    // read_timeout left no line). A read cancelled because the client left says nothing.
+    void on_body_failed(std::error_code ec) {
+        if (ec == asio::error::operation_aborted) return;
+        ErrorLog* log = dispatcher_.error_log();
+        if (!log) return;
+        const auto* body = std::get_if<std::unique_ptr<StreamBody>>(&stream_.response.body);
+        const std::string why = body && *body ? (*body)->failure() : std::string();
+        if (!log->enabled(why.empty() ? LogLevel::info : LogLevel::error)) return;
+        fill_connection_info();
+        const Request& req = stream_.request;
+        const bool unlogged = log_exclude::excluded(site_, req.target, worker_.state.log_path);
+        const std::string line = "http1 " + (unlogged ? std::string("-") : remote_) + " (" +
+                                 (site_ && !site_->server_names.empty() ? site_->server_names.front() : std::string("-")) + " " +
+                                 log_text(req.method_name) + " " + log_text(req.target.substr(0, req.target.find('?'))) +
+                                 "): the answer was cut mid-stream: " + (why.empty() ? ec.message() : why);
+        if (why.empty()) log->info(line);
+        else log->error(line);
+    }
+
     // The whole response has been handed to the kernel: drain an unread body, then the
     // next request, or close.
     void on_response_written() {

@@ -40,6 +40,7 @@ private:
     void encode_body_chunk(std::string& out, std::string_view bytes, bool last) override;
     bool decode() override;
     HeadStatus parse_head(std::string_view in, int& status, Headers& headers, std::size_t& length) override;
+    const char* kind() const noexcept override { return "fastcgi"; }
     bool on_stdout(std::string_view content);
     void on_end_request(std::string_view content);
 

@@ -1648,7 +1648,11 @@ same). A `400` for a broken chunked body is sent over HTTP/1.1 before the close 
 alpha.119 closed without it); over HTTP/2 and HTTP/3 the stream is reset instead, as RFC 9113
 8.1.1 and RFC 9114 4.1.2 ask of a malformed request. The application may still have run the
 request: agensio closes its connection to PHP or the origin when the client leaves, but a PHP
-script runs on until it writes output, and on to its end with `ignore_user_abort` set. Before
+script runs on until it writes output, and on to its end with `ignore_user_abort` set. Over
+HTTP/1.1 a client that closes its sending side after its request (a half-close, `shutdown(SHUT_WR)`)
+counts as gone too, as nginx and Caddy count it: an application's answer still being made a quarter
+second into the exchange is cancelled (`499`), or cut where it streams (since 0.1.0-alpha.141 for
+the whole stream); a client that wants the answer keeps its side open until the end. Before
 0.1.0-alpha.119 such a request was logged `200 0` over HTTP/1.1 and HTTP/3 and not at all over
 HTTP/2, and an HTTP/3 download cut short counted the whole file.
 

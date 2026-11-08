@@ -367,6 +367,7 @@ private:
     void on_pulled(std::error_code ec, std::size_t n) {
         pulling_ = false;
         if (ec) {  // the source failed mid-body: cut the connection so the client sees a short body
+            owner_.on_body_failed(ec);
             owner_.close();
             return;
         }

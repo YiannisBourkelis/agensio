@@ -440,6 +440,7 @@ public:
     }
     bool ready() const noexcept override { return req_->ready(); }
     void abandon_read() noexcept override { req_->abandon_waiter(); }
+    std::string failure() const override { return req_->failure_text(); }
     // The reader dropped the body. A read of its still in flight is never answered (its handler
     // belongs to a reader that has moved on), and an exchange short of its end is ended.
     ~Source() override {
@@ -565,6 +566,23 @@ std::unique_ptr<StreamBody> UpstreamRequest::body_source(bool head) {
     declared_ = length;
     bodiless_ = head || result_.status == 204 || result_.status == 304;
     return std::make_unique<Source>(shared_from_this(), sized, length);
+}
+
+std::string UpstreamRequest::failure_text() const {
+    if (result_.failure == UpstreamFailure::none) return {};
+    const std::string table = kind();
+    std::string t = table + " " + peer() + " " + to_string(result_.failure) + " after " + std::to_string(delivered_) + " bytes of the answer";
+    if (result_.error) t += " (" + result_.error.message() + ")";
+    switch (result_.failure) {
+        case UpstreamFailure::read_timeout: {
+            const auto ms = options_.read_timeout.count();
+            t += ": no bytes for " + (ms % 1000 == 0 ? std::to_string(ms / 1000) + " s" : std::to_string(ms) + " ms") + " (" + table + ".read_timeout)";
+            break;
+        }
+        case UpstreamFailure::closed_early: t += ": the connection closed before the answer's end"; break;
+        default: break;
+    }
+    return t;
 }
 
 void UpstreamRequest::arm(std::chrono::milliseconds d) { deadline_ = std::chrono::steady_clock::now() + d; }

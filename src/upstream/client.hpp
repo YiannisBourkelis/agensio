@@ -237,6 +237,10 @@ public:
     // Streaming mode: the response body as a pull source (valid after `done` ran). `head`: the
     // request was a HEAD, so the answer has no body to read (nor has a 204 or 304).
     std::unique_ptr<StreamBody> body_source(bool head);
+    // What ended a streamed answer early, for the error log of the connection that was sending it:
+    // "proxy 127.0.0.1:3000 read_timeout after 2008 bytes of the answer (Connection timed out): no
+    // bytes for 8 s (proxy.read_timeout)". Empty unless the exchange failed.
+    std::string failure_text() const;
     asio::io_context& context() noexcept { return pool_.context(); }  // the worker's loop, the exchange's own
     // After a 101: the origin connection, with any bytes that followed the head still in
     // its `in` buffer. The exchange is over; the pool slot was already given back.
@@ -281,6 +285,10 @@ protected:
     virtual void on_body_sent() {}
     // The exchange is over, successfully or not (CGI reaps its child here).
     virtual void on_end(bool ok) { (void)ok; }
+    // For the error log: the table of the location's keys ("proxy", "fastcgi", "cgi") and what the
+    // exchange talked to (the origin, the FastCGI socket, the script).
+    virtual const char* kind() const noexcept { return "upstream"; }
+    virtual std::string peer() const { return address_.key; }
 
     // ---- helpers for decode() ----
     // Head bytes: collects up to head_max and parses; `used` is how much of `bytes` the
