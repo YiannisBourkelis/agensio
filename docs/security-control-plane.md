@@ -202,6 +202,53 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-11-09, the release check of 0.1.0-alpha.142, before the tag, on c4574f48 (HTTP/3 carrying streamed
+answers through the send blocks with the keep-alive PING, the reset fixes, compression in pieces over
+HTTP/3, the weekly CI run's suite fixes). The release build: unit, integration (851, isolation and the
+cookbook inside it), reload (29), control (28), pools (26), auth (51, in `agensio-devbox:php`; with
+`--network none` the container has loopback alone and the suite skips its plain-HTTP rows, 49) and Pebble
+(21) pass. The builds without OpenSSL, without libxcrypt, without libbrotli and without libzstd link and
+pass their unit tests. The sanitizer build (`build-asan`, GCC 14): unit, the integration suite (851, the
+proxy section with the origin built beside the binary) and Pebble (21) clean, no sanitizer report in the
+608 files the runs wrote. `scripts/fuzz-all.sh -t 300`, every target (twenty-six, twenty-two at once as the
+free memory held them, one process each, five minutes): 652.9 M runs, no finding; `fuzz_quic_conn`, which
+answers through the send blocks since this release, at 1,713 edges (1,555 at alpha.129). The A/B against
+alpha.141 in the devbox (`--network none`: a tool on the host holds the upstream's port 9100):
+`bench/ab.sh v0.1.0-alpha.141 -3 -r 4` (`ab-20261109-142651.md`) 0.979 to 1.020, the h3 rows 0.985 to
+1.016; `-2 -P -C -r 3` (`ab-20261109-143404.md`) 0.939 to 1.035, but for `proxy-comp-plain /page` at 1.074
+from one round of three (10.56 µs against 8.8 to 9.0). The first run of each, two rounds and three
+(`ab-20261109-141158.md`, `ab-20261109-142109.md`), had rows at 1.05 to 1.20, each from rounds the second
+runs did not repeat; what changed on a cached answer's path is flag tests and an empty vector's clear.
+
+| target | runs | edges | result |
+|---|---|---|---|
+| fuzz_archive | 19.03 M | 642 | clean |
+| fuzz_auth_users | 13.56 M | 498 | clean |
+| fuzz_chunked | 134.62 M | 63 | clean |
+| fuzz_compressed_body | 0.40 M | 606 | clean |
+| fuzz_cron_lines | 11.91 M | 120 | clean |
+| fuzz_dotenv | 1.29 M | 2362 | clean |
+| fuzz_fcgi | 55.50 M | 96 | clean |
+| fuzz_fields | 2.60 M | 588 | clean |
+| fuzz_h2_bodies | 0.04 M | 9217 | clean |
+| fuzz_h2_conn | 0.72 M | 12023 | clean |
+| fuzz_hpack | 2.26 M | 528 | clean |
+| fuzz_hpack_roundtrip | 0.39 M | 466 | clean |
+| fuzz_http_head | 55.74 M | 152 | clean |
+| fuzz_json | 6.51 M | 550 | clean |
+| fuzz_log_line | 5.24 M | 775 | clean |
+| fuzz_parser | 46.08 M | 240 | clean |
+| fuzz_path | 9.23 M | 236 | clean |
+| fuzz_php_constraint | 14.90 M | 772 | clean |
+| fuzz_qpack | 7.69 M | 646 | clean |
+| fuzz_quic_conn | 0.44 M | 1713 | clean |
+| fuzz_quic_packet | 23.21 M | 217 | clean |
+| fuzz_redirect | 5.14 M | 1240 | clean |
+| fuzz_refuse | 4.18 M | 875 | clean |
+| fuzz_response_headers | 1.02 M | 3389 | clean |
+| fuzz_sql_scan | 5.50 M | 159 | clean |
+| fuzz_transport_params | 259.11 M | 211 | clean |
+
 2026-11-07, the release check of 0.1.0-alpha.137 (7dee8ae5, response compression's step 6: answers
 compressed in pieces, `CompressedBody`, the new `fuzz_compressed_body`), finished after the tag.
 `scripts/fuzz-all.sh -t 300`, every target at once (twenty-five, one process each on 24 cores, five
