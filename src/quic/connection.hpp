@@ -1075,15 +1075,8 @@ private:
                 case ItemKind::stream: {
                     QuicStream* s = app_.find_stream(it.id);
                     if (!s || !s->open) break;
-                    if (it.len) s->acked.add(it.offset, it.offset + it.len);
+                    s->on_acked(it.offset, it.len);
                     if (it.fin) s->fin_acked = true;
-                    if (!s->blocks.empty()) {
-                        // A streamed body: the blocks the acknowledged prefix passed are freed, and a
-                        // range declared lost and acknowledged after all is not sent again from them.
-                        const std::uint64_t upto = s->acked.contiguous_from(0);
-                        s->blocks.release_below(upto);
-                        s->lost.remove_below(upto);
-                    }
                     if (s->trim_head) {  // a control stream: what is acknowledged in order is dropped
                         const std::uint64_t upto = s->acked.contiguous_from(s->head_base);
                         if (upto > s->head_base + 16384 && upto <= s->head_end()) {
@@ -1145,12 +1138,7 @@ private:
                     QUIC_TRACE("quic: lost stream=%llu off=%llu len=%u fin=%d found=%d\n", static_cast<unsigned long long>(it.id),
                                static_cast<unsigned long long>(it.offset), it.len, it.fin ? 1 : 0, s && s->open ? 1 : 0);
                     if (!s || !s->open || s->send_done || s->reset_sent) break;
-                    if (it.len) {
-                        // A streamed body's blocks below the acknowledged prefix are freed: a range the peer
-                        // has after all (a probe's copy of it was acknowledged) is not sent again.
-                        const std::uint64_t from = s->blocks.empty() ? it.offset : std::max(it.offset, s->acked.contiguous_from(0));
-                        if (from < it.offset + it.len) s->lost.add(from, it.offset + it.len);
-                    }
+                    if (it.len) s->resend(it.offset, it.len);
                     if (it.fin) s->fin_sent = false;
                     if (s->has_unsent()) enqueue(*s);
                     break;

@@ -14955,6 +14955,28 @@ static void test_quic_send_batch() {
         CHECK(ep.dropped == 1 && worker_count.load() == 1 && ep.datagrams_out == 3);
         ::close(ep.fd);
     }
+    {
+        // What a loss sends again: from where the acknowledged prefix ends, for every body. The end of
+        // a 512 KB memory body, [458,918, 524,288), lost in two packets after a probe's copy of its start
+        // was acknowledged with everything before it: only [502,443, 524,288) goes again. Until
+        // 0.1.0-alpha.143 only a streamed body's resend started there; a memory or file body's went
+        // whole, in the same two packets (on loopback the GSO refusal of that size repeated for good).
+        QuicStream s;
+        s.mem = std::string_view("x");
+        s.acked.add(0, 502443);
+        s.resend(458918, 524288 - 458918);
+        CHECK(s.lost.count() == 1 && s.lost.min() == 502443 && s.lost.max() == 524287);
+        // A range declared lost and acknowledged afterwards (a copy of it got through) is not sent again.
+        QuicStream t;
+        t.acked.add(0, 458918);
+        t.resend(458918, 524288 - 458918);
+        t.on_acked(458918, 43525);
+        CHECK(t.lost.count() == 1 && t.lost.min() == 502443 && t.lost.max() == 524287);
+        // Nothing acknowledged ahead of it: the whole range.
+        QuicStream u;
+        u.resend(1000, 500);
+        CHECK(u.lost.count() == 1 && u.lost.min() == 1000 && u.lost.max() == 1499);
+    }
 }
 #endif
 

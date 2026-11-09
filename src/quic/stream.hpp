@@ -6,6 +6,7 @@
 // connection finds it by id through the application.
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -92,6 +93,25 @@ struct QuicStream {
     bool send_done = false;       // every byte and the FIN acknowledged, or reset acknowledged
 
     bool has_unsent() const noexcept { return !lost.empty() || next < total || (fin && !fin_sent); }
+
+    // A sent range the peer acknowledged. A streamed body's blocks below the acknowledged prefix are
+    // freed, and a range declared lost that the prefix now covers is not sent again, whatever the body;
+    // a stream with neither costs nothing more than the add.
+    void on_acked(std::uint64_t off, std::uint64_t len) {
+        if (len) acked.add(off, off + len);
+        if (blocks.empty() && lost.empty()) return;
+        const std::uint64_t upto = acked.contiguous_from(0);
+        blocks.release_below(upto);
+        lost.remove_below(upto);
+    }
+    // A sent range declared lost: it goes again from where the acknowledged prefix ends, since a
+    // probe's copy of its start may have been acknowledged meanwhile. Until 0.1.0-alpha.143 only a
+    // streamed body's did (its blocks are freed there); a memory or file body's went whole, in the same
+    // packets, which on loopback kept a refused GSO message of that size coming back for good.
+    void resend(std::uint64_t off, std::uint64_t len) {
+        const std::uint64_t from = std::max(off, acked.contiguous_from(0));
+        if (from < off + len) lost.add(from, off + len);
+    }
     std::uint64_t body_len() const noexcept { return total - head_base - head.size(); }
     std::uint64_t head_end() const noexcept { return head_base + head.size(); }
 

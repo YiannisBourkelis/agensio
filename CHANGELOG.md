@@ -48,6 +48,11 @@
   the commands of `docs/configuration.md` 17. The design note's account of a full send buffer
   (`docs/design-http3.md` 6.1) now says what the code does: the rest of the batch is dropped and
   sent again by its connections, not held until the socket drains.
+- **HTTP/3 no longer sends again what the client already has.** After a loss, the bytes of a cached or
+  file answer that a probe had already delivered were sent once more, the whole lost range from its
+  start: on the burst refusal above, the same two datagrams each time. A loss now resends from where the
+  client's acknowledgements end, as a streamed answer's already did, and a range declared lost that
+  the client acknowledges meanwhile is dropped from the resend.
 
 ## 0.1.0-alpha.142 (2026-11-09)
 
