@@ -23,6 +23,13 @@
   PING at half the idle timeout, 7.5 s by default, where HTTP/1.1 and HTTP/2 ended at once; curl's
   acknowledgements happened to send it in time. Found by the test VPS's report on 0.1.0-alpha.142
   (F2).
+- **Fix: over HTTP/3 a stream reset that is lost is sent again.** When agensio ended a stream with
+  RESET_STREAM (an answer cut on its application's side, a client's STOP_SENDING) and the packet that
+  carried it was lost, it was never sent again: the stream counted as done once the frame was in a
+  packet. The request stayed open in the browser, and while another stream kept the connection busy
+  (an event stream on the same page) it could stay open for good. The stream now ends when the client
+  acknowledges the reset, and a lost one goes again (RFC 9000 3.1, 13.3). Found by the test VPS's
+  report on 0.1.0-alpha.142 (F1).
 
 ## 0.1.0-alpha.142 (2026-11-09)
 

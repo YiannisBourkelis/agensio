@@ -187,7 +187,10 @@ public:
     // it), and the frame gives the bytes sent as the final size (RFC 9000 4.5). Until 0.1.0-alpha.142
     // it was only marked unready, so it stayed linked in the list and the streams behind it were never
     // sent once it closed, and the final size was the whole answer's, past the client's window: a
-    // download cut by the client closed the connection with FLOW_CONTROL_ERROR.
+    // download cut by the client closed the connection with FLOW_CONTROL_ERROR. The send side is done
+    // when the peer acknowledges the frame ("Reset Recvd", RFC 9000 3.1), and a lost one is sent again
+    // until then (13.3); until 0.1.0-alpha.143 it was done once the frame was in a packet, the
+    // application closed the stream, and a lost reset never went again (the alpha.142 report, F1).
     void stream_reset(QuicStream& s, std::uint64_t code) noexcept {
         if (s.reset_sent || s.reset_due) return;
         dequeue(s);
@@ -1096,6 +1099,14 @@ private:
                     }
                     break;
                 }
+                case ItemKind::reset_stream: {
+                    QuicStream* s = app_.find_stream(it.id);
+                    if (s && s->open && s->reset_sent && !s->send_done) {
+                        s->send_done = true;
+                        app_.on_stream_sent(*s);
+                    }
+                    break;
+                }
                 case ItemKind::crypto: {
                     CryptoOut& co = crypto_out_[it.id];
                     co.acked.add(it.offset, it.offset + it.len);
@@ -1161,7 +1172,7 @@ private:
                 }
                 case ItemKind::reset_stream: {
                     QuicStream* s = app_.find_stream(it.id);
-                    if (s && s->open && !s->reset_due) { s->reset_due = true; control_.push_back(s); }
+                    if (s && s->open && !s->send_done && !s->reset_due) { s->reset_due = true; control_.push_back(s); }
                     break;
                 }
                 case ItemKind::stop_sending: {
@@ -1392,11 +1403,7 @@ private:
                 }
                 if (!fits) break;
                 control_.pop_back();
-                if (reset_now && !s->send_done) {  // the send side is terminal: the application may close the stream
-                    s->send_done = true;
-                    dequeue(*s);
-                    app_.on_stream_sent(*s);
-                }
+                if (reset_now) dequeue(*s);  // nothing of the stream is sent again but the frame, if it is lost
             }
             // STREAM data: lost ranges first, then new bytes, one frame per stream in turn.
             if (rec_.cwnd_room() >= kMinInitialDatagram || rec_.probes[si] > 0) {

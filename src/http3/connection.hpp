@@ -197,7 +197,6 @@ public:
         s.body_done = true;
         q.fin_delivered = true;
         if (!q.send_done && !q.reset_sent) quic_.stream_reset(q, err::request_cancelled);
-        else s.finished = true;
         maybe_close(s);
     }
 
@@ -213,7 +212,7 @@ public:
         maybe_close(s);
     }
 
-    // Every byte acknowledged, or our RESET_STREAM gone out.
+    // Every byte and the FIN acknowledged, or our RESET_STREAM acknowledged.
     void on_stream_sent(quic::QuicStream& q) {
         H3Stream& s = of(q);
         s.finished = true;
@@ -1057,7 +1056,7 @@ private:
     void maybe_close(H3Stream& s) {
         if (s.closed) return;
         const quic::QuicStream& q = s.q;
-        const bool send_over = s.finished || (!s.responded && q.reset_sent) || (s.responded && q.send_done);
+        const bool send_over = s.finished || q.send_done;  // every byte and the FIN, or our RESET_STREAM, acknowledged
         const bool recv_over = q.fin_delivered || q.reset_received;
         if (send_over && recv_over) close_stream(s);
     }

@@ -71,6 +71,7 @@ class Client:
         self.terminated = None
         self.ids_issued = 0
         self.received_on = {}  # socket -> datagrams
+        self.drop_until = 0.0  # datagrams that arrive before this time are read and lost
 
     def now(self):
         return time.monotonic()
@@ -116,6 +117,8 @@ class Client:
                     except BlockingIOError:
                         break
                     self.received_on[self.sock] = self.received_on.get(self.sock, 0) + 1
+                    if self.now() < self.drop_until:
+                        continue
                     self.quic.receive_datagram(data, addr, self.now())
             else:
                 t = self.quic.get_timer()
@@ -856,6 +859,41 @@ def row_stop_sending_large(args):
     return True, "RESET_STREAM within the window, the next request answered"
 
 
+def row_reset_lost(args):
+    """A RESET_STREAM that is lost is sent again until the client acknowledges it (RFC 9000 3.1,
+    13.3). The client sends STOP_SENDING on a 10 MB download, then loses every datagram for a second,
+    the server's RESET_STREAM among them, then reads again: the reset must come. Until
+    0.1.0-alpha.143 the stream counted as done once its RESET_STREAM was in a packet and was closed,
+    so a lost reset was never sent again: the request stayed open on the client, and a fetch or
+    event stream the server had cut hung in the browser (the test VPS's report on alpha.142, F1)."""
+    c = Client()
+    if not c.connect():
+        return False, "handshake did not complete"
+    sid = c.request("/big.bin")
+    if body_bytes(c, sid, 16384) < 16384:
+        c.close()
+        return False, "no bytes of /big.bin"
+    c.quic.stop_stream(sid, 0x10C)
+    c.send_all()
+    c.drop_until = c.now() + 1.0
+    c.pump(1.0, lambda: c.terminated is not None)
+    lost = reset_arrived(c, sid)
+    c.pump(4.0, lambda: reset_arrived(c, sid) or c.terminated is not None)
+    reset = reset_arrived(c, sid)
+    status, _ = (None, None) if c.terminated else c.get("/")
+    t = c.terminated
+    c.close()
+    if t is not None:
+        return False, "the connection closed with 0x%x (%s)" % (t.error_code, t.reason_phrase)
+    if lost:
+        return False, "the RESET_STREAM arrived while every datagram was dropped (the row tests nothing)"
+    if not reset:
+        return False, "the RESET_STREAM lost with the dropped datagrams never came again (4 s)"
+    if status != 200:
+        return False, "the next request gave %s" % status
+    return True, "the lost RESET_STREAM came again, the next request answered"
+
+
 def row_reset_in_queue(args):
     """A stream reset while it still has bytes to send leaves the connection's send queue: a request
     sent together with the STOP_SENDING of an answer still sending is answered, and so is the next.
@@ -998,6 +1036,7 @@ ROWS = [
     ("retire-in-use", row_retire_in_use),
     ("flow-control", row_flow_control),
     ("stop-sending-large", row_stop_sending_large),
+    ("reset-lost", row_reset_lost),
     ("reset-in-queue", row_reset_in_queue),
     ("reset-then-credit", row_reset_then_credit),
     ("reload", row_reload),
