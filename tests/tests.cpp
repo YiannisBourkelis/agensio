@@ -14929,6 +14929,32 @@ static void test_quic_send_batch() {
         CHECK(batch.messages() == 3 && batch.datagrams() == 4);
         batch.clear();
     }
+    {
+        // What the socket did not take reaches the worker's count, which status sums over the workers
+        // (h3_datagrams_dropped): before 0.1.0-alpha.143 a refused datagram was counted on the endpoint
+        // alone, where nothing showed it. Over IPv4 a datagram above 65,507 bytes is refused (EMSGSIZE).
+        struct Probe final : EndpointBase {
+            void unmap(const Cid&, const void*) override {}
+            bool map(const Cid&, const Cid&) override { return false; }
+            void arm_if_earlier(std::chrono::steady_clock::time_point) override {}
+        } ep;
+        std::atomic<std::uint64_t> worker_count{0};
+        ep.dropped_total = &worker_count;
+        ep.fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+        sockaddr_storage to{};
+        auto* a = reinterpret_cast<sockaddr_in*>(&to);
+        a->sin_family = AF_INET;
+        a->sin_port = htons(9);
+        ::inet_pton(AF_INET, "127.0.0.1", &a->sin_addr);
+        ep.batch.commit(1200, to, sizeof(sockaddr_in));
+        ep.flush();
+        CHECK(ep.dropped == 0 && worker_count.load() == 0);
+        ep.batch.commit_alone(65527, to, sizeof(sockaddr_in));
+        ep.batch.commit_alone(1200, to, sizeof(sockaddr_in));
+        ep.flush();
+        CHECK(ep.dropped == 1 && worker_count.load() == 1 && ep.datagrams_out == 3);
+        ::close(ep.fd);
+    }
 }
 #endif
 

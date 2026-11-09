@@ -233,10 +233,15 @@ folded behind it. Until 0.1.0-alpha.143 messages were folded up to 65,535 bytes:
 65,535 was refused with EMSGSIZE and every datagram in it lost (44 full datagrams and a short one on
 a 1,500-byte path; on loopback a lost range sent again in the same two sizes, refused again, and
 the connection stalled). A kernel or
-interface that refuses GSO (EIO on some virtual interfaces) turns it off for that socket
-after the first refusal, with a log line, and the batch is resent one datagram per
-message. EAGAIN keeps the rest of the batch and arms `async_wait(wait_write)`; a
-connection whose datagrams wait is not asked for more until the socket drains. This is
+interface that refuses GSO (EIO or EINVAL, on some virtual interfaces) turns it off for that
+socket after the first refusal, and the batch is resent one datagram per message; nothing logs
+it. A send the socket does not take drops what is left of the batch (EAGAIN: the send buffer,
+which `net.core.wmem_max` caps, is full), and a message the kernel refuses is skipped
+(EMSGSIZE): the connections have counted those datagrams as sent, and their loss recovery sends
+the data again, as after a router's drop. Status's `h3_datagrams_dropped` counts them since the
+start; one that grows under load says the send buffer is too small. Until 0.1.0-alpha.143 this
+section said EAGAIN kept the rest of the batch and waited for the socket to drain, which the code
+never did, and said a log line marked GSO turned off; nothing counted the drops. This is
 the HTTP/2 rule "a read's answers are one send" (design-http2 6.6) at the worker level:
 a wake-up's answers for every connection are one syscall.
 

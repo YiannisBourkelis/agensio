@@ -932,6 +932,7 @@ bool Server::open_h3_listener(const Listener& l, const Config& cfg, bool start, 
         gro = gro && ep->gro();
         if (rcvbuf == 0 || ep->receive_buffer() < rcvbuf) rcvbuf = ep->receive_buffer();
         ep->retry = retry_mode(cfg);
+        ep->dropped_total = &w.h3_dropped;
         // The ceiling counts TCP and QUIC together (hardening item 5): a new QUIC connection over it
         // is refused as a TLS one is, before any handshake work (audit 2.4; before alpha.116 the QUIC
         // accept path never asked, and over-limit handshakes completed).
@@ -1320,6 +1321,14 @@ json::Value Server::status() {
     v.set("connections_idle", static_cast<double>(rr.idle));  // HTTP/1 and HTTP/2 connections idle 2 s or more
     v.set("max_connections", static_cast<double>(rr.ceiling));  // per worker
     v.set("connections_refused", static_cast<double>(rr.refused));
+    // HTTP/3 datagrams the sockets did not take (a send buffer full under a burst, a datagram the kernel
+    // refused): their connections' loss recovery sends the data again, at a halved rate. Before
+    // 0.1.0-alpha.143 nothing showed them, and a refusal that repeated stalled answers unseen.
+    {
+        std::uint64_t dropped = 0;
+        for (const auto& w : workers_) dropped += w->h3_dropped.load(std::memory_order_relaxed);
+        v.set("h3_datagrams_dropped", static_cast<double>(dropped));
+    }
     // TLS handshakes refused for their name (none on a listener without a catch-all, or one no site
     // there has; the alpha.70 report): the count, and the addresses and listeners over the workers.
     {

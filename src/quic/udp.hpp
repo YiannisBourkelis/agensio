@@ -15,6 +15,7 @@
 #include <linux/filter.h>
 #endif
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -251,6 +252,9 @@ public:
     int fd = -1;
     std::uint8_t worker = 0;
     std::uint64_t datagrams_in = 0, datagrams_out = 0, dropped = 0, wakeups = 0;
+    // The worker's count of the datagrams the socket did not take (a full send buffer, a datagram the
+    // kernel refused), which status sums over the workers from another thread (h3_datagrams_dropped).
+    std::atomic<std::uint64_t>* dropped_total = nullptr;
     // Address validation and the half-open budget (6.3): connections still in their
     // handshake; Retry at half the budget in "auto", Initials dropped at the budget.
     RetryMode retry = RetryMode::auto_;
@@ -272,7 +276,10 @@ public:
         }
 #endif
         datagrams_out += batch.datagrams();
-        dropped += batch.flush(fd);
+        if (const std::size_t d = batch.flush(fd)) {
+            dropped += d;
+            if (dropped_total) dropped_total->fetch_add(d, std::memory_order_relaxed);
+        }
     }
 #ifdef AGENSIO_FUZZ_HOOKS
     // Fuzz builds only (tests/fuzz/fuzz_h3_conn.cpp): while fuzz_sink is set, flush() hands it

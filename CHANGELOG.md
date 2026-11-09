@@ -40,6 +40,14 @@
   `head_too_large: the head is larger than cgi.head_max (1024 bytes)`, with the `proxy.` keys and
   "the connections to this origin" for a proxy. Found by the test VPS's report on 0.1.0-alpha.142
   (F4).
+- **Status counts the HTTP/3 datagrams the sockets did not take.** A datagram the socket's send
+  buffer had no room for, or that the kernel refused, was dropped without a trace; its connection
+  sent the data again at a lower rate, and the burst refusal above went unseen for that reason.
+  `server_status` now has `h3_datagrams_dropped`, the count since the start over every worker. One
+  that keeps growing under load means the send buffer is too small: raise `net.core.wmem_max` with
+  the commands of `docs/configuration.md` 17. The design note's account of a full send buffer
+  (`docs/design-http3.md` 6.1) now says what the code does: the rest of the batch is dropped and
+  sent again by its connections, not held until the socket drains.
 
 ## 0.1.0-alpha.142 (2026-11-09)
 

@@ -3776,7 +3776,10 @@ printf 'net.core.rmem_max = 8388608\nnet.core.wmem_max = 8388608\n' > /etc/sysct
 ```
 
 The buffers are set when a socket opens: at start and at a reload that adds h3 to a
-listener; a running socket keeps what it got.
+listener; a running socket keeps what it got. A datagram the send buffer has no room for is
+dropped and sent again by its connection's loss recovery, at a lower rate: status's
+`h3_datagrams_dropped` counts them since the start (0.1.0-alpha.143), and one that keeps growing
+under load is the sign to raise `net.core.wmem_max` with the commands above.
 
 Every HTTP/3 limit derives from keys you already know:
 

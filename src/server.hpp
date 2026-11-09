@@ -121,6 +121,9 @@ struct Worker {
     // there has): scanners probing port 443 by address (the alpha.70 report). Same mutex.
     std::atomic<std::uint64_t> tls_refused{0};
     RefusalSample tls_refusals;
+    // HTTP/3 datagrams this worker's sockets did not take since start (status h3_datagrams_dropped):
+    // added by the endpoints' flush only when one was dropped.
+    std::atomic<std::uint64_t> h3_dropped{0};
     unsigned sheds = 0;  // connections that dropped their idle buffers or closed since the last trim (this thread only)
     // The configuration this worker hands to new connections and to connections at their
     // next request. Written only by a handler posted to this worker's loop (reload).
