@@ -6,6 +6,9 @@ BIN="${1:-build/agensio}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 umask 022  # the modes the rows check are the server's (0644, 0755); Ubuntu's default account runs under 002
+# The benchmark origin built beside the binary under test: CI builds into build-san/ alone, and with
+# build/ looked up the proxied sites were left out and three rows outside the proxy section failed.
+UPSTREAM_BIN="$(dirname "$BIN")/agensio_upstream"; export UPSTREAM_BIN
 [ -f bench/www/big.bin ] && [ -L bench/www/outside.txt ] || bench/gen-www.sh >/dev/null
 [ -f bench/certs/cert.pem ] || bench/certs/gen-cert.sh >/dev/null
 printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html
@@ -294,7 +297,7 @@ to = "https://secure.test:8443"
 status = 301
 """
 # The reverse proxy (D1) in front of the benchmark upstream on 127.0.0.1:9107, on its own port.
-if os.path.exists(f"{root}/build/agensio_upstream"):
+if os.access(os.environ["UPSTREAM_BIN"], os.X_OK):
     text += f"""
 [[site]]
 server_name = ["tp.test"]
@@ -523,12 +526,12 @@ loop = ["127.0.0.1", "::1"]
 open(path, "w").write(text)
 PY
 UP_PID=""; UP2_PID=""; UP3_PID=""
-if [ -x build/agensio_upstream ]; then
-  build/agensio_upstream -p 9107 >/dev/null 2>&1 &
+if [ -x "$UPSTREAM_BIN" ]; then
+  "$UPSTREAM_BIN" -p 9107 >/dev/null 2>&1 &
   UP_PID=$!
-  build/agensio_upstream -p 9108 >/dev/null 2>&1 &
+  "$UPSTREAM_BIN" -p 9108 >/dev/null 2>&1 &
   UP2_PID=$!
-  build/agensio_upstream -p 9109 >/dev/null 2>&1 &
+  "$UPSTREAM_BIN" -p 9109 >/dev/null 2>&1 &
   UP3_PID=$!
 fi
 # An HTTPS origin with the wildcard certificate, for the proxy's TLS name, pool and redirect checks.
@@ -1896,8 +1899,8 @@ cpost /v1/sites/certp.wild.test/delete '{"confirm":true,"reason":"certs"}' > /de
 # alpha.79): the benchmark upstream's /host-redirect builds it from Host, as an application that does
 # not trust its proxy does; /redirect names the origin's own address, which the proxy's rewrite
 # already turned into the site (https, as the request came).
-if [ -x build/agensio_upstream ]; then
-  build/agensio_upstream -p 9111 >/dev/null 2>&1 & UP9111=$!
+if [ -x "$UPSTREAM_BIN" ]; then
+  "$UPSTREAM_BIN" -p 9111 >/dev/null 2>&1 & UP9111=$!
   cpost /v1/sites "{\"domain\":\"certu.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"user\":null,\"app\":\"proxy\",\"upstream\":\"http://127.0.0.1:9111\",\"listen_plain\":\"127.0.0.1:8463\",\"listen_tls\":\"127.0.0.1:8462\",\"confirm\":true,\"reason\":\"certs\"}" > /dev/null
   locu() { curl -sk -D - -o /dev/null --resolve certu.wild.test:8462:127.0.0.1 "https://certu.wild.test:8462$1" | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}'; }
   check "http: a proxied application's http:// Location for the Host it was given is sent as https://; one naming the origin is the site's as before" \
@@ -2342,11 +2345,16 @@ if [ -n "$PHPFPM" ]; then
   # An application's own HSTS on a site with no hsts line (alpha.87, docs/redirects.md 4.2, the
   # alpha.86 report): health reads it from its own request for / (0.1.0-alpha.104: no answer is watched
   # for it any more), so a field the application sends on another path only is not seen, and health
-  # goes on suggesting. The certificate is dated a month back, so the suggestion's week is up.
-  mkdir -p bench/tmp/certs-old
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-old/key.pem -out bench/tmp/certs-old/cert.pem \
-    -not_before "$(date -u -d '30 days ago' +%Y%m%d%H%M%SZ)" -not_after "$(date -u -d '60 days' +%Y%m%d%H%M%SZ)" \
+  # goes on suggesting. The certificate is dated a month back, so the suggestion's week is up: signed
+  # by itself through `openssl ca -startdate`, since `req -not_before` is OpenSSL 3.4's and Ubuntu
+  # 24.04's 3.0 (the CI runner) made no certificate, which failed the four rows that use it.
+  mkdir -p bench/tmp/certs-old/ca; : > bench/tmp/certs-old/ca/index.txt
+  printf '[ca]\ndefault_ca = c\n[c]\ndatabase = %s/index.txt\nnew_certs_dir = %s\nrand_serial = yes\ndefault_md = sha256\npolicy = p\ncopy_extensions = copy\nunique_subject = no\n[p]\ncommonName = supplied\n' \
+    bench/tmp/certs-old/ca bench/tmp/certs-old/ca > bench/tmp/certs-old/ca.cnf
+  openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-old/key.pem -out bench/tmp/certs-old/req.pem \
     -subj "/CN=*.old.test" -addext "subjectAltName=DNS:*.old.test" >/dev/null 2>&1
+  openssl ca -batch -config bench/tmp/certs-old/ca.cnf -selfsign -keyfile bench/tmp/certs-old/key.pem -in bench/tmp/certs-old/req.pem -out bench/tmp/certs-old/cert.pem -notext \
+    -startdate "$(date -u -d '30 days ago' +%Y%m%d%H%M%SZ)" -enddate "$(date -u -d '60 days' +%Y%m%d%H%M%SZ)" >/dev/null 2>&1
   cpost /v1/sites "{\"domain\":\"ah.old.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-old/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-old/key.pem\"},\"user\":null,\"app\":\"wordpress\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/wordpress\",\"listen_plain\":\"127.0.0.1:8482\",\"listen_tls\":\"127.0.0.1:8481\",\"confirm\":true,\"reason\":\"apphsts\"}" > /dev/null
   hcodes() { curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(sorted(f["code"] for f in d["findings"] if f.get("site") == "ah.old.test" and f["code"].startswith("hsts_"))) or "none")'; }
   check "hsts_suggested: health reads the application's HSTS from its own request for /, so a field the application sends on another path only leaves the suggestion standing" \

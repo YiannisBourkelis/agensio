@@ -149,7 +149,10 @@ def prepare(text, base):
     return text
 
 
-UNREACHABLE = re.compile(r"(fastcgi|proxy) upstream .*(Connection refused|No such file or directory|nothing is listening)")
+# A recipe's upstream this machine does not offer it, which `-t` names and the recipe cannot help: none
+# there, or a socket this account may not open (a running system php-fpm's /run/php/php-fpm.sock,
+# www-data's 0660: the CI runner, where installing php8.3-fpm starts it).
+UNREACHABLE = re.compile(r"(fastcgi|proxy) upstream .*(Connection refused|No such file or directory|nothing is listening|Permission denied)")
 
 ctl_help = subprocess.run([BIN, "ctl", "--help"], capture_output=True, text=True)
 ctl_help = ctl_help.stdout + ctl_help.stderr

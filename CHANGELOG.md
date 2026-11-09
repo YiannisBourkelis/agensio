@@ -52,6 +52,15 @@
   `reset-in-queue` and `reset-then-credit` of `tests/h3-attacks.py` failed before.
 - **A refusal lists only the keys this build takes.** The list of a location's keys in an unknown-key
   refusal named `httparena`, the benchmark handler's table, which a release build refuses.
+- **The weekly sanitizer run passes on the CI runner again.** Its integration step had failed every
+  week since the workflow began (2026-10-12), on eight rows, each the suite's and never the server's:
+  the suite looked for the benchmark origin in `build/`, which CI (building into `build-san/`) does
+  not have, so the proxied sites were left out and three rows outside the proxy section failed, and
+  the whole proxy section never ran under the sanitizers; the certificate four rows use was made with
+  `openssl req -not_before`, OpenSSL 3.4's, so Ubuntu 24.04's 3.0 made none; and three cookbook
+  recipes naming `/run/php/php-fpm.sock` failed where a system php-fpm runs (installing php8.3-fpm
+  starts it), since `agensio -t` cannot open its socket as the runner's account, which the cookbook
+  check now counts with the other upstreams a machine does not offer.
 
 - **Fix: brotli answers from applications decode on Debian 12 and Ubuntu 22.04.** libbrotli before
   1.1.0, which those two distributions ship and the .deb links, writes a metadata block of one byte
