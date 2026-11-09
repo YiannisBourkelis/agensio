@@ -809,6 +809,110 @@ def row_flow_control(args):
     return True, "FLOW_CONTROL_ERROR for data beyond the stream's window"
 
 
+def body_bytes(c, sid, at_least, timeout=5.0):
+    """Pumps until `at_least` body bytes of stream `sid` arrived; returns how many did."""
+    got = [0]
+    seen = [0]
+
+    def scan():
+        for ev in c.h3_events[seen[0]:]:
+            if isinstance(ev, DataReceived) and ev.stream_id == sid:
+                got[0] += len(ev.data)
+        seen[0] = len(c.h3_events)
+        return got[0] >= at_least
+
+    c.pump(timeout, scan)
+    return got[0]
+
+
+def reset_arrived(c, sid):
+    return any(isinstance(e, qe.StreamReset) and e.stream_id == sid for e in c.events)
+
+
+def row_stop_sending_large(args):
+    """STOP_SENDING on a 10 MB download after its first bytes (a browser leaving the page): the
+    server's RESET_STREAM gives the bytes it sent as the final size (RFC 9000 4.5), within the
+    client's window, and the connection answers the next request. Before 0.1.0-alpha.142 it gave
+    the whole answer's length, beyond the window: the client closed with FLOW_CONTROL_ERROR."""
+    c = Client()
+    if not c.connect():
+        return False, "handshake did not complete"
+    sid = c.request("/big.bin")
+    if body_bytes(c, sid, 16384) < 16384:
+        c.close()
+        return False, "no bytes of /big.bin"
+    c.quic.stop_stream(sid, 0x10C)
+    c.pump(2.0, lambda: reset_arrived(c, sid) or c.terminated is not None)
+    reset = reset_arrived(c, sid)
+    status, _ = (None, None) if c.terminated else c.get("/")
+    t = c.terminated
+    c.close()
+    if t is not None:
+        return False, "the client closed the connection with 0x%x (%s)" % (t.error_code, t.reason_phrase)
+    if not reset:
+        return False, "no RESET_STREAM after STOP_SENDING"
+    if status != 200:
+        return False, "the next request gave %s" % status
+    return True, "RESET_STREAM within the window, the next request answered"
+
+
+def row_reset_in_queue(args):
+    """A stream reset while it still has bytes to send leaves the connection's send queue: a request
+    sent together with the STOP_SENDING of an answer still sending is answered, and so is the next.
+    Before 0.1.0-alpha.142 the reset stream stayed linked in the queue, and once it closed the
+    streams queued behind it were never sent."""
+    c = Client()
+    if not c.connect():
+        return False, "handshake did not complete"
+    a = c.request("/style.css")  # 100 KB: several round trips under the first congestion window
+    if body_bytes(c, a, 1) < 1:
+        c.close()
+        return False, "no bytes of /style.css"
+    b = c.request("/")
+    c.quic.stop_stream(a, 0x10C)  # in the same datagram as b's request
+    status_b, body_b = c.wait_response(b, 5.0)
+    status_c, _ = (None, None) if c.terminated or status_b is None else c.get("/")
+    t = c.terminated
+    c.close()
+    if t is not None:
+        return False, "the client closed the connection with 0x%x (%s)" % (t.error_code, t.reason_phrase)
+    if status_b != 200:
+        return False, "the request sent with the STOP_SENDING: %s after %d bytes" % (status_b, len(body_b or b""))
+    if status_c != 200:
+        return False, "the next request: %s" % status_c
+    return True, "the requests queued behind a reset stream answered"
+
+
+def row_reset_then_credit(args):
+    """Credit for a stream the server reset: no byte of it goes out again (RFC 9000 4.5, no data at
+    or beyond the final size). The request keeps its own side open (no FIN after the HEADERS), so the
+    stream lives on after the reset. Before 0.1.0-alpha.142 a MAX_STREAM_DATA put it back in the send
+    queue and its next bytes went out after the RESET_STREAM."""
+    c = Client()
+    if not c.connect():
+        return False, "handshake did not complete"
+    sid = c.request("/big.bin", end_stream=False)
+    if body_bytes(c, sid, 16384) < 16384:
+        c.close()
+        return False, "no bytes of /big.bin"
+    c.quic.stop_stream(sid, 0x10C)
+    c.pump(2.0, lambda: reset_arrived(c, sid) or c.terminated is not None)
+    reset = reset_arrived(c, sid)
+    if reset and c.terminated is None:
+        c.inject([(0x10, varint(64 << 20)), (0x11, varint(sid) + varint(64 << 20))])  # MAX_DATA, MAX_STREAM_DATA
+        c.pump(1.0, lambda: c.terminated is not None)
+    status, _ = (None, None) if c.terminated else c.get("/")
+    t = c.terminated
+    c.close()
+    if t is not None:
+        return False, "the client closed the connection with 0x%x (%s)" % (t.error_code, t.reason_phrase)
+    if not reset:
+        return False, "no RESET_STREAM after STOP_SENDING"
+    if status != 200:
+        return False, "the next request gave %s" % status
+    return True, "nothing sent on the reset stream after the credit"
+
+
 def row_reload(args):
     """A reload whose configuration drops h3 from the listener: an open connection gets
     GOAWAY and a close with H3_NO_ERROR at once, a new client finds no QUIC server on the
@@ -893,6 +997,9 @@ ROWS = [
     ("retire-unissued", row_retire_unissued),
     ("retire-in-use", row_retire_in_use),
     ("flow-control", row_flow_control),
+    ("stop-sending-large", row_stop_sending_large),
+    ("reset-in-queue", row_reset_in_queue),
+    ("reset-then-credit", row_reset_then_credit),
     ("reload", row_reload),
     ("shutdown", row_shutdown),  # last: it stops the server
 ]

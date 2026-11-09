@@ -24,6 +24,16 @@
   test VPS's report on 0.1.0-alpha.141, which also asked for a line on the client's half-close:
   `docs/configuration.md` 8 now says that over HTTP/1.1 a client that closes its sending side after its
   request counts as gone, as nginx and Caddy count it.
+- **Fix: an HTTP/3 answer the client cancels no longer breaks its connection.** A client that cancels
+  an answer still sending (a browser leaving a page, a download stopped: STOP_SENDING or RESET_STREAM)
+  had its connection hurt three ways: the server's RESET_STREAM gave the whole answer's length as the
+  stream's final size, past the client's window, so the client closed the connection with
+  FLOW_CONTROL_ERROR (a 10 MB file cut after 16 KB, every client that checks); the reset stream stayed
+  linked in the connection's send queue, so once it closed every answer queued behind it was never
+  sent; and a credit update arriving after the reset sent its next bytes past the final size. The
+  final size is now the bytes sent (RFC 9000 4.5), a reset stream leaves the queue for good and never
+  comes back (`src/quic/connection.hpp`: `stream_reset`, `enqueue`). Rows `stop-sending-large`,
+  `reset-in-queue` and `reset-then-credit` of `tests/h3-attacks.py` failed before.
 - **A refusal lists only the keys this build takes.** The list of a location's keys in an unknown-key
   refusal named `httparena`, the benchmark handler's table, which a release build refuses.
 

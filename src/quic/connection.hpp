@@ -183,11 +183,16 @@ public:
         s.window = window;
         if (s.consumed() + window > s.max_recv) grant(s, s.consumed() + window);
     }
+    // The send side ends with RESET_STREAM: the stream leaves the ready list for good (enqueue refuses
+    // it), and the frame gives the bytes sent as the final size (RFC 9000 4.5). Until 0.1.0-alpha.142
+    // it was only marked unready, so it stayed linked in the list and the streams behind it were never
+    // sent once it closed, and the final size was the whole answer's, past the client's window: a
+    // download cut by the client closed the connection with FLOW_CONTROL_ERROR.
     void stream_reset(QuicStream& s, std::uint64_t code) noexcept {
         if (s.reset_sent || s.reset_due) return;
+        dequeue(s);
         s.reset_due = true;
         s.reset_send_code = code;
-        s.ready = false;
         control_.push_back(&s);
     }
     void stream_stop_sending(QuicStream& s, std::uint64_t code) noexcept {
@@ -1335,7 +1340,7 @@ private:
                 bool fits = true;
                 bool reset_now = false;
                 if (s->reset_due) {
-                    const std::size_t n = put_reset_stream(payload + w, room - w, s->id, s->reset_send_code, s->total);
+                    const std::size_t n = put_reset_stream(payload + w, room - w, s->id, s->reset_send_code, s->next);
                     if (!n) { fits = false; } else {
                         w += n;
                         s->reset_due = false;
@@ -1609,8 +1614,10 @@ private:
 
     // ---- the ready list (round robin) ----
 
+    // A reset stream never comes back (RFC 9000 4.5: no data at or beyond the final size): before
+    // 0.1.0-alpha.142 a MAX_STREAM_DATA after the reset sent its next bytes, FINAL_SIZE_ERROR at the client.
     void enqueue(QuicStream& s) noexcept {
-        if (s.ready || !s.open) return;
+        if (s.ready || !s.open || s.reset_due || s.reset_sent) return;
         s.ready = true;
         s.next_ready = nullptr;
         if (ready_tail_) ready_tail_->next_ready = &s;

@@ -1049,7 +1049,13 @@ to its new port after validation), cid-retire (replacements), stateless-reset,
 forged-flood (3,000 forged packets on a live id), rapid-reset (H3_EXCESSIVE_LOAD past
 128 in a second), stream-flood (STREAM_LIMIT_ERROR), control-stream (a second SETTINGS),
 handshake-flood (1,500 Initials in 1.1 s: Retry past the half budget in "auto", every one
-in "always", a real client answered after). The rows that need raw frames or a spoofed
+in "always", a real client answered after), and since 0.1.0-alpha.142 the client's cancel:
+stop-sending-large (STOP_SENDING on a 10 MB download: the RESET_STREAM's final size is the
+bytes sent, RFC 9000 4.5, inside the client's window; before, the whole length closed the
+connection with FLOW_CONTROL_ERROR), reset-in-queue (a request sent with another stream's
+STOP_SENDING is answered: a reset stream leaves the send queue, where it used to stay linked
+and cut off every stream behind it) and reset-then-credit (a MAX_STREAM_DATA after the reset
+sends nothing). The rows that need raw frames or a spoofed
 source (amplification, optimistic ACK, the connection-id and flow-control games) and the
 interop runner stay in I2.
 
