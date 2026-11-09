@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.142 (2026-11-08)
+## 0.1.0-alpha.142 (2026-11-09)
 
 - **Fix: the `cgi` table takes the keys a CGI process has, and the reference lists them.** A
   location's `cgi = { ... }` loaded every key of a PHP pool (`children`, `pm`, `version`,
