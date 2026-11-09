@@ -80,6 +80,15 @@ skipped where it is not installed).
 - cut-h3-logged: cut-h1-logged over HTTP/3: the stream reset with H3_REQUEST_CANCELLED, the line written.
 - h3-compressed-pieces: h2c-pieces over HTTP/3 (the TLS site, buffered), and /pause/3 compressed as it
   streams: each decodes to what was sent. Before 0.1.0-alpha.142 these went as they came.
+
+A streamed answer's end over HTTP/3 (the alpha.142 report, F2): when the source ended (a CGI script's
+exit) or failed (an origin that closed early, read_timeout) on a read answered later, its FIN or
+RESET_STREAM was queued and nothing sent it until the connection's next turn: the keep-alive PING at
+half the idle timeout (7.5 s by default), or a packet from the client (curl's acknowledgements came in
+time, aioquic's do not).
+- h3-ends-on-time: a CGI event stream whose script exits after 0.3 s ends within 1 s, and an origin
+  that closes without its last chunk after 0.3 s is reset (H3_REQUEST_CANCELLED) within 1 s; on
+  0.1.0-alpha.142 both waited for the PING, about 1.5 s here (idle_timeout 3 s).
 Requires python3-h2 and openssl (aioquic for the h3 rows). Exit 1 on any failed row.
 """
 import argparse
@@ -168,7 +177,8 @@ HOLD_CLOSED = {}  # /hold/NAME: when the server closed the origin's connection
 class SlotOrigin(socketserver.BaseRequestHandler):
     """One answer per connection: /quick at once; /hold/NAME an event stream's head and one event,
     then quiet until the server closes; /flood/S events of 64 KB back to back for S seconds; /later/S
-    one event, S seconds of quiet, a second event and the stream's end."""
+    one event, S seconds of quiet, a second event and the stream's end; /gone/MS one event, MS
+    milliseconds, then the connection closed without the last chunk."""
 
     def handle(self):
         sock = self.request
@@ -184,8 +194,12 @@ class SlotOrigin(socketserver.BaseRequestHandler):
             return
         sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
         event = b"data: " + b"e" * 2000 + b"\n\n"
-        m = re.fullmatch(r"/(hold|flood|later)/(\w+)", target)
+        m = re.fullmatch(r"/(hold|flood|later|gone)/(\w+)", target)
         if not m:
+            return
+        if m.group(1) == "gone":
+            sock.sendall(b"%x\r\n" % len(event) + event + b"\r\n")
+            time.sleep(int(m.group(2)) / 1000)
             return
         if m.group(1) == "later":
             sock.sendall(b"%x\r\n" % len(event) + event + b"\r\n")
@@ -464,6 +478,9 @@ class Server:
         quiet = root / "cgi" / "quiet.cgi"  # its head and a line, then quiet past cgi.read_timeout
         quiet.write_text("#!/bin/sh\nprintf 'Content-Type: text/event-stream\\r\\n\\r\\ndata: one\\n\\n'\nsleep 3\n")
         quiet.chmod(0o755)
+        ends = root / "cgi" / "ends.cgi"  # its head and a line, then its end 0.3 s later
+        ends.write_text("#!/bin/sh\nprintf 'Content-Type: text/event-stream\\r\\n\\r\\ndata: one\\n\\n'\nsleep 0.3\n")
+        ends.chmod(0o755)
         for name, extra in (("cgi", ""), ("h3-cgi", tls)):
             self.ports[name] = free_port()
             while list(self.ports.values()).count(self.ports[name]) > 1:
@@ -898,6 +915,28 @@ def row_cut_h3_logged(srv):
     return None
 
 
+def row_h3_ends_on_time(srv):
+    fails = []
+    for port, path, how in ((srv.ports["h3-cgi"], "/cgi/ends.cgi", "end"), (srv.ports["h3-slots"], "/gone/300", "reset")):
+        c = H3(port)
+        start = time.monotonic()
+        try:
+            st, _ = c.request(path)
+            c.pump(5, lambda: st["ended"] or st["reset"] is not None)
+            took = time.monotonic() - start
+        finally:
+            c.close()
+        if st["status"] != 200 or b"data: " not in st["body"]:
+            fails.append(f"{path}: {h3_text(st)}")
+        elif how == "end" and not st["ended"]:
+            fails.append(f"{path}: {h3_text(st)}, not ended though the script exited")
+        elif how == "reset" and st["reset"] != 0x10C:
+            fails.append(f"{path}: {h3_text(st)}, not H3_REQUEST_CANCELLED though the origin closed early")
+        elif took > 1.0:
+            fails.append(f"{path}: the {how} reached the client {took:.2f} s after the request; the source ended at 0.3 s")
+    return "; ".join(fails) or None
+
+
 def row_h3_compressed_pieces(srv):
     """Answers compressed in pieces over HTTP/3: buffered past the 256 KB whole-answer limit, and
     streamed. Before 0.1.0-alpha.142 HTTP/3 took no streamed body, so these went as they came."""
@@ -945,6 +984,7 @@ ROWS = {
     "left-h3-close": row_left_h3_close,
     "cut-h3-logged": row_cut_h3_logged,
     "h3-compressed-pieces": row_h3_compressed_pieces,
+    "h3-ends-on-time": row_h3_ends_on_time,
 }
 
 

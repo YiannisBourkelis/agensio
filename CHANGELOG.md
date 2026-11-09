@@ -16,6 +16,13 @@
   probe also goes in a message of its own: on a 1,500-byte path the probe the path cannot carry took
   the data packet folded behind it down with it, once per connection. Found by the HTTP/3
   measurements of 0.1.0-alpha.142 (`bench/results/h3-streamed-20261108-233933.md`).
+- **Fix: over HTTP/3 a streamed answer's end reaches the client when it happens.** When an
+  application's streamed answer ended (a CGI script exited) or was cut (its origin closed early or
+  stayed quiet past `read_timeout`), the end of the stream, or its reset, waited for the next packet in
+  either direction. With a client that acknowledged nothing more (aioquic) that was the keep-alive
+  PING at half the idle timeout, 7.5 s by default, where HTTP/1.1 and HTTP/2 ended at once; curl's
+  acknowledgements happened to send it in time. Found by the test VPS's report on 0.1.0-alpha.142
+  (F2).
 
 ## 0.1.0-alpha.142 (2026-11-09)
 

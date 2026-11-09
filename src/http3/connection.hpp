@@ -790,6 +790,9 @@ private:
 
     // A read answered: the piece's DATA frame header written in front of its bytes, the bytes made
     // the stream's. A stream closed meanwhile is released only now (its block was the read's buffer).
+    // A read answered later (outside the connection's turn) sends what it queued at once, the stream's
+    // end too: until 0.1.0-alpha.143 a FIN or RESET_STREAM queued there waited for the next packet in
+    // either direction, the keep-alive PING at half the idle timeout (the alpha.142 report, F2).
     void on_piece(H3Stream& s, std::error_code ec, std::size_t n) {
         s.pulling = false;
         if (s.closed) {
@@ -797,23 +800,27 @@ private:
             return;
         }
         if (!s.streaming || closed_) return;  // reset, or the connection gone: nothing more is wanted
-        if (ec || (n == 0 && s.source_sized && s.source_remaining > 0)) return body_failed(s, ec);
-        if (n == 0) return end_of_source(s);
-        quic::QuicStream& q = s.q;
-        if (s.source_sized) {  // never more than declared: the surplus is not this answer's
-            n = static_cast<std::size_t>(std::min<std::uint64_t>(n, s.source_remaining));
-            s.source_remaining -= n;
+        if (ec || (n == 0 && s.source_sized && s.source_remaining > 0)) {
+            body_failed(s, ec);
+        } else if (n == 0) {
+            end_of_source(s);
+        } else {
+            quic::QuicStream& q = s.q;
+            if (s.source_sized) {  // never more than declared: the surplus is not this answer's
+                n = static_cast<std::size_t>(std::min<std::uint64_t>(n, s.source_remaining));
+                s.source_remaining -= n;
+            }
+            auto* h = reinterpret_cast<unsigned char*>(s.piece);
+            h[0] = static_cast<unsigned char>(frame::data);
+            quic::write_varint_fixed(h + 1, n, 4);
+            q.blocks.appended(kDataHeader + n);
+            q.total += kDataHeader + n;
+            s.body_bytes += n;
+            ++s.pieces;
+            quic_.stream_ready(q);
+            if (s.source_sized && s.source_remaining == 0) end_of_source(s);  // the FIN with the last piece
         }
-        auto* h = reinterpret_cast<unsigned char*>(s.piece);
-        h[0] = static_cast<unsigned char>(frame::data);
-        quic::write_varint_fixed(h + 1, n, 4);
-        q.blocks.appended(kDataHeader + n);
-        q.total += kDataHeader + n;
-        s.body_bytes += n;
-        ++s.pieces;
-        quic_.stream_ready(q);
-        if (s.source_sized && s.source_remaining == 0) end_of_source(s);  // the FIN with the last piece
-        if (s.read_inline) return;  // the pull loop goes on
+        if (s.read_inline) return;  // the pull loop goes on, and its caller sends
         pull(s);
         flush_if_outside();
     }
