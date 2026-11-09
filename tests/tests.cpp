@@ -14879,6 +14879,40 @@ static void test_quic() {
         r.keep_highest(1);
         CHECK(r.count() == 1 && r.min() == 50);
     }
+    // A streamed body's send blocks (quic/send_blocks.hpp): pieces never split, offsets unbroken,
+    // the acknowledged blocks freed but never the last, the connection's budget kept.
+    {
+        std::size_t budget = 0;
+        SendBlocks b;
+        b.budget(&budget);
+        CHECK(b.empty() && b.needs_block(1));
+        std::uint64_t end = 100;  // the bytes start after a 100-byte head
+        std::size_t room = 0;
+        char* p = b.room(end, 600, room);
+        CHECK(budget == 1 && room == SendBlocks::kSize);
+        for (std::size_t i = 0; i < room - 300; ++i) p[i] = static_cast<char>((end + i) & 0xff);
+        b.appended(room - 300);
+        end += room - 300;
+        CHECK(b.needs_block(600) && !b.needs_block(300));
+        p = b.room(end, 600, room);  // 300 bytes left: a new block, the old one ends short
+        CHECK(budget == 2 && b.count() == 2 && room == SendBlocks::kSize);
+        for (std::size_t i = 0; i < 1000; ++i) p[i] = static_cast<char>((end + i) & 0xff);
+        b.appended(1000);
+        end += 1000;
+        unsigned char out[2000];
+        const std::uint64_t at = 100 + SendBlocks::kSize - 300 - 500;  // across the two blocks
+        CHECK(b.copy(at, 1000, out));
+        bool same = true;
+        for (std::size_t i = 0; i < 1000; ++i) same = same && out[i] == static_cast<unsigned char>((at + i) & 0xff);
+        CHECK(same);
+        CHECK(!b.copy(99, 10, out) && !b.copy(end - 5, 10, out) && b.copy(end - 5, 5, out));
+        b.release_below(end);  // everything acknowledged: the first block goes, the last stays
+        CHECK(b.count() == 1 && budget == 1 && !b.copy(at, 10, out) && b.copy(end - 1000, 1000, out));
+        b.release_below(end + 100000);
+        CHECK(b.count() == 1);
+        b.clear();
+        CHECK(b.empty() && budget == 0);
+    }
     // Packet numbers (RFC 9000 A.2, A.3).
     CHECK(decode_pn(0xa82f30ea, true, 0x9b32, 16) == 0xa82f9b32);
     CHECK(pn_length(0xac5c02, 0xabe8b3, true) == 2);

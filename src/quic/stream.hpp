@@ -1,8 +1,8 @@
 // A QUIC stream's transport state (RFC 9000 sections 2 to 4): what arrived, in order or
 // not, and how much of it the application took (the credit it returns); what we send,
-// which is the application's head bytes followed by a memory body or a file, addressed
-// by offset so a lost range is re-framed from the same source, and what of it is
-// acknowledged. The application embeds one in its own stream object (H3Stream) and the
+// which is the application's head bytes followed by a memory body, a file or the blocks
+// a streamed body is appended into, addressed by offset so a lost range is re-framed from
+// the same source, and what of it is acknowledged. The application embeds one in its own stream object (H3Stream) and the
 // connection finds it by id through the application.
 #pragma once
 
@@ -14,6 +14,7 @@
 
 #include "file.hpp"
 #include "quic/range_set.hpp"
+#include "quic/send_blocks.hpp"
 
 namespace agensio::quic {
 
@@ -71,6 +72,7 @@ struct QuicStream {
     std::vector<char> chunk;      // a window of the file read ahead
     std::uint64_t chunk_off = 0;
     std::size_t chunk_len = 0;
+    SendBlocks blocks;            // or a streamed body's bytes after the head, held until acknowledged
     bool fin = false;             // FIN after the last byte
     std::uint64_t total = 0;      // head + body
     std::uint64_t next = 0;       // the next new byte to send
@@ -113,6 +115,7 @@ struct QuicStream {
         file = nullptr;
         file_offset = file_len = 0;
         chunk_off = chunk_len = 0;
+        blocks.clear();
         fin = false;
         total = next = 0;
         lost.clear();

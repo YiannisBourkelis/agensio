@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Answers pulled from a source over HTTP/2: whole, in order, and every pull answered.
+"""Answers pulled from a source over HTTP/2 (and HTTP/1.1, HTTP/3): whole, in order, and every pull answered.
 
 The test VPS's report on 0.1.0-alpha.138 (F1): answers compressed in pieces arrived corrupt over
 HTTP/2, on h2c and over TLS, and decoded whole over HTTP/1.1 and HTTP/3. Faults of the HTTP/2
@@ -64,7 +64,21 @@ failure and the key.
   names the path, read_timeout and the key. On 0.1.0-alpha.141 no line.
 - cut-h2-logged: the same origin over h2c. On 0.1.0-alpha.141 only the info line, not written at the
   default level.
-Requires python3-h2 and openssl. Exit 1 on any failed row.
+
+Streamed answers over HTTP/3 (the alpha.141 report, F1; docs/design-http3.md 7.3): on 0.1.0-alpha.141
+every one was reset with H3_INTERNAL_ERROR (0x102) once its application had answered, so every h3 row
+fails there before any byte. The TLS sites answer HTTP/3 too (aioquic, driven by hand; the rows are
+skipped where it is not installed).
+- h3-streamed: /rnd/100000 and /rnd/5000000 with their content-length, /pause/3 chunked without one,
+  through buffering = false: each whole.
+- h3-cgi: left-h1-cgi over HTTP/3, the client gone as soon as it has the answer, three times.
+- h3-quiet-stream: h1-quiet-stream over HTTP/3, the client's own idle timeout 3 s: the keep-alive PING
+  keeps the connection while the origin is quiet.
+- h3-backpressure: a flood through the one-slot origin while the client reads and acknowledges nothing
+  for 2 s: the server's RSS grows less than 32 MB, the answer goes on after, the slot comes back.
+- left-h3-stop, left-h3-close: left-h2-* over HTTP/3, the client's STOP_SENDING or close.
+- cut-h3-logged: cut-h1-logged over HTTP/3: the stream reset with H3_REQUEST_CANCELLED, the line written.
+Requires python3-h2 and openssl (aioquic for the h3 rows). Exit 1 on any failed row.
 """
 import argparse
 import base64
@@ -87,6 +101,15 @@ import h2.config
 import h2.connection
 import h2.events
 import h2.exceptions
+
+try:  # the HTTP/3 rows (the devbox image has aioquic); without it they are skipped
+    from aioquic.h3 import connection as h3c
+    from aioquic.h3.events import DataReceived as H3Data, HeadersReceived as H3Headers
+    from aioquic.quic import events as qe
+    from aioquic.quic.configuration import QuicConfiguration
+    from aioquic.quic.connection import QuicConnection
+except ImportError:
+    QuicConnection = None
 
 PIECE = 20 * 1024
 PAUSE_S = 0.3
@@ -263,6 +286,96 @@ class H2:
         self.sock.close()
 
 
+class H3:
+    """One HTTP/3 connection over aioquic, driven by hand as tests/h3-attacks.py drives it; the
+    answers per stream as they arrive (status, fields, body, ended, the reset code)."""
+
+    def __init__(self, port, idle=10.0):
+        cfg = QuicConfiguration(is_client=True, alpn_protocols=["h3"], verify_mode=ssl.CERT_NONE, server_name="localhost")
+        cfg.idle_timeout = idle
+        self.quic = QuicConnection(configuration=cfg)
+        self.h3 = h3c.H3Connection(self.quic)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.setblocking(False)
+        self.streams, self.terminated = {}, None
+        self.quic.connect(("127.0.0.1", port), time.monotonic())
+        handshake = []
+        self.on_event = lambda ev: handshake.append(ev) if isinstance(ev, qe.HandshakeCompleted) else None
+        if not self.pump(5, lambda: handshake):
+            raise AssertionError("no HTTP/3 handshake")
+
+    def stream(self, sid):
+        return self.streams.setdefault(sid, {"status": None, "fields": {}, "body": bytearray(), "ended": False, "reset": None})
+
+    def pump(self, seconds, until=None):
+        """Runs the connection for `seconds` or until `until()` is true; False when it ran out."""
+        end = time.monotonic() + seconds
+        while True:
+            now = time.monotonic()
+            for data, addr in self.quic.datagrams_to_send(now):
+                self.sock.sendto(data, addr)
+            while (ev := self.quic.next_event()) is not None:
+                self.on_event(ev)
+                if isinstance(ev, qe.ConnectionTerminated):
+                    self.terminated = ev
+                elif isinstance(ev, qe.StreamReset):
+                    self.stream(ev.stream_id)["reset"] = ev.error_code
+                for h in self.h3.handle_event(ev):
+                    if isinstance(h, (H3Headers, H3Data)):
+                        st = self.stream(h.stream_id)
+                        if isinstance(h, H3Headers):
+                            st["fields"] = {k.decode(): v.decode() for k, v in h.headers}
+                            st["status"] = int(st["fields"].get(":status", 0))
+                        else:
+                            st["body"] += h.data
+                        st["ended"] = st["ended"] or h.stream_ended
+            if until and until():
+                return True
+            if self.terminated or now >= end:
+                return False
+            t = self.quic.get_timer()
+            wait = end - now if t is None else max(0.0, min(end, t) - now)
+            r, _, _ = select.select([self.sock], [], [], wait)
+            if r:
+                for _ in range(256):
+                    try:
+                        data, addr = self.sock.recvfrom(65536)
+                    except BlockingIOError:
+                        break
+                    self.quic.receive_datagram(data, addr, time.monotonic())
+            elif (t := self.quic.get_timer()) is not None and time.monotonic() >= t:
+                self.quic.handle_timer(time.monotonic())
+
+    def request(self, path, encoding=None):
+        sid = self.quic.get_next_available_stream_id()
+        fields = [(b":method", b"GET"), (b":scheme", b"https"), (b":authority", b"localhost"), (b":path", path.encode())]
+        if encoding:
+            fields.append((b"accept-encoding", encoding.encode()))
+        self.h3.send_headers(sid, fields, end_stream=True)
+        return self.stream(sid), sid
+
+    def get(self, path, encoding=None, seconds=10):
+        """The stream's answer once it ended, was reset or the time ran out (then neither is set)."""
+        st, _ = self.request(path, encoding)
+        self.pump(seconds, lambda: st["ended"] or st["reset"] is not None)
+        return st
+
+    def close(self):
+        try:
+            self.quic.close()
+            self.pump(0.2)
+        finally:
+            self.sock.close()
+
+
+def h3_text(st):
+    """What an answer that is not whole looks like, for a row's message."""
+    if st["reset"] is not None:
+        return f"reset 0x{st['reset']:x} after {len(st['body'])} bytes (status {st['status']})"
+    return f"status {st['status']}, {len(st['body'])} bytes, {'ended' if st['ended'] else 'not ended'}"
+
+
 def decode(coding, data):
     if coding == "gzip":
         return zlib.decompress(data, 31)
@@ -311,24 +424,31 @@ class Server:
                  'proxy = { buffering = false, max_connections = 1, queue_wait = 2 }\n')
         self.ports = {}
         sites = ""
+        # The TLS sites also answer HTTP/3 (h3 in protocols opens every TLS listener's port over UDP):
+        # the h3 rows use them; the slots and the cut origin's pools are shared with the plain sites.
+        tls = f'tls = {{ cert = "{root}/cert.pem", key = "{root}/key.pem" }}\n'
         for name, extra in (("buffered", 'response_compression = { enabled = true }\n'),
                             ("streamed", 'proxy = { buffering = false }\n'),
                             ("streamed-compressed", 'proxy = { buffering = false }\nresponse_compression = { enabled = true }\n'),
-                            ("tls", f'tls = {{ cert = "{root}/cert.pem", key = "{root}/key.pem" }}\nresponse_compression = {{ enabled = true }}\n'),
+                            ("tls", tls + 'response_compression = { enabled = true }\n'),
+                            ("h3", tls + 'proxy = { buffering = false }\n'),
+                            ("h3-streamed-compressed", tls + 'proxy = { buffering = false }\nresponse_compression = { enabled = true }\n'),
                             ("slots", None),
                             ("slots-compressed", 'response_compression = { enabled = true, compress_event_streams = true }\n'),
-                            ("cut", None)):
+                            ("h3-slots", tls),
+                            ("cut", None),
+                            ("h3-cut", tls)):
             port = free_port()
             while port in self.ports.values():
                 port = free_port()
             self.ports[name] = port
-            if name.startswith("slots"):
+            if "slots" in name:
                 sites += f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{port}"]\n' + slots + (extra or "")
                 continue
-            if name == "cut":  # a streamed answer whose origin goes quiet past read_timeout
+            if "cut" in name:  # a streamed answer whose origin goes quiet past read_timeout
                 sites += (f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{port}"]\n'
                           f'upstream = "http://127.0.0.1:{self.cut_origin.server_address[1]}"\napp = "proxy"\n'
-                          'proxy = { buffering = false, read_timeout = 1 }\n')
+                          'proxy = { buffering = false, read_timeout = 1 }\n' + (extra or ""))
                 continue
             sites += f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{port}"]\n' + upstream + extra
         # A CGI script that prints its whole answer, with its length, and runs on for a second with its
@@ -342,16 +462,17 @@ class Server:
         quiet = root / "cgi" / "quiet.cgi"  # its head and a line, then quiet past cgi.read_timeout
         quiet.write_text("#!/bin/sh\nprintf 'Content-Type: text/event-stream\\r\\n\\r\\ndata: one\\n\\n'\nsleep 3\n")
         quiet.chmod(0o755)
-        self.ports["cgi"] = free_port()
-        while list(self.ports.values()).count(self.ports["cgi"]) > 1:
-            self.ports["cgi"] = free_port()
-        sites += (f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{self.ports["cgi"]}"]\nroot = "{root}/www"\n'
-                  f'[[site.location]]\npath = "/cgi/"\nalias = "{root}/cgi"\ncgi = {{ buffering = false }}\n'
-                  f'[[site.location]]\npath = "/cgi-cut/"\nalias = "{root}/cgi"\ncgi = {{ buffering = false, read_timeout = 1 }}\n')
+        for name, extra in (("cgi", ""), ("h3-cgi", tls)):
+            self.ports[name] = free_port()
+            while list(self.ports.values()).count(self.ports[name]) > 1:
+                self.ports[name] = free_port()
+            sites += (f'[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:{self.ports[name]}"]\nroot = "{root}/www"\n' + extra +
+                      f'[[site.location]]\npath = "/cgi/"\nalias = "{root}/cgi"\ncgi = {{ buffering = false }}\n'
+                      f'[[site.location]]\npath = "/cgi-cut/"\nalias = "{root}/cgi"\ncgi = {{ buffering = false, read_timeout = 1 }}\n')
         # idle_timeout below the quiet of /later/5, so that the HTTP/1 rows tell a stream waiting on its
-        # origin from an idle connection quickly.
+        # origin from an idle connection quickly (and HTTP/3's idle timeout is the same 3 s).
         (root / "agensio.toml").write_text(
-            '[server]\nworkers = 1\nprotocols = ["h1", "h2", "h2c"]\nidle_timeout = 3\n'
+            '[server]\nworkers = 1\nprotocols = ["h1", "h2", "h2c", "h3"]\nidle_timeout = 3\n'
             f'pid_file = "{root}/agensio.pid"\nstate_dir = "{root}/state"\n'
             f'[log]\naccess = "off"\nerror = "{root}/error.log"\n' + sites)
         self.error_log = root / "error.log"
@@ -643,6 +764,138 @@ def row_cut_h2_logged(srv):
     return None
 
 
+# ---- HTTP/3: before 0.1.0-alpha.142 every streamed answer was reset with H3_INTERNAL_ERROR after its
+# application had run (the alpha.141 report's F1) ----
+
+def rss_kb(pid):
+    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith("VmRSS:"):
+            return int(line.split()[1])
+    return 0
+
+
+def row_h3_streamed(srv):
+    c = H3(srv.ports["h3"])
+    try:
+        for path, want in (("/rnd/100000", rnd_body(100_000)), ("/rnd/5000000", rnd_body(5_000_000)), ("/pause/3", pause_body(3))):
+            st = c.get(path, seconds=20)
+            if st["status"] != 200 or not st["ended"]:
+                return f"{path}: {h3_text(st)}"
+            fail = compare(path, want, None, st["fields"].get("content-encoding"), bytes(st["body"]))
+            if fail:
+                return fail
+            length = st["fields"].get("content-length")
+            if path.startswith("/rnd/") and length != str(len(want)):
+                return f"{path}: content-length {length} (the origin sent {len(want)})"
+            if path.startswith("/pause/") and length is not None:
+                return f"{path}: content-length {length} on an answer of unknown length"
+    finally:
+        c.close()
+    return None
+
+
+def row_h3_cgi(srv):
+    for _ in range(3):
+        c = H3(srv.ports["h3-cgi"])
+        try:
+            st = c.get("/cgi/linger.cgi")
+        finally:
+            c.close()  # the client leaves at once; the script runs on for a second
+        if st["status"] != 200 or bytes(st["body"]) != b"ok" or not st["ended"]:
+            return "the CGI answer: " + h3_text(st)
+    time.sleep(1.5)  # past the exchanges' slow tick and the scripts' end
+    if srv.process.poll() is not None:
+        return f"the server exited ({srv.process.returncode}) after clients left lingering CGI answers"
+    status = quick(srv.ports["slots"])
+    return None if status.startswith("HTTP/1.1 200") else f"the next request afterwards: {status}"
+
+
+def row_h3_quiet_stream(srv):
+    c = H3(srv.ports["h3-slots"], idle=3.0)
+    start = time.monotonic()
+    try:
+        st = c.get("/later/5", seconds=10)
+    finally:
+        c.close()
+    if st["status"] != 200:
+        return "the event stream itself: " + h3_text(st)
+    if b"data: two" not in st["body"] or not st["ended"]:
+        why = f"the connection closed (0x{c.terminated.error_code:x})" if c.terminated else h3_text(st)
+        return f"cut after {time.monotonic() - start:.1f} s, before the origin's second event (idle timeout 3 s): {why}"
+    return None
+
+
+def row_h3_backpressure(srv):
+    c = H3(srv.ports["h3-slots"])
+    try:
+        st, _ = c.request("/flood/6")
+        if not c.pump(5, lambda: len(st["body"]) >= 256 * 1024):
+            return "the flood: " + h3_text(st)
+        before = rss_kb(srv.process.pid)
+        time.sleep(2)  # the client reads and acknowledges nothing; the origin goes on sending
+        grown = rss_kb(srv.process.pid) - before
+        got = len(st["body"])
+        resumed = c.pump(8, lambda: len(st["body"]) >= got + 256 * 1024)
+    finally:
+        c.close()
+    if grown > 32 * 1024:
+        return f"the server grew {grown // 1024} MB in 2 s while its client read nothing"
+    print(f"  the server's RSS {grown:+d} KB while the client read nothing for 2 s; {len(st['body'])} bytes in all")
+    if not resumed:
+        return "the answer did not go on once the client read again: " + h3_text(st)
+    time.sleep(0.5)
+    status = quick(srv.ports["slots"])
+    return None if status.startswith("HTTP/1.1 200") else f"the next request through the slot: {status}"
+
+
+def left_h3(srv, name, how):
+    c = H3(srv.ports["h3-slots"])
+    try:
+        st, sid = c.request(f"/hold/{name}")
+        if not c.pump(5, lambda: len(st["body"]) > 0):
+            return "no DATA from the event stream: " + h3_text(st)
+        left = time.monotonic()
+        if how == "stop":  # a browser's cancel of a GET: STOP_SENDING with H3_REQUEST_CANCELLED
+            c.quic.stop_stream(sid, 0x10C)
+            c.pump(0.2)
+    finally:
+        c.close()  # "close": the connection's CONNECTION_CLOSE
+    while name not in HOLD_CLOSED and time.monotonic() < left + 3:
+        time.sleep(0.05)
+    closed = HOLD_CLOSED.get(name)
+    if closed is None or closed - left > 2:
+        return f"the origin's connection still open {time.monotonic() - left:.1f} s after the client's {how}"
+    status = quick(srv.ports["slots"])
+    return None if status.startswith("HTTP/1.1 200") else f"the next request through the slot: {status}"
+
+
+def row_left_h3_stop(srv):
+    return left_h3(srv, "h3s", "stop")
+
+
+def row_left_h3_close(srv):
+    return left_h3(srv, "h3c", "close")
+
+
+def row_cut_h3_logged(srv):
+    for port, path, key in ((srv.ports["h3-cut"], "/later/4", "(proxy.read_timeout)"),
+                            (srv.ports["h3-cgi"], "/cgi-cut/quiet.cgi", "(cgi.read_timeout)")):
+        c = H3(port)
+        try:
+            st = c.get(path, seconds=6)
+        finally:
+            c.close()
+        if st["status"] != 200 or not st["body"]:
+            return f"{path}: {h3_text(st)}"
+        if st["reset"] != 0x10C:
+            return f"{path}: {h3_text(st)}, not H3_REQUEST_CANCELLED, though its application went quiet past read_timeout"
+        line = logged(srv, ["http3", path, "read_timeout", key])
+        if line is None:
+            return f"{path}: cut by read_timeout, and no error-log line names it"
+        print("  " + line)
+    return None
+
+
 ROWS = {
     "h2c-pieces": row_h2c_pieces,
     "h2-window-during-pull": row_h2_window_during_pull,
@@ -657,6 +910,13 @@ ROWS = {
     "left-h1-cgi": row_left_h1_cgi,
     "cut-h1-logged": row_cut_h1_logged,
     "cut-h2-logged": row_cut_h2_logged,
+    "h3-streamed": row_h3_streamed,
+    "h3-cgi": row_h3_cgi,
+    "h3-quiet-stream": row_h3_quiet_stream,
+    "h3-backpressure": row_h3_backpressure,
+    "left-h3-stop": row_left_h3_stop,
+    "left-h3-close": row_left_h3_close,
+    "cut-h3-logged": row_cut_h3_logged,
 }
 
 
@@ -674,6 +934,9 @@ def main():
         srv = Server(args.binary, Path(directory))
         try:
             for r in rows:
+                if "h3" in r and QuicConnection is None:
+                    print(f"{r}: skip (aioquic is not installed)", flush=True)
+                    continue
                 try:
                     fail = ROWS[r](srv)
                 except Exception as e:  # noqa: BLE001: a client that could not do its part fails the row

@@ -12,6 +12,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -50,6 +51,16 @@ public:
     static constexpr std::uint64_t kExcessiveLoad = 0x107;       // H3_EXCESSIVE_LOAD: the transport's reset budget closes with it
     static constexpr std::uint64_t kStreamWindowMax = 1u << 20;  // a body's window, as HTTP/2's
     static constexpr std::uint64_t kDiscardMax = 64 * 1024;      // an unread body is drained this far, then STOP_SENDING
+    // A streamed answer's bounds (design-http3 7.3): a read while fewer than kReadAhead bytes wait for
+    // packets, the connection's blocks at most kConnBlocks (1 MB, what it lets a client send,
+    // initial_max_data), a stream's at most kStreamBlocks (half, so one answer never holds them all), a
+    // read's room at least kMinPiece bytes (a compressed body's flush needs some), each piece behind
+    // kDataHeader bytes.
+    static constexpr std::uint64_t kReadAhead = 64 * 1024;
+    static constexpr std::size_t kStreamBlocks = 32;
+    static constexpr std::size_t kConnBlocks = 64;
+    static constexpr std::size_t kMinPiece = 512;
+    static constexpr std::size_t kDataHeader = 5;  // the type (0x00) and the length as a 4-byte varint (RFC 9000 16)
 
     Http3Connection(Endpoint& ep, Worker& worker, std::shared_ptr<const Generation> gen, const Listener* listener,
                     const Config& cfg, Dispatcher& dispatcher, SSL_CTX* ctx, const quic::PacketHeader& initial,
@@ -89,6 +100,7 @@ public:
             fresh.body_source.owner = this;
             fresh.body_source.stream = &fresh;
             fresh.q.owner = &fresh;
+            fresh.q.blocks.budget(&blocks_held_);
         });
         s.kind = quic::stream_is_bidi(id) ? H3Stream::Kind::request : H3Stream::Kind::peer_uni;
         s.since = now_;
@@ -176,8 +188,9 @@ public:
             return close_stream(s);
         }
         // A cancelled request (RFC 9114 4.1.1): whatever we were doing stops, our side is reset.
-        if (s.upstream) {
-            s.upstream->cancel();
+        stop_streaming(s);
+        if (s.upstream) {  // still in flight, or the source of an answer streaming
+            s.upstream->reader_gone();
             s.upstream.reset();
         }
         if (s.pending_handler) deliver_error(s, asio::error::operation_aborted);
@@ -191,8 +204,9 @@ public:
     void on_stop_sending(quic::QuicStream& q, std::uint64_t code) {
         H3Stream& s = of(q);
         if (s.kind == H3Stream::Kind::our_uni) return connection_error(err::closed_critical_stream, "STOP_SENDING on a critical stream");
-        if (s.upstream && !s.responded) {
-            s.upstream->cancel();
+        stop_streaming(s);
+        if (s.upstream) {  // still in flight, or the source of an answer streaming: the client wants none of it
+            s.upstream->reader_gone();
             s.upstream.reset();
         }
         if (!q.send_done && !q.reset_sent) quic_.stream_reset(q, code);  // RFC 9000 3.5: the code is copied
@@ -275,8 +289,9 @@ public:
         closed_ = true;
         for (auto& sp : streams_.all()) {
             H3Stream& s = *sp;
-            if (s.upstream) {
-                s.upstream->cancel();
+            stop_streaming(s);
+            if (s.upstream) {  // a read out on it is answered from the loop, and finds the connection closed
+                s.upstream->reader_gone();
                 s.upstream.reset();
             }
             if (s.pending_handler) deliver_error(s, asio::error::operation_aborted);
@@ -364,7 +379,7 @@ private:
                     deliver(s, take);
                     continue;
                 }
-                if (s.responded) {  // an unread body after the answer: drained up to a point
+                if (s.responded && !s.streaming) {  // an unread body after the answer: drained up to a point
                     const std::size_t take = std::min<std::size_t>(avail, static_cast<std::size_t>(s.frame_remaining));
                     if (take == 0) break;
                     quic_.stream_consumed(q, take);
@@ -498,9 +513,13 @@ private:
     }
 
 public:
-    // The transport is about to build packets: the decoder stream's pending instructions
-    // (an insert count increment for inserts no section acknowledged) go on it now.
+    // The transport is about to build packets: streamed answers read their next pieces, and the
+    // decoder stream's pending instructions (an insert count increment for inserts no section
+    // acknowledged) go on it now.
     void before_produce() {
+        if (streaming_)  // streamed answers: their next pieces, where the last turn and the acknowledgements left room
+            for (auto& sp : streams_.all())
+                if (sp->streaming && !sp->pulling) pull(*sp);
         if (ici_due_) {
             decoder_.insert_count_increment(qdec_.q.head);
             ici_due_ = false;
@@ -557,7 +576,9 @@ private:
                 auto self = this->shared_from_this();
                 auto done = [self, sp, gen] {
                     if (sp->gen != gen || self->closed_) return;
-                    sp->upstream.reset();
+                    // An answer streaming from the exchange keeps it, as HTTP/2 does: a reset, a STOP_SENDING
+                    // or the close ends it at once (reader_gone), even while a read waits on its origin.
+                    if (!std::holds_alternative<std::unique_ptr<StreamBody>>(sp->stream.response.body)) sp->upstream.reset();
                     self->respond(*sp);
                     self->flush_if_outside();
                 };
@@ -578,7 +599,8 @@ private:
     }
 
     // The response is filled: a HEADERS frame, the DATA frame's header, the body by
-    // reference, the FIN; the transport frames it from there.
+    // reference, the FIN; the transport frames it from there. A streamed body follows its
+    // HEADERS frame piece by piece (stream_body).
     void respond(H3Stream& s) {
         if (s.closed || s.responded || closed_) return;
         Response& r = s.stream.response;
@@ -600,11 +622,15 @@ private:
                 q.file_len = f->size;
                 body_len = f->size;
             } else if (std::holds_alternative<std::unique_ptr<StreamBody>>(r.body)) {
-                // A streamed body (an unbuffered upstream) is phase I1b: the stream is reset.
-                s.responded = true;
-                s.unsent_status = 500;  // the server's limit, not the client's leaving
-                quic_.stream_reset(q, err::internal);
-                return;
+#ifdef AGENSIO_INTEROP
+                if (hq_) {  // hq-interop serves files only
+                    s.responded = true;
+                    s.unsent_status = 500;
+                    quic_.stream_reset(q, err::internal);
+                    return;
+                }
+#endif
+                return stream_body(s);
             }
         }
 #ifdef AGENSIO_INTEROP
@@ -644,6 +670,14 @@ private:
             response_fields::apply(s.stream, *rules, [&](std::string_view name, std::string_view value) { append_lower(sec, name, value, s.section); });
         else
             for (const HeaderField& f : r.headers) append_lower(sec, f.name, f.value, s.section);
+        if (const StreamBody* source = source_of(r)) {  // a streamed body's length, when its source declared one (as HTTP/2)
+            s.source_sized = source->length(s.source_remaining);
+            if (s.source_sized) {
+                char digits[24];
+                const auto end = std::to_chars(digits, digits + sizeof digits, s.source_remaining).ptr;
+                qpack::append_field(sec, "content-length", std::string_view(digits, static_cast<std::size_t>(end - digits)));
+            }
+        }
         std::string& px = s.section;  // free at this point: the request's section is long decoded
         px.clear();
         encoder_.prefix(px);
@@ -706,6 +740,131 @@ private:
         q.fin_delivered = true;
         s.body_done = true;
         maybe_close(s);
+    }
+
+    // ---- a streamed answer (design-http3 7.3) ----
+
+    static StreamBody* source_of(Response& r) noexcept {
+        auto* p = std::get_if<std::unique_ptr<StreamBody>>(&r.body);
+        return p ? p->get() : nullptr;
+    }
+
+    // The HEADERS frame goes at once; the body follows piece by piece as its source gives it and the
+    // stream has room, each piece a DATA frame, the FIN after the source's end.
+    void stream_body(H3Stream& s) {
+        quic::QuicStream& q = s.q;
+        q.total = q.head.size();
+        q.fin = false;
+        s.responded = true;
+        s.streaming = true;
+        ++streaming_;
+        quic_.keep_alive(true);  // a source that pauses is not an idle connection (RFC 9000 10.1.2)
+        quic_.stream_ready(q);
+        pull(s);
+    }
+
+    // The next pieces, while the stream has room: fewer than kReadAhead bytes waiting for packets (the
+    // client's window, the congestion window or the client's acknowledgements hold the rest back), the
+    // stream's blocks and the connection's under their caps. The acknowledgements free blocks, and each
+    // turn of the packetiser asks again (before_produce). A read the source answers at once is the
+    // loop's next turn; one answered later goes on from on_piece. One read at a time.
+    void pull(H3Stream& s) {
+        quic::QuicStream& q = s.q;
+        for (unsigned turn = 0; turn < 16 && s.streaming && !s.pulling && !closed_; ++turn) {
+            StreamBody* source = source_of(s.stream.response);
+            if (!source) return;
+            if (s.source_sized && s.source_remaining == 0) return end_of_source(s);
+            if (q.total - q.next >= kReadAhead) return;
+            if (q.blocks.needs_block(kDataHeader + kMinPiece) && (q.blocks.count() >= kStreamBlocks || blocks_held_ >= kConnBlocks)) return;
+            std::size_t room = 0;
+            s.piece = q.blocks.room(q.total, kDataHeader + kMinPiece, room);
+            std::size_t want = room - kDataHeader;
+            if (s.source_sized) want = static_cast<std::size_t>(std::min<std::uint64_t>(want, s.source_remaining));
+            s.pulling = true;
+            s.read_inline = true;
+            source->async_read(s.piece + kDataHeader, want,
+                               [self = this->shared_from_this(), sp = &s](std::error_code ec, std::size_t n) { self->on_piece(*sp, ec, n); });
+            s.read_inline = false;
+        }
+    }
+
+    // A read answered: the piece's DATA frame header written in front of its bytes, the bytes made
+    // the stream's. A stream closed meanwhile is released only now (its block was the read's buffer).
+    void on_piece(H3Stream& s, std::error_code ec, std::size_t n) {
+        s.pulling = false;
+        if (s.closed) {
+            if (s.defer_release) release(s);
+            return;
+        }
+        if (!s.streaming || closed_) return;  // reset, or the connection gone: nothing more is wanted
+        if (ec || (n == 0 && s.source_sized && s.source_remaining > 0)) return body_failed(s, ec);
+        if (n == 0) return end_of_source(s);
+        quic::QuicStream& q = s.q;
+        if (s.source_sized) {  // never more than declared: the surplus is not this answer's
+            n = static_cast<std::size_t>(std::min<std::uint64_t>(n, s.source_remaining));
+            s.source_remaining -= n;
+        }
+        auto* h = reinterpret_cast<unsigned char*>(s.piece);
+        h[0] = static_cast<unsigned char>(frame::data);
+        quic::write_varint_fixed(h + 1, n, 4);
+        q.blocks.appended(kDataHeader + n);
+        q.total += kDataHeader + n;
+        s.body_bytes += n;
+        ++s.pieces;
+        quic_.stream_ready(q);
+        if (s.source_sized && s.source_remaining == 0) end_of_source(s);  // the FIN with the last piece
+        if (s.read_inline) return;  // the pull loop goes on
+        pull(s);
+        flush_if_outside();
+    }
+
+    void end_of_source(H3Stream& s) {
+        stop_streaming(s);
+        s.q.fin = true;
+        quic_.stream_ready(s.q);
+    }
+
+    // The source failed, or ended short of the length it declared: the client sees the answer
+    // cancelled, never a false end (RFC 9114 4.1.1: a response abandoned after processing ends with
+    // H3_REQUEST_CANCELLED, in both directions), and the error log says why, as HTTP/1 and HTTP/2 do.
+    void body_failed(H3Stream& s, std::error_code ec) {
+        if (ErrorLog* log = dispatcher_.error_log()) {
+            const StreamBody* source = source_of(s.stream.response);
+            const std::string why = ec && source ? source->failure() : std::string();
+            if (log->enabled(why.empty() ? LogLevel::info : LogLevel::error)) {
+                const Request& req = s.stream.request;
+                const std::string line =
+                    "http3 " + std::string(remote_for(s)) + " (" +
+                    (s.site && !s.site->server_names.empty() ? s.site->server_names.front() : std::string("-")) + " " +
+                    log_text(req.method_name) + " " + log_text(req.target.substr(0, req.target.find('?'))) +
+                    "): the answer was cut mid-stream: " +
+                    (!why.empty() ? why : ec ? ec.message() : std::string("the source ended short of the length it declared"));
+                if (why.empty()) log->info(line);
+                else log->error(line);
+            }
+        }
+        stop_streaming(s);
+        quic::QuicStream& q = s.q;
+        if (!q.at_end() && !q.reset_received) quic_.stream_stop_sending(q, err::request_cancelled);
+        quic_.stream_reset(q, err::request_cancelled);
+        q.fin_delivered = true;
+        s.body_done = true;
+    }
+
+    void stop_streaming(H3Stream& s) noexcept {
+        if (!s.streaming) return;
+        s.streaming = false;
+        if (--streaming_ == 0) quic_.keep_alive(false);
+    }
+
+    // The body bytes of a streamed answer put into packets, for the access log: all of them once its
+    // last byte went, else what went less the frame headers (short by a few bytes per piece not sent).
+    static std::uint64_t streamed_bytes(const H3Stream& s) noexcept {
+        const quic::QuicStream& q = s.q;
+        if (q.next >= q.total) return s.body_bytes;
+        const std::uint64_t sent = q.next > q.head_end() ? q.next - q.head_end() : 0;
+        const std::uint64_t frames = std::uint64_t{kDataHeader} * s.pieces;
+        return sent > frames ? sent - frames : 0;
     }
 
     // ---- the request body (BodyOwner) ----
@@ -899,8 +1058,9 @@ private:
     void close_stream(H3Stream& s) {
         if (s.closed) return;
         s.closed = true;
-        if (s.upstream) {
-            s.upstream->cancel();
+        stop_streaming(s);
+        if (s.upstream) {  // still in flight, or the source of an answer streaming: a read out is answered from the loop
+            s.upstream->reader_gone();
             s.upstream.reset();
         }
         if (s.pending_handler) deliver_error(s, asio::error::operation_aborted);
@@ -916,8 +1076,15 @@ private:
         if (&s == peer_qdec_) peer_qdec_ = nullptr;
         if (s.kind == H3Stream::Kind::request) encoder_.cancelled(s.qpack);  // its section's table references are free
         quic_.stream_closed(s.q);
-        streams_.release(s, live_->http2.max_concurrent_streams);
+        if (s.pulling) {  // a read is out into the stream's block: its answer releases the stream (on_piece)
+            s.defer_release = true;
+            return;
+        }
+        release(s);
     }
+
+    // Out of the table and, reset, into the pool for the next request (http/stream_pool.hpp).
+    void release(H3Stream& s) { streams_.release(s, live_->http2.max_concurrent_streams); }
 
     void connection_error(std::uint64_t code, std::string_view reason) {
         if (closed_) return;
@@ -1028,7 +1195,7 @@ private:
         // (the test VPS's report: a download cut after 209 KB logged as 20,000,000).
         const quic::QuicStream& q = s.q;
         rec.status = q.next > 0 ? s.stream.response.status : s.unsent_status;
-        rec.bytes = q.next > q.head_end() ? std::min(q.next - q.head_end(), q.body_len()) : 0;
+        rec.bytes = s.pieces ? streamed_bytes(s) : q.next > q.head_end() ? std::min(q.next - q.head_end(), q.body_len()) : 0;
         rec.referer = req.headers.get("referer");
         rec.user_agent = req.headers.get("user-agent");
         rec.user = s.stream.auth.user;  // verified by [[site.auth]], never the name a refused request claimed
@@ -1069,6 +1236,8 @@ private:
     bool hq_ = false;  // ALPN hq-interop: GET lines and raw bodies (pump_hq, respond)
 #endif
     unsigned inline_reads_ = 0;
+    unsigned streaming_ = 0;         // streams reading a streamed answer's source (the keep-alive while any does)
+    std::size_t blocks_held_ = 0;    // the send blocks every stream holds (quic/send_blocks.hpp), against kConnBlocks
     std::uint64_t streams_opened_ = 0;
 };
 

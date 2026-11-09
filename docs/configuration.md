@@ -3794,6 +3794,8 @@ Every HTTP/3 limit derives from keys you already know:
 | handshakes in progress per worker | fixed | 1,024; see `http3.retry` |
 | stream resets a client may send per second (`RESET_STREAM`, `STOP_SENDING`) before the connection closes with `H3_EXCESSIVE_LOAD` | `http2.max_concurrent_streams` | 128 |
 | protocol glitches (flow-control or stream credit that does not raise the limit) before `PROTOCOL_VIOLATION` | fixed | 100 |
+| a streamed answer's bytes held until the client acknowledges them (an application with `buffering = false`, an event stream, CGI, an answer compressed in pieces); past it the server reads no more from the application until the client catches up | fixed | 512 KB a stream, 1 MB a connection |
+| a streamed answer whose application pauses (an event stream between events): the connection kept with a `PING` | the idle timeout, bounded by the location's `read_timeout` | every 7.5 s (half `idle_timeout`, at most 15 s) |
 
 The one key of its own:
 
@@ -3822,9 +3824,11 @@ Requests over HTTP/3 are logged as `"GET /path HTTP/3.0"` and PHP sees
 `SERVER_PROTOCOL=HTTP/3.0`; `agensio ctl status` lists `h3` among a listener's protocols.
 A reload that removes h3 from a listener (or the listener itself) tells that listener's
 HTTP/3 connections GOAWAY and closes them with H3_NO_ERROR, then closes its UDP sockets;
-a reload that adds h3 to a TLS listener opens them. Not yet (the design's I1b to I4):
-request bodies from unbuffered upstreams over h3, 0-RTT, ECN, NEW_TOKEN for later
-connections.
+a reload that adds h3 to a TLS listener opens them. An answer an application streams
+(`buffering = false`, an event stream, CGI) goes over HTTP/3 as it comes, as over HTTP/1.1
+and HTTP/2 (0.1.0-alpha.142; before, it was reset with `H3_INTERNAL_ERROR` once the
+application had answered). Not yet (the design's I1b to I4): 0-RTT, ECN, NEW_TOKEN for
+later connections.
 
 ## 18. Connection limits
 

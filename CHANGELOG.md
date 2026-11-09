@@ -24,6 +24,17 @@
   test VPS's report on 0.1.0-alpha.141, which also asked for a line on the client's half-close:
   `docs/configuration.md` 8 now says that over HTTP/1.1 a client that closes its sending side after its
   request counts as gone, as nginx and Caddy count it.
+- **Fix: HTTP/3 carries streamed answers.** An answer an application streams (`buffering = false` on a
+  proxy, FastCGI or CGI location, an event stream, CGI) was reset over HTTP/3 with H3_INTERNAL_ERROR
+  once the application had answered: the request had run (a form posted, an order placed) and the
+  browser showed an error, while HTTP/1.1 and HTTP/2 streamed it. It now goes as it comes, as over
+  the other two: its head at once, with `Content-Length` when the application declared one, each
+  piece as the application sends it, read only as fast as the client takes it (at most 512 KB a
+  stream and 1 MB a connection held until the client acknowledges them); while the application
+  pauses, a PING keeps the connection past the idle timeout, as an event stream needs; a failure ends
+  the stream with H3_REQUEST_CANCELLED and the error-log line the other protocols write, and the
+  client's cancel or close ends the application's exchange at once, giving its slot back. Found by
+  the test VPS's report on 0.1.0-alpha.141 (F1); design in `docs/design-http3.md` 7.3.
 - **Fix: an HTTP/3 answer the client cancels no longer breaks its connection.** A client that cancels
   an answer still sending (a browser leaving a page, a download stopped: STOP_SENDING or RESET_STREAM)
   had its connection hurt three ways: the server's RESET_STREAM gave the whole answer's length as the

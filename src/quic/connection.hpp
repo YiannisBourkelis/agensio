@@ -201,6 +201,11 @@ public:
         s.stop_send_code = code;
         control_.push_back(&s);
     }
+    // The application waits on bytes to send (a streamed answer's source, design-http3 7.3): while it
+    // does, a PING goes out once nothing arrived for half the idle timeout, at most 15 s apart (RFC 9000
+    // 10.1.2: the peer's acknowledgement restarts both idle timers, and middleboxes forget a UDP flow
+    // after about 30 s). How long it waits is the source's to bound (an upstream's read_timeout).
+    void keep_alive(bool on) noexcept { keep_alive_ = on; }
     // The application is done with the stream (both directions finished or reset): the
     // peer may open another in its place.
     void stream_closed(QuicStream& s) noexcept {
@@ -457,6 +462,10 @@ public:
             app_.on_closed(false, 0);
             return;
         }
+        if (keep_alive_ && state_ == State::established && now + std::chrono::microseconds(500) >= keep_alive_at()) {
+            keep_alive_due_ = true;
+            last_ping_ = now;
+        }
         if (rx_prev_.valid() && now + std::chrono::microseconds(500) >= prev_keys_end_) rx_prev_.clear();  // RFC 9001 6.5
         const TimePoint lt = rec_.loss_timer(at_amplification_limit());
         if (lt != TimePoint::max() && now + std::chrono::microseconds(500) >= lt) {
@@ -502,6 +511,7 @@ public:
         } else {
             d = last_receive_ + idle_;
             if (state_ == State::handshaking && created_ + idle_ < d) d = created_ + idle_;
+            if (keep_alive_ && state_ == State::established && keep_alive_at() < d) d = keep_alive_at();
             const TimePoint lt = rec_.loss_timer(at_amplification_limit());
             if (lt < d) d = lt;
             if (rx_prev_.valid() && prev_keys_end_ < d) d = prev_keys_end_;
@@ -521,6 +531,8 @@ public:
     // fuzzer seals its packets with the same) and the peer's transport parameters at
     // generous values, so arbitrary 1-RTT packets meet streams, credit, acknowledgements,
     // losses and timers with real packet protection.
+    // The application space's next packet number: the harness acknowledges what was sent.
+    std::uint64_t fuzz_next_pn() const noexcept { return rec_.spaces[2].next_pn; }
     bool fuzz_establish(const unsigned char* secret, std::size_t len, TimePoint now, std::string_view alpn = {}) {
         fuzz_alpn_ = alpn;  // what alpn() reports, as if the handshake had chosen it (fuzz_h3_conn: "h3")
         if (!rx_[2].install(Suite::aes128gcm, secret, len, false)) return false;
@@ -1062,6 +1074,13 @@ private:
                     if (!s || !s->open) break;
                     if (it.len) s->acked.add(it.offset, it.offset + it.len);
                     if (it.fin) s->fin_acked = true;
+                    if (!s->blocks.empty()) {
+                        // A streamed body: the blocks the acknowledged prefix passed are freed, and a
+                        // range declared lost and acknowledged after all is not sent again from them.
+                        const std::uint64_t upto = s->acked.contiguous_from(0);
+                        s->blocks.release_below(upto);
+                        s->lost.remove_below(upto);
+                    }
                     if (s->trim_head) {  // a control stream: what is acknowledged in order is dropped
                         const std::uint64_t upto = s->acked.contiguous_from(s->head_base);
                         if (upto > s->head_base + 16384 && upto <= s->head_end()) {
@@ -1115,7 +1134,12 @@ private:
                     QUIC_TRACE("quic: lost stream=%llu off=%llu len=%u fin=%d found=%d\n", static_cast<unsigned long long>(it.id),
                                static_cast<unsigned long long>(it.offset), it.len, it.fin ? 1 : 0, s && s->open ? 1 : 0);
                     if (!s || !s->open || s->send_done || s->reset_sent) break;
-                    if (it.len) s->lost.add(it.offset, it.offset + it.len);
+                    if (it.len) {
+                        // A streamed body's blocks below the acknowledged prefix are freed: a range the peer
+                        // has after all (a probe's copy of it was acknowledged) is not sent again.
+                        const std::uint64_t from = s->blocks.empty() ? it.offset : std::max(it.offset, s->acked.contiguous_from(0));
+                        if (from < it.offset + it.len) s->lost.add(from, it.offset + it.len);
+                    }
                     if (it.fin) s->fin_sent = false;
                     if (s->has_unsent()) enqueue(*s);
                     break;
@@ -1171,6 +1195,13 @@ private:
 
     bool at_amplification_limit() const noexcept { return !address_validated_ && bytes_sent_ >= 3 * bytes_received_; }
 
+    // When the keep-alive's PING is due: half the idle timeout, at most 15 s, after the last packet
+    // received or the last PING, whichever is later.
+    TimePoint keep_alive_at() const noexcept {
+        const Duration every = std::min(idle_ / 2, Duration(std::chrono::seconds(15)));
+        return std::max(last_receive_, last_ping_) + every;
+    }
+
     bool ack_due(Space space, TimePoint now) const noexcept {
         const AckState& a = rec_.spaces[static_cast<unsigned>(space)].acks;
         if (a.eliciting_unacked == 0) return false;
@@ -1186,7 +1217,7 @@ private:
         if (ack_due(space, now) || rec_.probes[si] > 0) return true;
         if (!crypto_out_[si].lost.empty() || crypto_out_[si].sent < tls_.out(tls_level(si)).size()) return true;
         if (space != Space::application) return false;
-        if (handshake_done_due_ || max_data_due_ || max_streams_due_ || path_responses_ > 0 || path_challenge_due_ || !control_.empty() ||
+        if (handshake_done_due_ || max_data_due_ || max_streams_due_ || path_responses_ > 0 || path_challenge_due_ || keep_alive_due_ || !control_.empty() ||
             !credit_.empty() || !retire_due_.empty() || !new_cid_due_.empty())
             return true;
         return ready_head_ != nullptr && rec_.cwnd_room() >= kMinInitialDatagram;
@@ -1441,6 +1472,14 @@ private:
             const std::size_t n = put_ping(payload + w, room - w);
             if (n) { w += n; eliciting = in_flight = true; rec.items.push_back({ItemKind::mtu_probe, false, path_gen_, 0, 0}); }
         }
+        // The keep-alive: any ack-eliciting frame serves, a PING when the packet has none.
+        if (keep_alive_due_ && space == Space::application && !want_ping_) {
+            if (!eliciting) {
+                const std::size_t n = put_ping(payload + w, room - w);
+                if (n) { w += n; eliciting = in_flight = true; rec.items.push_back({ItemKind::ping, false, 0, 0, 0}); }
+            }
+            if (eliciting) keep_alive_due_ = false;
+        }
         // A probe needs an ack-eliciting packet: PING when nothing else is.
         if (rec_.probes[si] > 0) {
             if (!eliciting) {
@@ -1500,7 +1539,7 @@ private:
     }
 
     // The bytes [offset, offset + len) of a stream's send data into dst: the head, then the
-    // memory body or the file (through a chunk read ahead).
+    // memory body, the file (through a chunk read ahead) or a streamed body's blocks.
     bool copy_stream_bytes(QuicStream& s, std::uint64_t offset, std::size_t len, unsigned char* dst) noexcept {
         std::size_t done = 0;
         while (done < len) {
@@ -1514,6 +1553,7 @@ private:
                 done += n;
                 continue;
             }
+            if (!s.blocks.empty()) return s.blocks.copy(at, want, dst + done);  // a streamed body, by stream offset
             const std::uint64_t body_at = at - s.head_end();
             if (!s.mem.empty()) {
                 if (body_at >= s.mem.size()) return false;
@@ -1693,6 +1733,8 @@ private:
     bool ok_ = false;
     State state_ = State::handshaking;
     TimePoint created_, last_receive_;
+    TimePoint last_ping_{};                          // the keep-alive's last PING
+    bool keep_alive_ = false, keep_alive_due_ = false;  // keep_alive(); a PING to send
     Duration idle_{};
     Duration our_max_ack_delay_{};
     Cid odcid_, peer_cid_;

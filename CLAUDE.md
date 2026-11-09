@@ -964,7 +964,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   and close. `http3/connection.hpp` is HTTP/3 over it: the control and QPACK streams,
   request streams through `http/request_assembly.hpp` (the one copy HTTP/2 uses too) and
   `http/stream_pool.hpp`, the same dispatch as HTTP/2, answers as HEADERS and DATA frames
-  with the body referenced (a cache entry, a file read in 64 KB windows), request bodies
+  with the body referenced (a cache entry, a file read in 64 KB windows) or, streamed (a `StreamBody`,
+  alpha.142, design 7.3), read piece by piece into send blocks kept until acknowledged
+  (`quic/send_blocks.hpp`; reads paced by the packets, 512 KB a stream and 1 MB a connection, a PING
+  at half the idle timeout while the source pauses, H3_REQUEST_CANCELLED and the error line when it
+  fails, `reader_gone` on the client's cancel or close; before, reset with H3_INTERNAL_ERROR after the
+  application ran), request bodies
   pulled from the QUIC stream's buffer so credit returns as the handler reads; QPACK
   (`http3/qpack.*`; the static table generated from the RFC's text by `tools/gen-hpack-tables.py`
   and held byte for byte to RFC 9204's XML source by `test_static_tables_match_rfcs`, HPACK's to
@@ -1072,8 +1077,8 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   packet of a response), the way the probe-size bug of 2026-09-24 was found.
 - **Not yet**: directory listing, TLS-ALPN-01 / DNS-01 (wildcards), OCSP stapling, RFC 9218
   priorities, CONNECT over h2, HTTP/2 to origins; in HTTP/3 (design-http3 I1b to I4):
-  0-RTT, ECN, NEW_TOKEN, active migration, QUIC version 2, streamed upstream bodies,
-  the amplification row of the attack suite (a spoofed source).
+  0-RTT, ECN, NEW_TOKEN, active migration, QUIC version 2, the amplification row of the
+  attack suite (a spoofed source).
 
 ## Performance notes (measured, keep current)
 

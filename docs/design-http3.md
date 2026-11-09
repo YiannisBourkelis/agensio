@@ -453,10 +453,24 @@ HTTP/2 write-stall rule).
 The send side of a stream keeps no copy of a memory body: the response's bytes stay
 where they are (a cache entry through its `shared_ptr`, the handler's `MemoryBody`) and
 the stream keeps offsets: sent, acknowledged in order, and the lost ranges to resend
-first. A file body is read into chunks (64 KB, `preadv`) kept until acknowledged; a
-`StreamBody` chunk likewise, since it cannot be pulled twice; at most 512 KB of such
-chunks per connection (design-http2's "at most 8 chunks in flight"), and in flight is
-bounded by the congestion window in any case.
+first. A file body is read again from the file for a lost range, through a 64 KB window
+read ahead per stream. A streamed body (`StreamBody`, 7.3, 0.1.0-alpha.142) cannot be
+pulled twice, so its bytes are appended into the stream's send blocks
+(`quic/send_blocks.hpp`): 16 KB blocks taken as the pieces arrive, each piece with its DATA
+frame header inside one block (a block may end short; the offsets run on), freed as the
+acknowledged prefix passes them, never the last, which a read may be writing into. A range
+declared lost after its bytes were acknowledged through another copy (a probe's) is not
+sent again from freed blocks (`apply_lost`; `fuzz_quic_conn` answers every other request
+this way and traps on a byte it cannot copy). At most 512 KB of blocks a stream and 1 MB a
+connection (the receive window it grants, `initial_max_data`); reads stop while 64 KB wait
+for packets, so a stream holds what is in flight and what its windows hold back.
+
+A reset ends the send side for good: the stream leaves the ready list and never comes
+back (a MAX_STREAM_DATA after it sends nothing), and RESET_STREAM gives the bytes sent as
+the final size (RFC 9000 4.5). Until 0.1.0-alpha.142 the stream was only marked unready,
+so it stayed linked and cut off the streams behind it once it closed, and the final size
+was the whole answer's, past the client's window (FLOW_CONTROL_ERROR at the client for a
+download it cancelled).
 
 ### 6.7 The packetiser: one datagram batch per receive batch
 
@@ -538,7 +552,7 @@ per wake-up, the HTTP/2 rule.
 | QPACK decoder table | at most 4 KB | the peer decides how much of it to use |
 | QPACK encoder table | at most 1 KB | as HTTP/2's |
 | per active stream | Stream (6.4 KB) + arena at the request's exact size + the gap map and body buffer up to its window | pooled at the concurrency limit, emptied by the idle shed, as HTTP/2 |
-| output in flight | memory bodies nothing; file and stream chunks at most 512 KB | 6.6 |
+| output in flight | memory bodies nothing; a 64 KB file window per stream reading a file (kept with the pooled stream, not capped per connection: up to 8 MB at 128 streams); streamed bodies' blocks at most 1 MB, 512 KB a stream | 6.6 |
 | idle connection, target | under 12 KB after the shed | HTTP/2 today 19 KB, of which 8 KB is the HPACK ring a client fills; the QPACK table is bounded at 4 KB |
 | worst case at the defaults | 16 KB + 4 KB + 128 x 18 KB + 1 MB + 512 KB, about 3.8 MB | the HTTP/2 number; nothing unbounded |
 
@@ -633,7 +647,32 @@ discarded up to 64 KB, then STOP_SENDING(H3_NO_ERROR), the HTTP/2 rule.
 The answer is HEADERS (7.2) then DATA frames from the body, FIN on the last; a HEAD or
 304 answer is HEADERS with FIN. 1xx are not sent. The client's RESET_STREAM or
 STOP_SENDING before the answer cancels the exchange (E9) and counts as a reset (the
-budget of `src/http/budgets.hpp`); after the answer it is nothing.
+budget of `src/http/budgets.hpp`); after the answer it ends a streamed answer's exchange
+and is nothing for any other.
+
+A streamed answer (an unbuffered upstream, CGI, a body compressed in pieces;
+0.1.0-alpha.142, the alpha.141 report's F1: until then it was reset with H3_INTERNAL_ERROR
+after its application had run): HEADERS at once, with `content-length` when the source
+declared one (held to it: a source that ends short fails, a surplus is dropped), then one
+DATA frame per piece the source gives, read into the send blocks (6.6) behind a 5-byte
+header (type 0x00 and the length as a 4-byte varint, RFC 9000 16, written once the piece
+is in), and the FIN after the source's end. The reads follow the packets, as HTTP/2's
+follow the writes: one at a time per stream, a read while fewer than 64 KB wait for
+packets and the blocks are under their caps, asked again at every turn of the packetiser
+(`before_produce`, after each acknowledgement), so a client that stops reading or
+acknowledging stops the reads, and the exchange's own read-ahead stops its origin. While a
+source pauses (an event stream between events) the connection sends a PING at half the
+idle timeout, at most every 15 s (RFC 9000 10.1.2), so it outlives the idle timeout as over
+HTTP/1 and HTTP/2; the location's `read_timeout` bounds the pause. A source that fails
+resets the stream with H3_REQUEST_CANCELLED, both directions (RFC 9114 4.1.1), and writes
+the error line HTTP/1 and HTTP/2 write (the report's F3); the client's STOP_SENDING,
+RESET_STREAM or the connection's close ends the exchange at once (`reader_gone`, as
+HTTP/2), and a stream closed with a read out is released when the source answers it, its
+block being the read's buffer. The access log counts the body bytes that went into
+packets. `tests/h2-streamed-bodies.py` runs it: whole and sized answers, CGI, an event
+stream quiet past the idle timeout, a client that reads nothing for 2 s while its origin
+floods, the client's STOP_SENDING and close (the origin's slot back within 2 s), and the cut
+logged.
 
 GOAWAY carries the highest stream id we will serve, sent at `max_requests_per_connection`,
 on reload retirement and on shutdown; new streams above it are reset with
@@ -866,7 +905,7 @@ time) and the same profile load (`profile-transport.txt` and the files before it
 | ACK frame with many ranges | CPU per frame | 32 ranges processed, the rest ignored; frames bounded by the packet | 32 | `fuzz_quic_packet` |
 | Connection id games (the 2024 quic-go class) | NEW_CONNECTION_ID with `Retire Prior To` floods, RETIRE floods | at most four active ids from the peer, CONNECTION_ID_LIMIT_ERROR beyond; the retirements a `Retire Prior To` demands are queued as one range, never one frame each; a retirement of an id we never issued is PROTOCOL_ERROR; retirements beyond the ids issued are glitches | 4 ids | `h3-attacks.py cid-flood` |
 | Stream flood, Rapid Reset over QUIC | streams beyond the limit; streams reset at once | STREAM_LIMIT_ERROR beyond MAX_STREAMS; the reset counter (RESET_STREAM and STOP_SENDING before the answer, resets we send) closes at 128 per second; the glitch budget | 128 streams, 128 resets per second, 100 glitches | `h3-attacks.py stream-flood`, `rapid-reset` |
-| Flow-control games | a zero window held, 1-byte MAX_STREAM_DATA dribbles, DATA_BLOCKED floods | planned: a write-stall rule (`idle_timeout` per stalled stream), not built: `src/http3` has no per-stream timer and `H3Stream::since` is set but not read (audit 2026-10-07, item 2.10); updates under 1 KB while more is pending are glitches | | `h3-attacks.py slow-read`, `dribble` |
+| Flow-control games | a zero window held, 1-byte MAX_STREAM_DATA dribbles, DATA_BLOCKED floods; a client that never reads a streamed answer | a streamed answer's reads stop while its bytes wait (512 KB a stream, 1 MB a connection, 7.3), test `h2-streamed-bodies.py h3-backpressure`; planned: a write-stall rule (`idle_timeout` per stalled stream), not built: `src/http3` has no per-stream timer and `H3Stream::since` is set but not read (audit 2026-10-07, item 2.10); updates under 1 KB while more is pending are glitches | | `h3-attacks.py slow-read`, `dribble` |
 | Reassembly memory | out-of-order STREAM and CRYPTO data held in gaps | bounded by the windows we granted (beyond is FLOW_CONTROL_ERROR) and the CRYPTO cap per level; the sum is 6.10 | 16 KB per level, the stream's window | `h3-attacks.py gaps`; `fuzz_quic_conn` |
 | QPACK bomb, blocked-stream hold, encoder-stream games | a huge entry referenced thousands of times; sections referencing inserts that never come; capacity games | the decoder table at most 4 KB, blocked streams at most 16 with at most 16 KB each, the decoded list stopped at the first byte over `max_header_size`, capacity above ours or an insert above the capacity is QPACK_ENCODER_STREAM_ERROR | 4 KB, 16 streams, 16 KB | `fuzz_qpack` differential; `h3-attacks.py qpack-bomb`, `blocked-hold` |
 | Control stream abuse | no SETTINGS first, a second SETTINGS, the control stream closed, frames on the wrong stream type, CANCEL_PUSH or PUSH_PROMISE, MAX_PUSH_ID games | the RFC's errors (7.1); reserved frame and stream types ignored, their bytes discarded and counted against the windows | | `fuzz_h3_frame`; `h3-attacks.py control-stream` |
@@ -1012,7 +1051,7 @@ packetiser with GSO (the external-source AEAD pass, path MTU, key update, path
 validation I1b); idle and close (the closing packet's rate limit is in, GOAWAY on reload
 and shutdown I1b); HTTP/3 framing, the control and QPACK streams, QPACK over the static
 table (the dynamic table both ways I1c), request streams through the shared assembler,
-answers with memory and file bodies (streamed upstream bodies I1b), request bodies
+answers with memory and file bodies (streamed bodies built 0.1.0-alpha.142, 7.3), request bodies
 pulled from the QUIC buffer; `"h3"` in `protocols` (the `http3.*` keys and `alt-svc`
 I1b); the unit vectors and the curl rows of the integration suite (the interop runner,
 the loss proxy, the fuzzers and the attack suite I2).

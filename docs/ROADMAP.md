@@ -1030,9 +1030,11 @@ share lifted into `src/http/` first. The RFCs are in `docs/rfc/`.
 - [x] I1b (2026-09-25) `alt-svc` on every HTTP/1 and HTTP/2 answer of a TLS listener
       that speaks h3 (`http3.alt_svc`); GOAWAY and the close on a reload that removes an
       h3 listener or its h3, endpoints opened for one a reload adds.
-- [ ] I1b (rest) Streamed upstream bodies (chunks kept until acknowledged), the body
-      source and budgets lifted to `src/http/`, the write-stall and body timeouts per
-      stream, NEW_TOKEN.
+- [x] I1b (0.1.0-alpha.142) Streamed answers (unbuffered upstreams, CGI, bodies
+      compressed in pieces): pieces read into send blocks kept until acknowledged, the
+      reads paced by the packets, the keep-alive PING while a source pauses (design 7.3).
+- [ ] I1b (rest) The body source and budgets lifted to `src/http/`, the write-stall and
+      body timeouts per stream, NEW_TOKEN.
 - [x] I1c (decoder side, 2026-09-24) QPACK's dynamic table: the decoder with the encoder
       and decoder streams, blocked sections and the rules-once marks; RFC 9204 appendix B
       as unit tests. On the way: a stream whose id arrived after a higher one was dropped

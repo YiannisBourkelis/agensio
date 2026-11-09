@@ -91,6 +91,19 @@ struct H3Stream {
     StreamBody::ReadHandler pending_handler;
     BodySource body_source;
 
+    // A streamed answer (a StreamBody: an unbuffered upstream, CGI, a body compressed in pieces): its
+    // pieces are read into the QUIC stream's send blocks, each behind its DATA frame header
+    // (design-http3 7.3), while the stream has room.
+    bool streaming = false;        // its source is read: the end not reached yet
+    bool pulling = false;          // a read of it is out
+    bool read_inline = false;      // the read is being started: an answer now is the pull loop's
+    bool defer_release = false;    // closed with a read out: released when the read is answered
+    bool source_sized = false;     // the source declared its length (content-length), held to it
+    std::uint64_t source_remaining = 0;
+    std::uint64_t body_bytes = 0;  // the body's bytes appended, for the access log
+    std::uint32_t pieces = 0;      // DATA frames appended
+    char* piece = nullptr;         // where the read's DATA frame starts, in the last block
+
     // Response progress.
     bool responded = false;
     bool finished = false;  // every byte acknowledged, or the reset sent
@@ -123,6 +136,10 @@ struct H3Stream {
         pending_buf = nullptr;
         pending_len = 0;
         pending_handler = nullptr;
+        streaming = pulling = read_inline = defer_release = source_sized = false;
+        source_remaining = body_bytes = 0;
+        pieces = 0;
+        piece = nullptr;
         responded = finished = logged = closed = false;
         unsent_status = 499;
         slot = 0;
