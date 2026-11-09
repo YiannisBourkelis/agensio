@@ -68,6 +68,7 @@
 #include <poll.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
 #include <sys/wait.h>
 #include "handlers/proxy.hpp"
 #include "core/headers.hpp"
@@ -14837,6 +14838,100 @@ static void test_quic_stateless() {
     CHECK(f.reason == "invalid token");
 }
 
+#ifdef __linux__
+// The worker's send batch over a real loopback socket (design-http3 6.1): what it folds into one GSO
+// message the kernel builds as one IP packet before it splits it, so a message may carry 65,507 bytes
+// over IPv4 (an IPv4 client of a dual-stack socket too) and 65,527 over IPv6, not 65,535. A message
+// in between was refused with EMSGSIZE and its datagrams dropped; a lost range sent again in the same
+// two sizes was dropped again, and the connection stalled (a 512 KB answer over HTTP/3, 2026-11-09).
+static void test_quic_send_batch() {
+    using namespace quic;
+    // Sends datagrams of these sizes to a receiver on `addr` through one batch; the datagrams and bytes
+    // that arrive, and what flush() counted as dropped. Nothing when the family is not available.
+    struct Got {
+        bool ran = false;
+        std::size_t messages = 0, dropped = 0, datagrams = 0, bytes = 0;
+    };
+    auto send_through = [](int family, const char* addr, const std::vector<std::size_t>& sizes) {
+        Got got;
+        const int rx = ::socket(family, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+        const int tx = ::socket(family, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+        sockaddr_storage to{};
+        socklen_t tolen = 0;
+        if (family == AF_INET) {
+            auto* a = reinterpret_cast<sockaddr_in*>(&to);
+            a->sin_family = AF_INET;
+            ::inet_pton(AF_INET, addr, &a->sin_addr);
+            tolen = sizeof(sockaddr_in);
+        } else {
+            auto* a = reinterpret_cast<sockaddr_in6*>(&to);
+            a->sin6_family = AF_INET6;
+            ::inet_pton(AF_INET6, addr, &a->sin6_addr);
+            tolen = sizeof(sockaddr_in6);
+        }
+        const int buf = 1 << 20;
+        ::setsockopt(rx, SOL_SOCKET, SO_RCVBUF, &buf, sizeof buf);
+        if (rx >= 0 && tx >= 0 && ::bind(rx, reinterpret_cast<sockaddr*>(&to), tolen) == 0 &&
+            ::getsockname(rx, reinterpret_cast<sockaddr*>(&to), &tolen) == 0) {
+            got.ran = true;
+            SendBatch batch;
+            for (std::size_t n : sizes) {
+                unsigned char* p = batch.reserve(n);
+                std::memset(p, 0x5a, n);
+                batch.commit(n, to, tolen);
+            }
+            got.messages = batch.messages();
+            got.dropped = batch.flush(tx);
+            std::vector<unsigned char> in(70000);
+            pollfd pf{rx, POLLIN, 0};
+            while (::poll(&pf, 1, 300) > 0) {
+                const ssize_t r = ::recv(rx, in.data(), in.size(), 0);
+                if (r <= 0) break;
+                ++got.datagrams;
+                got.bytes += static_cast<std::size_t>(r);
+            }
+        }
+        if (rx >= 0) ::close(rx);
+        if (tx >= 0) ::close(tx);
+        return got;
+    };
+    {
+        // A full datagram of a probed loopback path and the rest of a lost range: 65,508 bytes.
+        const Got g = send_through(AF_INET, "127.0.0.1", {47104, 18404});
+        CHECK(g.ran && g.messages == 2 && g.dropped == 0 && g.datagrams == 2 && g.bytes == 65508);
+        // At the limit they still go as one message.
+        const Got at = send_through(AF_INET, "127.0.0.1", {47104, 18403});
+        CHECK(at.ran && at.messages == 1 && at.dropped == 0 && at.datagrams == 2 && at.bytes == 65507);
+        // A 1,500-byte path's burst: 44 full datagrams and a last one of 740 bytes, 65,508 in all, was
+        // lost whole. It now goes as two messages.
+        std::vector<std::size_t> burst(44, 1472);
+        burst.push_back(740);
+        const Got b = send_through(AF_INET, "127.0.0.1", burst);
+        CHECK(b.ran && b.messages == 2 && b.dropped == 0 && b.datagrams == 45 && b.bytes == 65508);
+    }
+    {
+        // IPv6 takes 65,527: 65,528 was refused the same way. Skipped where the host has no ::1.
+        const Got g = send_through(AF_INET6, "::1", {47104, 18424});
+        CHECK(!g.ran || (g.dropped == 0 && g.datagrams == 2 && g.bytes == 65528));
+    }
+    {
+        // An MTU probe keeps a message of its own. On a 1,500-byte path the kernel refuses a probe of
+        // 2,944 bytes (EMSGSIZE), and the full datagram folded behind it went with it: a data packet
+        // lost once per connection, counted as congestion. Datagrams of one size still fold (the first
+        // two); the one after the probe starts a message, where it was the probe's second segment.
+        sockaddr_storage to{};
+        to.ss_family = AF_INET;
+        SendBatch batch;
+        batch.commit(1472, to, sizeof(sockaddr_in));
+        batch.commit(1472, to, sizeof(sockaddr_in));
+        batch.commit_alone(2944, to, sizeof(sockaddr_in));
+        batch.commit(1472, to, sizeof(sockaddr_in));
+        CHECK(batch.messages() == 3 && batch.datagrams() == 4);
+        batch.clear();
+    }
+}
+#endif
+
 static void test_quic() {
     using namespace quic;
     // Variable-length integers (RFC 9000 16): the RFC's examples and the boundaries.
@@ -16104,6 +16199,9 @@ int main() {
 #ifdef AGENSIO_HAS_QUIC
     test_quic();
     test_quic_stateless();
+#ifdef __linux__
+    test_quic_send_batch();
+#endif
 #endif
     test_unknown_keys();
     test_site_trusted_proxies();

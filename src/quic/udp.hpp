@@ -46,10 +46,17 @@ namespace agensio::quic {
 
 // The datagrams of one wake-up, sent together. A datagram is reserved, written in place
 // and committed; consecutive commits of the same size to the same peer join one message
-// that the kernel segments (at most 64 segments, 64 KB).
+// that the kernel segments (at most 64 segments, kMaxMessage bytes).
 class SendBatch {
 public:
     static constexpr std::size_t kMaxSegments = 64;
+    // The kernel builds a GSO message as one IP packet before it splits it, so the whole must fit
+    // IPv4's 65,535-byte total length less the IP and UDP headers: 65,507 bytes, also for an IPv4
+    // client of a dual-stack socket (IPv6 would take 65,527). Until 0.1.0-alpha.143 the batch folded
+    // up to 65,535: a message in between was refused with EMSGSIZE and its datagrams were dropped,
+    // and a lost range sent again in the same two sizes was dropped again (a 512 KB answer over
+    // HTTP/3 stalled its connection; the unit test sends such pairs over loopback).
+    static constexpr std::size_t kMaxMessage = 65507;
     explicit SendBatch(std::size_t bytes = 1024 * 1024) : buf_(bytes) {}  // per worker; a full batch goes out and fills again
 
     bool empty() const noexcept { return msgs_.empty(); }
@@ -76,7 +83,7 @@ public:
         if (!msgs_.empty()) {
             Msg& m = msgs_.back();
             if (gso_ && !m.closed && m.tolen == tolen && std::memcmp(&m.to, &to, tolen) == 0 && len <= m.seg &&
-                m.segments < kMaxSegments && m.len + len <= 65535 && buf_.data() + m.off + m.len == buf_.data() + pos_) {
+                m.segments < kMaxSegments && m.len + len <= kMaxMessage && buf_.data() + m.off + m.len == buf_.data() + pos_) {
                 m.len += len;
                 ++m.segments;
                 if (len < m.seg) m.closed = true;  // a shorter last segment ends the message
@@ -94,6 +101,14 @@ public:
         msgs_.push_back(m);
         pos_ += len;
     }
+    // A datagram in a message of its own: an MTU probe, which the path may refuse (EMSGSIZE), and
+    // the datagrams folded behind it would be refused with it.
+    void commit_alone(std::size_t len, const sockaddr_storage& to, socklen_t tolen) {
+        if (!msgs_.empty()) msgs_.back().closed = true;
+        commit(len, to, tolen);
+        if (!msgs_.empty()) msgs_.back().closed = true;
+    }
+    std::size_t messages() const noexcept { return msgs_.size(); }
     void set_gso(bool on) noexcept { gso_ = on; }
     bool gso() const noexcept { return gso_; }
 

@@ -1,0 +1,5 @@
+2026/11/09 17:59:28 [warn] the record of the site files served could not be written (cannot write /var/lib/agensio/.server/served.tmp): at the next start a conflict between site files is decided by load order, not by what is served now
+agensio 0.1.0-alpha.142 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on https://127.0.0.1:18471 (h2, h1)  sites: *
+  h3 on udp 127.0.0.1:18471, receive buffer 208 KB (raise net.core.rmem_max for bursts of handshakes; 4 MB asked)
+agensio stopped

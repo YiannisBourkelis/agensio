@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-alpha.143 (unreleased)
+
+- **Fix: HTTP/3 no longer loses a whole burst of datagrams, which stalled large answers.** The server
+  hands the kernel a burst of datagrams to one client as one message that the kernel splits (GSO).
+  It joined datagrams up to 65,535 bytes, but the kernel takes at most 65,507 bytes in one message
+  over IPv4 (an IPv4 client of a `[::]` listener included) and 65,527 over IPv6. A burst in between was
+  refused, and every datagram in it was lost without a word. On an ordinary 1,500-byte path that was
+  44 full datagrams and a last one of 740 to 767 bytes, about 65 KB lost at once: the answer arrived
+  late and the connection's sending rate was halved. On a path that carries large datagrams (a
+  loopback, where agensio's probe reaches 47 KB datagrams) the bytes sent again packed into the same
+  two datagrams, were refused again, and the answer stopped until the client gave up: 20,000 requests
+  for a 512 KB file on 8 connections did not finish in 60 s, and now finish in 2.3 to 2.4 s
+  (`bench/results/h3-burst-20261109-195626.md`). A burst now holds at most 65,507 bytes. The path MTU
+  probe also goes in a message of its own: on a 1,500-byte path the probe the path cannot carry took
+  the data packet folded behind it down with it, once per connection. Found by the HTTP/3
+  measurements of 0.1.0-alpha.142 (`bench/results/h3-streamed-20261108-233933.md`).
+
 ## 0.1.0-alpha.142 (2026-11-09)
 
 - **Fix: the `cgi` table takes the keys a CGI process has, and the reference lists them.** A

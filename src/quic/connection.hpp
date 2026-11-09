@@ -389,7 +389,7 @@ public:
                 const std::size_t n = build_packet(Space::application, buf, mtu_target_, now, mtu_target_);
                 want_ping_ = false;
                 if (n) {
-                    batch.commit(n, peer_, peer_len_);
+                    batch.commit_alone(n, peer_, peer_len_);
                     bytes_sent_ += n;
                 } else {
                     mtu_probe_sent_ = false;

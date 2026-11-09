@@ -956,7 +956,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   `recvmmsg` after `async_wait` with GRO on (Asio's own receive cannot see the GRO segment
   size, measured in `bench/udp/`), the datagrams handed to their connections by destination
   id, every connection's answers of a wake-up sent with one `sendmmsg`, consecutive
-  datagrams to a peer folded into GSO messages; the worker's one deadline heap and timer.
+  datagrams to a peer folded into GSO messages (at most 65,507 bytes a message, the kernel's limit for
+  the whole before it splits it, and the MTU probe in one of its own: until alpha.143 a message of
+  65,508 to 65,535 bytes was refused and lost whole, which stalled 512 KB answers on loopback); the
+  worker's one deadline heap and timer.
   `quic/connection.hpp` is the connection, templated over the application: packets in,
   the frames of each space, the handshake through `quic/tls.*`, acknowledgements and
   losses (`quic/recovery.hpp`, RFC 9002 with NewReno), streams and credit

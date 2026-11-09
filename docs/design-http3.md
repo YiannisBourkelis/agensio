@@ -225,7 +225,14 @@ dropped. The connections touched by the batch are noted in a list.
 **Sending.** After the batch, each touched connection produces its datagrams (6.7) into
 the worker's send batch: an array of `mmsghdr` over one buffer, consecutive datagrams of
 one size to one peer folded into one message with a `UDP_SEGMENT` control message (the
-kernel splits it: one syscall for a 64 KB burst), then one `sendmmsg`. A kernel or
+kernel splits it: one syscall for a 64 KB burst), then one `sendmmsg`. The kernel builds the
+message as one IP packet before it splits it, so a message holds at most 65,507 bytes, IPv4's
+largest datagram (IPv6 would take 65,527; an IPv4 client of a dual-stack socket is IPv4), and the
+path MTU probe goes in a message of its own, since a path that refuses it refuses whatever is
+folded behind it. Until 0.1.0-alpha.143 messages were folded up to 65,535 bytes: one of 65,508 to
+65,535 was refused with EMSGSIZE and every datagram in it lost (44 full datagrams and a short one on
+a 1,500-byte path; on loopback a lost range sent again in the same two sizes, refused again, and
+the connection stalled). A kernel or
 interface that refuses GSO (EIO on some virtual interfaces) turns it off for that socket
 after the first refusal, with a log line, and the batch is resent one datagram per
 message. EAGAIN keeps the rest of the batch and arms `async_wait(wait_write)`; a
