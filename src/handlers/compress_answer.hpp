@@ -28,7 +28,7 @@ enum class Reason : std::uint8_t {
     path_off,         // under one of the site's exclude_paths
     signed_in,        // the request carried a credential agensio itself knows (design 7) and compress_signed_in = false
     event_stream,     // text/event-stream without compress_event_streams = true
-    no_streaming,     // in pieces, which the client's protocol cannot carry: HTTP/1.0 (no chunked framing), HTTP/3 (no streamed body yet)
+    no_streaming,     // in pieces, which the client's protocol cannot carry: HTTP/1.0 (no chunked framing)
     budget,           // in pieces, with the worker's encoders at kStreamBudget: sent as it came, counted in status
     head,             // a HEAD answer: the GET's bytes are not here to compress; Vary says what the GET varies on
 };
@@ -168,13 +168,14 @@ inline bool added_type(std::string_view content_type, const std::vector<std::str
     return false;
 }
 
-// HTTP/1.1 frames a body of unknown length chunked and HTTP/2 in DATA frames; HTTP/1.0 has no
-// chunked framing (RFC 9112 7: a close-delimited body is all it has, and nginx skips 1.0 for that),
-// and HTTP/3 carries no streamed body yet (docs/design-http3.md, I1b), so an answer compressed in
-// pieces goes to those as it came.
+// HTTP/1.1 frames a body of unknown length chunked, HTTP/2 and HTTP/3 in DATA frames (HTTP/3 since
+// 0.1.0-alpha.142, docs/design-http3.md 7.3; before, an answer compressed in pieces went to it as it
+// came). HTTP/1.0 has no chunked framing (RFC 9112 7: a close-delimited body is all it has, and
+// nginx skips 1.0 for that), so it gets such an answer as it came; so does the interop runner's
+// hq-interop, which has no fields at all.
 inline bool streams_unknown_length(const Request& r) noexcept {
     if (r.protocol.empty()) return r.version_minor >= 1;
-    return r.protocol == "HTTP/2.0";
+    return r.protocol == "HTTP/2.0" || r.protocol == "HTTP/3.0";
 }
 
 inline Reason decide(const Stream& s, const Answer& a) noexcept {

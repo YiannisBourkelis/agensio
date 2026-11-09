@@ -35,6 +35,11 @@
   the stream with H3_REQUEST_CANCELLED and the error-log line the other protocols write, and the
   client's cancel or close ends the application's exchange at once, giving its slot back. Found by
   the test VPS's report on 0.1.0-alpha.141 (F1); design in `docs/design-http3.md` 7.3.
+- **Compression in pieces over HTTP/3.** An answer past the 256 KB whole-answer limit, or one an
+  application streams, went to an HTTP/3 client as it came, since HTTP/3 carried no streamed body;
+  browsers move to HTTP/3 as soon as a site offers it, so the largest pages reached most visitors
+  uncompressed. It is now compressed as it is sent, as over HTTP/1.1 and HTTP/2, with the same
+  codings, padding and guards. HTTP/1.0 alone still gets such an answer as it came.
 - **Fix: an HTTP/3 answer the client cancels no longer breaks its connection.** A client that cancels
   an answer still sending (a browser leaving a page, a download stopped: STOP_SENDING or RESET_STREAM)
   had its connection hurt three ways: the server's RESET_STREAM gave the whole answer's length as the

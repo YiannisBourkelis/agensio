@@ -4610,13 +4610,12 @@ at half of gzip 5's). A buffered answer up to 256 KB is compressed whole on the 
 page is 70 to 82 KB; at 256 KB zstd 3 holds the worker 0.35 ms, gzip 5 2 ms) and goes out with its
 exact length. A larger one, one spilled to a temporary file and a streamed one (`buffering =
 false`, or an application streaming its answer) are compressed as they are sent, 64 KB of the
-application's bytes at a time, framed chunked on HTTP/1.1 and in DATA frames on HTTP/2 (0.1.0-alpha.137):
+application's bytes at a time, framed chunked on HTTP/1.1 and in DATA frames on HTTP/2 (0.1.0-alpha.137) and HTTP/3 (0.1.0-alpha.142):
 while the application keeps sending, nothing is flushed, which gives the best ratio; when it pauses
 (its `flush()`, the end of an event, a slow query), everything compressed so far goes to the client
 at once, so a page that streams its head first still shows it first. A streamed answer is measured
 against `min_size` only by the length it declares, as nginx's `gzip_min_length`. An HTTP/1.0 client
-(no chunked framing) and an HTTP/3 one (no streamed body yet) get those answers as they came, with
-`Vary`. A large answer gives the worker back after every 256 KB it compressed, so it holds the
+(no chunked framing) gets those answers as they came, with `Vary`. A large answer gives the worker back after every 256 KB it compressed, so it holds the
 worker no longer than a whole-compressed one (about 0.5 ms with zstd, 2 ms with gzip) and the
 worker's other connections are served between its pieces. Each worker gives the encoders of such
 answers at most 32 MB (about fifteen large answers at once with zstd 3, eighty event streams);

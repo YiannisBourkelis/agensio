@@ -279,10 +279,10 @@ bytes. An application's error page is one of its answers and is compressed like 
   out of the cache; 1.41 ms without the yield), and at 64 such answers at once most pass the budget
   and go as they came (53 ms average latency, against 90 to 97 ms compressing them one after
   another). Yielding after every piece cost the same 14 to 18 %: the cost is interleaving itself.
-  HTTP/1.0 (no chunked framing) and HTTP/3 (no streamed
-  body yet, `docs/design-http3.md` I1b) get these answers as they came, with `Vary`
-  (`Reason::no_streaming`); a buffered answer up to 256 KB is compressed whole for them as for
-  anyone.
+  HTTP/1.0 (no chunked framing) gets these answers as they came, with `Vary`
+  (`Reason::no_streaming`); a buffered answer up to 256 KB is compressed whole for it as for
+  anyone. HTTP/3 did too until it carried streamed bodies (0.1.0-alpha.142, `docs/design-http3.md`
+  7.3), and takes them in pieces since.
 - **Flushes: one rule** (decision 12). While the upstream has bytes ready, pieces are compressed
   without a flush; when it has none (`StreamBody::ready`, what the upstream source would answer at
   once: held bytes, spilled bytes or its end), what was compressed is flushed (`ZSTD_e_flush`,
@@ -552,7 +552,8 @@ Each step: unit and integration suites green, the A/B flat on the rows it touche
    `compress_event_streams`, `offload` (the proxied field, FastCGI's and CGI's
    `HTTP_ACCEPT_ENCODING`), those two fields on a managed site (`site_update`, `ctl
    --compression-offload`, `--compression-events`), status's stream counters, `fuzz_compressed_body`.
-   HTTP/3 takes no streamed body yet, so its large answers stay as they came.
+   HTTP/3 took no streamed body then, so its large answers stayed as they came until
+   0.1.0-alpha.142, which streams them and compresses them in pieces as over HTTP/2.
 7. **The agent interface** (section 9). Its first part was built before step 6, in 0.1.0-alpha.119,
    when the test VPS could not turn compression on for one managed site: `site_create` and
    `site_update` take the site's `enabled`, `exclude_paths`, `compress_signed_in` and `codings`,

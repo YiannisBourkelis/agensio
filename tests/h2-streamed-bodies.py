@@ -78,6 +78,8 @@ skipped where it is not installed).
   for 2 s: the server's RSS grows less than 32 MB, the answer goes on after, the slot comes back.
 - left-h3-stop, left-h3-close: left-h2-* over HTTP/3, the client's STOP_SENDING or close.
 - cut-h3-logged: cut-h1-logged over HTTP/3: the stream reset with H3_REQUEST_CANCELLED, the line written.
+- h3-compressed-pieces: h2c-pieces over HTTP/3 (the TLS site, buffered), and /pause/3 compressed as it
+  streams: each decodes to what was sent. Before 0.1.0-alpha.142 these went as they came.
 Requires python3-h2 and openssl (aioquic for the h3 rows). Exit 1 on any failed row.
 """
 import argparse
@@ -896,6 +898,31 @@ def row_cut_h3_logged(srv):
     return None
 
 
+def row_h3_compressed_pieces(srv):
+    """Answers compressed in pieces over HTTP/3: buffered past the 256 KB whole-answer limit, and
+    streamed. Before 0.1.0-alpha.142 HTTP/3 took no streamed body, so these went as they came."""
+    c = H3(srv.ports["tls"])
+    try:
+        for n in (400_000, 1_000_000, 5_000_000):
+            for coding in codings():
+                st = c.get(f"/rnd/{n}", coding, seconds=20)
+                if st["status"] != 200 or not st["ended"]:
+                    return f"/rnd/{n} {coding}: {h3_text(st)}"
+                fail = compare(f"/rnd/{n} {coding} over HTTP/3", rnd_body(n), coding, st["fields"].get("content-encoding"), bytes(st["body"]))
+                if fail:
+                    return fail
+    finally:
+        c.close()
+    c = H3(srv.ports["h3-streamed-compressed"])
+    try:
+        st = c.get("/pause/3", "gzip", seconds=10)
+    finally:
+        c.close()
+    if st["status"] != 200 or not st["ended"]:
+        return "/pause/3 gzip: " + h3_text(st)
+    return compare("/pause/3 gzip over HTTP/3", pause_body(3), "gzip", st["fields"].get("content-encoding"), bytes(st["body"]))
+
+
 ROWS = {
     "h2c-pieces": row_h2c_pieces,
     "h2-window-during-pull": row_h2_window_during_pull,
@@ -917,6 +944,7 @@ ROWS = {
     "left-h3-stop": row_left_h3_stop,
     "left-h3-close": row_left_h3_close,
     "cut-h3-logged": row_cut_h3_logged,
+    "h3-compressed-pieces": row_h3_compressed_pieces,
 }
 
 

@@ -600,7 +600,7 @@ static void test_compress_answer() {
     CHECK(decide(s, a) == Reason::compress);
     a.body_size = kWholeMax + 1;
     CHECK(decide(s, a) == Reason::pieces);  // larger: compressed as it is sent (step 6)
-    // HTTP/1.0 has no chunked framing and HTTP/3 no streamed body yet: those clients get it as it came.
+    // HTTP/1.0 has no chunked framing: its clients get it as it came (HTTP/3 streams since 0.1.0-alpha.142).
     a.streams_ok = false;
     CHECK(decide(s, a) == Reason::no_streaming);
     a.body_size = 4096;
@@ -614,7 +614,7 @@ static void test_compress_answer() {
         r.protocol = "HTTP/2.0";
         CHECK(streams_unknown_length(r));
         r.protocol = "HTTP/3.0";
-        CHECK(!streams_unknown_length(r));
+        CHECK(streams_unknown_length(r));
         r.protocol = "hq-interop";
         CHECK(!streams_unknown_length(r));
     }
