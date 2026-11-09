@@ -87,6 +87,7 @@ struct FuzzApp {
     }
     void on_handshake_done() {}
     void on_closed(bool, std::uint64_t) {}
+    void on_check(TimePoint) {}
     // The streamed answers grow while fewer than 4 KB wait and they hold under eight blocks, pieces of
     // 100 to 3,100 bytes whose bytes are their offsets, to 48 KB and the FIN.
     void before_produce() {

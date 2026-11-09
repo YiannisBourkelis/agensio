@@ -209,6 +209,12 @@ public:
     // 10.1.2: the peer's acknowledgement restarts both idle timers, and middleboxes forget a UDP flow
     // after about 30 s). How long it waits is the source's to bound (an upstream's read_timeout).
     void keep_alive(bool on) noexcept { keep_alive_ = on; }
+    // The application's own check (HTTP/3: answers the client takes nothing of), `wait` after the next
+    // wake-up's time; nothing when one is armed already, so asking per answer costs one comparison.
+    // It fires through app_.on_check(now), which asks again while it has something to watch.
+    void check_after(Duration wait) noexcept {
+        if (app_check_ == TimePoint::max() && app_check_wait_ == Duration{}) app_check_wait_ = wait;
+    }
     // The application is done with the stream (both directions finished or reset): the
     // peer may open another in its place.
     void stream_closed(QuicStream& s) noexcept {
@@ -470,6 +476,11 @@ public:
             last_ping_ = now;
         }
         if (rx_prev_.valid() && now + std::chrono::microseconds(500) >= prev_keys_end_) rx_prev_.clear();  // RFC 9001 6.5
+        if (state_ == State::established && now + std::chrono::microseconds(500) >= app_check_) {
+            app_check_ = TimePoint::max();
+            app_.on_check(now);
+            if (state_ != State::established) return;
+        }
         const TimePoint lt = rec_.loss_timer(at_amplification_limit());
         if (lt != TimePoint::max() && now + std::chrono::microseconds(500) >= lt) {
             rec_.on_timeout(now);
@@ -518,6 +529,11 @@ public:
             const TimePoint lt = rec_.loss_timer(at_amplification_limit());
             if (lt < d) d = lt;
             if (rx_prev_.valid() && prev_keys_end_ < d) d = prev_keys_end_;
+            if (app_check_wait_ != Duration{}) {
+                app_check_ = now + app_check_wait_;
+                app_check_wait_ = Duration{};
+            }
+            if (app_check_ < d) d = app_check_;
             const AckState& a = rec_.space(Space::application).acks;
             if (a.eliciting_unacked > 0 && !a.ack_now && a.delay_deadline != TimePoint{} && a.delay_deadline < d) d = a.delay_deadline;
             if (d < now) d = now;
@@ -1730,6 +1746,8 @@ private:
     TimePoint created_, last_receive_;
     TimePoint last_ping_{};                          // the keep-alive's last PING
     bool keep_alive_ = false, keep_alive_due_ = false;  // keep_alive(); a PING to send
+    TimePoint app_check_ = TimePoint::max();         // check_after(): when app_.on_check runs
+    Duration app_check_wait_{};                      // asked for, its time set at the next reschedule
     Duration idle_{};
     Duration our_max_ack_delay_{};
     Cid odcid_, peer_cid_;

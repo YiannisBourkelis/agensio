@@ -89,6 +89,17 @@ time, aioquic's do not).
 - h3-ends-on-time: a CGI event stream whose script exits after 0.3 s ends within 1 s, and an origin
   that closes without its last chunk after 0.3 s is reset (H3_REQUEST_CANCELLED) within 1 s; on
   0.1.0-alpha.142 both waited for the PING, about 1.5 s here (idle_timeout 3 s).
+
+A client that holds a streamed answer back (the alpha.142 report, F3): the application's read_timeout
+ran while agensio, its read-ahead full, read nothing more, cut the answer and blamed the application;
+HTTP/3 had no bound of its own on a client that takes nothing (the server's PINGs keep the connection).
+On 0.1.0-alpha.142 each of these fails.
+- slow-reader-whole: 2 s of no reading against a read_timeout of 1 s (/burst/K: K events of 64 KB at
+  once) over HTTP/1.1, HTTP/2 and HTTP/3: the whole answer.
+- h3-stalled-reader: an HTTP/3 client that acknowledges but grants no credit, on the one-slot origin:
+  cancelled with H3_REQUEST_CANCELLED within idle_timeout plus the 2 s check, an info line, the slot back.
+- h1-stalled-reader: an HTTP/1.1 client that stops reading: closed at the idle timeout, with an info
+  line saying the client took nothing.
 Requires python3-h2 and openssl (aioquic for the h3 rows). Exit 1 on any failed row.
 """
 import argparse
@@ -178,7 +189,8 @@ class SlotOrigin(socketserver.BaseRequestHandler):
     """One answer per connection: /quick at once; /hold/NAME an event stream's head and one event,
     then quiet until the server closes; /flood/S events of 64 KB back to back for S seconds; /later/S
     one event, S seconds of quiet, a second event and the stream's end; /gone/MS one event, MS
-    milliseconds, then the connection closed without the last chunk."""
+    milliseconds, then the connection closed without the last chunk; /burst/K K events of 64 KB as fast
+    as the socket takes them, then the end."""
 
     def handle(self):
         sock = self.request
@@ -194,7 +206,7 @@ class SlotOrigin(socketserver.BaseRequestHandler):
             return
         sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
         event = b"data: " + b"e" * 2000 + b"\n\n"
-        m = re.fullmatch(r"/(hold|flood|later|gone)/(\w+)", target)
+        m = re.fullmatch(r"/(hold|flood|later|gone|burst)/(\w+)", target)
         if not m:
             return
         if m.group(1) == "gone":
@@ -221,6 +233,14 @@ class SlotOrigin(socketserver.BaseRequestHandler):
             HOLD_CLOSED[m.group(2)] = time.monotonic()
             return
         event = b"data: " + b"f" * 65536 + b"\n\n"
+        if m.group(1) == "burst":
+            try:
+                for _ in range(int(m.group(2))):
+                    sock.sendall(b"%x\r\n" % len(event) + event + b"\r\n")
+                sock.sendall(b"0\r\n\r\n")
+            except OSError:
+                pass
+            return
         end = time.monotonic() + int(m.group(2))
         try:
             while time.monotonic() < end:
@@ -493,7 +513,7 @@ class Server:
         (root / "agensio.toml").write_text(
             '[server]\nworkers = 1\nprotocols = ["h1", "h2", "h2c", "h3"]\nidle_timeout = 3\n'
             f'pid_file = "{root}/agensio.pid"\nstate_dir = "{root}/state"\n'
-            f'[log]\naccess = "off"\nerror = "{root}/error.log"\n' + sites)
+            f'[log]\naccess = "off"\nerror = "{root}/error.log"\nlevel = "info"\n' + sites)
         self.error_log = root / "error.log"
         self.log = (root / "server.log").open("w+")
         self.process = subprocess.Popen([binary, "-c", str(root / "agensio.toml")], stdout=self.log, stderr=subprocess.STDOUT)
@@ -867,6 +887,121 @@ def row_h3_backpressure(srv):
     return None if status.startswith("HTTP/1.1 200") else f"the next request through the slot: {status}"
 
 
+def row_slow_reader_whole(srv):
+    """A client that stops reading for 2 s, twice the location's read_timeout (1 s) and under the idle
+    timeout (3 s), while its origin has 16 MB (HTTP/1.1, behind a 32 KB receive buffer) or 8 MB (HTTP/2,
+    HTTP/3, behind their flow control) to send, gets the whole answer over HTTP/1.1, HTTP/2 and
+    HTTP/3: the origin's timer waits while the client holds the answer back. On 0.1.0-alpha.142 each
+    was cut at 1 s, and the error log blamed the origin (the alpha.142 report, F3)."""
+    want = 128 * (len(b"data: ") + 65536 + 2)
+    fails = []
+    with socket.socket() as s:  # a small receive buffer and 16 MB, so the kernel's buffers do not hide the pause
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32768)
+        s.settimeout(10)
+        s.connect(("127.0.0.1", srv.ports["cut"]))
+        s.sendall(b"GET /burst/256 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        data, paused = bytearray(), False
+        while not data.endswith(b"\r\n0\r\n\r\n"):
+            d = s.recv(65536)
+            if not d:
+                break
+            data += d
+            if not paused and len(data) >= 1 << 20:
+                paused = True
+                time.sleep(2)
+    if not data.endswith(b"\r\n0\r\n\r\n"):
+        fails.append(f"http/1.1: cut after {len(data)} bytes")
+    c = H2(srv.ports["cut"])
+    paused = []
+
+    def pause(conn, sid, n):
+        if not paused and n >= 1 << 20:
+            paused.append(n)
+            time.sleep(2)
+
+    try:
+        status, _, body = c.get("/burst/128", seconds=20, on_data=pause)
+    finally:
+        c.sock.close()
+    if status != 200 or len(body) != want:
+        fails.append(f"http/2: {status}, {len(body)} of {want} bytes")
+    if QuicConnection is not None:
+        c3 = H3(srv.ports["h3-cut"])
+        try:
+            st, _ = c3.request("/burst/128")
+            c3.pump(5, lambda: len(st["body"]) >= 1 << 20 or st["reset"] is not None)
+            time.sleep(2)  # nothing read, nothing acknowledged
+            c3.pump(20, lambda: st["ended"] or st["reset"] is not None)
+        finally:
+            c3.close()
+        if not st["ended"] or st["reset"] is not None or len(st["body"]) != want:
+            fails.append("http/3: " + h3_text(st))
+    return "; ".join(fails) or None
+
+
+def row_h1_stalled_reader(srv):
+    """An HTTP/1.1 client that stops reading while its answer streams (16 MB through the one-slot origin,
+    whose read_timeout is 60 s): the connection closes at the idle timeout (3 s here) as before, and an
+    info line says the client took nothing of the answer, as HTTP/2's and HTTP/3's do. Until
+    0.1.0-alpha.143 the close said nothing (the alpha.142 report, F3)."""
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32768)
+    s.settimeout(15)
+    try:
+        s.connect(("127.0.0.1", srv.ports["slots"]))
+        s.sendall(b"GET /burst/256 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        got = 0
+        while got < 1 << 20:
+            d = s.recv(65536)
+            if not d:
+                return f"the answer ended after {got} bytes"
+            got += len(d)
+        time.sleep(6)  # nothing read
+        try:
+            while s.recv(1 << 20):
+                pass
+        except (ConnectionResetError, socket.timeout):
+            pass
+    finally:
+        s.close()
+    line = logged(srv, ["http1", "/burst/256", "no progress"])
+    if line is None:
+        return "the client that took nothing was closed, and no line says so"
+    print("  " + line)
+    time.sleep(0.5)
+    status = quick(srv.ports["slots"])
+    return None if status.startswith("HTTP/1.1 200") else f"the next request through the slot: {status}"
+
+
+def row_h3_stalled_reader(srv):
+    """A client that acknowledges what arrives (so the server's keep-alive PINGs keep the connection)
+    but grants no more credit, on an event stream through the one-slot origin: the answer is cancelled
+    within the idle timeout (3 s here) plus a check, the slot comes back. On 0.1.0-alpha.142 nothing but
+    the origin's read_timeout (60 s by default) ended it, and once that no longer runs while the client
+    holds the answer back (F3), nothing would."""
+    c = H3(srv.ports["h3-slots"])
+    try:
+        c.quic._write_connection_limits = lambda *a, **k: None  # aioquic's MAX_DATA and MAX_STREAM_DATA
+        c.quic._write_stream_limits = lambda *a, **k: None
+        start = time.monotonic()
+        st, _ = c.request("/flood/30")
+        c.pump(12, lambda: st["reset"] is not None or st["ended"])
+        took = time.monotonic() - start
+    finally:
+        c.close()
+    if st["reset"] != 0x10C:
+        return f"after {took:.1f} s: {h3_text(st)}, not cancelled though the client granted no credit"
+    if took > 8:
+        return f"cancelled after {took:.1f} s (idle_timeout 3 s)"
+    print(f"  cancelled after {took:.1f} s, {len(st['body'])} bytes taken")
+    line = logged(srv, ["http3", "/flood/30", "no progress"])
+    if line is None:
+        return "cancelled, and no info line names the client"
+    time.sleep(0.5)
+    status = quick(srv.ports["slots"])
+    return None if status.startswith("HTTP/1.1 200") else f"the next request through the slot: {status}"
+
+
 def left_h3(srv, name, how):
     c = H3(srv.ports["h3-slots"])
     try:
@@ -985,6 +1120,9 @@ ROWS = {
     "cut-h3-logged": row_cut_h3_logged,
     "h3-compressed-pieces": row_h3_compressed_pieces,
     "h3-ends-on-time": row_h3_ends_on_time,
+    "h3-stalled-reader": row_h3_stalled_reader,
+    "slow-reader-whole": row_slow_reader_whole,
+    "h1-stalled-reader": row_h1_stalled_reader,
 }
 
 

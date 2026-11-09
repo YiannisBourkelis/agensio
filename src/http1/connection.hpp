@@ -181,15 +181,20 @@ public:
         const auto* body = std::get_if<std::unique_ptr<StreamBody>>(&stream_.response.body);
         const std::string why = body && *body ? (*body)->failure() : std::string();
         if (!log->enabled(why.empty() ? LogLevel::info : LogLevel::error)) return;
+        const std::string line = request_text() + ": the answer was cut mid-stream: " + (why.empty() ? ec.message() : why);
+        if (why.empty()) log->info(line);
+        else log->error(line);
+    }
+
+    // "http1 CLIENT (site METHOD path)" for an error-log line about the request; the query left out,
+    // the client's address too on a path the site keeps out of its logs.
+    std::string request_text() {
         fill_connection_info();
         const Request& req = stream_.request;
         const bool unlogged = log_exclude::excluded(site_, req.target, worker_.state.log_path);
-        const std::string line = "http1 " + (unlogged ? std::string("-") : remote_) + " (" +
-                                 (site_ && !site_->server_names.empty() ? site_->server_names.front() : std::string("-")) + " " +
-                                 log_text(req.method_name) + " " + log_text(req.target.substr(0, req.target.find('?'))) +
-                                 "): the answer was cut mid-stream: " + (why.empty() ? ec.message() : why);
-        if (why.empty()) log->info(line);
-        else log->error(line);
+        return "http1 " + (unlogged ? std::string("-") : remote_) + " (" +
+               (site_ && !site_->server_names.empty() ? site_->server_names.front() : std::string("-")) + " " +
+               log_text(req.method_name) + " " + log_text(req.target.substr(0, req.target.find('?'))) + ")";
     }
 
     // The whole response has been handed to the kernel: drain an unread body, then the
@@ -437,7 +442,14 @@ private:
                     self->arm_timer(self->timeout_);
                     return;
                 }
-                if (self->body_reading_) self->unsent_status_ = 408;  // body_timeout: nginx's 408 too
+                if (self->body_reading_) {
+                    self->unsent_status_ = 408;  // body_timeout: nginx's 408 too
+                } else if (self->responding_) {  // the client took nothing of the answer: as HTTP/2 and HTTP/3 say it
+                    if (ErrorLog* log = self->dispatcher_.error_log(); log && log->enabled(LogLevel::info))
+                        log->info(self->request_text() + ": no progress for " +
+                                  std::to_string(std::chrono::duration_cast<std::chrono::seconds>(idle).count()) +
+                                  " s, the client took nothing of the answer (idle_timeout); closed");
+                }
                 self->close();
                 return;
             }

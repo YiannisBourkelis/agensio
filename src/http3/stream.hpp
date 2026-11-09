@@ -64,7 +64,10 @@ struct H3Stream {
     const SiteConfig* site = nullptr;
     unsigned gen = 0;
     std::shared_ptr<UpstreamRequest> upstream;
+    // An answer the client takes nothing of (Http3Connection::on_check): its progress, the bytes put
+    // into packets plus the bytes acknowledged, at the last check that saw it move, and when.
     std::chrono::steady_clock::time_point since{};
+    std::uint64_t progress = 0;
 
     // The frame parser (7.1): the frame being read and how much of its payload remains.
     bool in_frame = false;
@@ -106,7 +109,7 @@ struct H3Stream {
 
     // Response progress.
     bool responded = false;
-    bool finished = false;  // every byte acknowledged, or the reset sent
+    bool finished = false;  // every byte and the FIN acknowledged, or the reset acknowledged
     bool logged = false;
     bool closed = false;
     std::uint16_t unsent_status = 499;  // the access log's status when no byte of the answer went out
@@ -125,6 +128,8 @@ struct H3Stream {
         site = nullptr;
         ++gen;
         upstream.reset();
+        since = {};
+        progress = 0;
         in_frame = false;
         frame_type = frame_remaining = 0;
         section.clear();

@@ -812,7 +812,15 @@ void UpstreamRequest::read_more() {
     // Not while the decoder runs: delivering the head can run the writer, whose inline
     // completion pulls and lands here; on_data() reads again itself when it is done.
     if (reading_ || in_data_ || phase_ != Phase::receiving) return;
-    if (!options_.buffering && head_delivered_ && pending_.size() - pending_pos_ >= kHighWater) return;  // backpressure
+    if (!options_.buffering && head_delivered_ && pending_.size() - pending_pos_ >= kHighWater) {
+        // Held back by the reader: the client takes the answer slower than the origin gives it, so no
+        // read is out and the origin is not timed; reading goes on, timed again, once the reader has
+        // taken what waits (pull). The client's side bounds a client that takes nothing more (HTTP/1's
+        // and HTTP/2's idle timeout, HTTP/3's on_check). Until 0.1.0-alpha.143 the last read's deadline
+        // stayed armed and cut the answer as the origin's read_timeout (the alpha.142 report, F3).
+        deadline_ = std::chrono::steady_clock::time_point::max();
+        return;
+    }
     if (conn_->in.size() < 16 * 1024) conn_->in.resize(16 * 1024);
     if (conn_->in_len == conn_->in.size()) conn_->in.resize(conn_->in.size() * 2);  // one huge record
     reading_ = true;

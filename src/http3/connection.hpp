@@ -60,7 +60,8 @@ public:
     static constexpr std::size_t kStreamBlocks = 32;
     static constexpr std::size_t kConnBlocks = 64;
     static constexpr std::size_t kMinPiece = 512;
-    static constexpr std::size_t kDataHeader = 5;  // the type (0x00) and the length as a 4-byte varint (RFC 9000 16)
+    static constexpr std::size_t kDataHeader = 5;
+    static constexpr std::chrono::seconds kCheckEvery{2};  // on_check's period while answers are open  // the type (0x00) and the length as a 4-byte varint (RFC 9000 16)
 
     Http3Connection(Endpoint& ep, Worker& worker, std::shared_ptr<const Generation> gen, const Listener* listener,
                     const Config& cfg, Dispatcher& dispatcher, SSL_CTX* ctx, const quic::PacketHeader& initial,
@@ -103,7 +104,6 @@ public:
             fresh.q.blocks.budget(&blocks_held_);
         });
         s.kind = quic::stream_is_bidi(id) ? H3Stream::Kind::request : H3Stream::Kind::peer_uni;
-        s.since = now_;
         ++streams_opened_;
         return &s.q;
     }
@@ -531,6 +531,44 @@ public:
         }
     }
 
+    // Every kCheckEvery while answers are open (armed as an answer starts, QuicConnection::check_after):
+    // an answer the client takes nothing of for idle_timeout (no credit granted, nothing acknowledged)
+    // is cancelled, as HTTP/2 cancels one that makes no progress; one waiting on its application's next
+    // bytes (a read out) is the application's to bound, by its read_timeout. Progress is sampled here,
+    // never per packet: the bytes put into packets plus the bytes acknowledged. Until 0.1.0-alpha.143
+    // nothing bounded such an answer over HTTP/3 but its application's read_timeout, which then cut it
+    // while the application had bytes waiting (the alpha.142 report, F3).
+    void on_check(TimePoint now) {
+        if (closed_) return;
+        const auto limit = std::chrono::seconds(live_->idle_timeout_s);
+        bool watching = false;
+        for (std::size_t i = 0; i < streams_.active();) {
+            H3Stream& s = *streams_.all()[i];
+            quic::QuicStream& q = s.q;
+            if (s.kind != H3Stream::Kind::request || s.closed || !s.responded || s.finished || q.reset_sent || q.reset_due) {
+                ++i;
+                continue;
+            }
+            watching = true;
+            const std::uint64_t mark = q.next + q.acked.contiguous_from(0);
+            if (s.pulling || s.since == TimePoint{} || mark != s.progress) {
+                s.progress = mark;
+                s.since = now;
+                ++i;
+                continue;
+            }
+            if (now - s.since < limit) {
+                ++i;
+                continue;
+            }
+            const std::size_t open = streams_.active();
+            cancel_stalled(s, now - s.since);
+            if (closed_) return;
+            if (streams_.active() == open) ++i;  // still open (its reset waits for the acknowledgement): the next one
+        }
+        if (watching) quic_.check_after(kCheckEvery);
+    }
+
 private:
     std::size_t body_limit(std::string_view host) const noexcept {
         const SiteConfig* site = listener_->router.site(host);
@@ -641,6 +679,7 @@ private:
         q.fin = true;
         s.responded = true;
         quic_.stream_ready(q);
+        quic_.check_after(kCheckEvery);  // one comparison when armed already
     }
 
     // The response head as a HEADERS frame: server, date and content-type through the
@@ -759,6 +798,7 @@ private:
         ++streaming_;
         quic_.keep_alive(true);  // a source that pauses is not an idle connection (RFC 9000 10.1.2)
         quic_.stream_ready(q);
+        quic_.check_after(kCheckEvery);
         pull(s);
     }
 
@@ -838,12 +878,8 @@ private:
             const StreamBody* source = source_of(s.stream.response);
             const std::string why = ec && source ? source->failure() : std::string();
             if (log->enabled(why.empty() ? LogLevel::info : LogLevel::error)) {
-                const Request& req = s.stream.request;
                 const std::string line =
-                    "http3 " + std::string(remote_for(s)) + " (" +
-                    (s.site && !s.site->server_names.empty() ? s.site->server_names.front() : std::string("-")) + " " +
-                    log_text(req.method_name) + " " + log_text(req.target.substr(0, req.target.find('?'))) +
-                    "): the answer was cut mid-stream: " +
+                    request_text(s) + ": the answer was cut mid-stream: " +
                     (!why.empty() ? why : ec ? ec.message() : std::string("the source ended short of the length it declared"));
                 if (why.empty()) log->info(line);
                 else log->error(line);
@@ -855,6 +891,36 @@ private:
         quic_.stream_reset(q, err::request_cancelled);
         q.fin_delivered = true;
         s.body_done = true;
+    }
+
+    // "http3 CLIENT (site METHOD path)" for an error-log line about one request; the query left out.
+    std::string request_text(const H3Stream& s) {
+        const Request& req = s.stream.request;
+        return "http3 " + std::string(remote_for(s)) + " (" +
+               (s.site && !s.site->server_names.empty() ? s.site->server_names.front() : std::string("-")) + " " +
+               log_text(req.method_name) + " " + log_text(req.target.substr(0, req.target.find('?'))) + ")";
+    }
+
+    // The client took nothing of the answer for idle_timeout: the stream reset with
+    // H3_REQUEST_CANCELLED (and STOP_SENDING while its request still comes), the application's exchange
+    // ended at once so its slot comes back, and an info line naming the client, as HTTP/2's.
+    void cancel_stalled(H3Stream& s, quic::Duration stalled) {
+        if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
+            log->info(request_text(s) + ": no progress for " +
+                      std::to_string(std::chrono::duration_cast<std::chrono::seconds>(stalled).count()) +
+                      " s, the client took nothing of the answer (idle_timeout); cancelled");
+        stop_streaming(s);
+        if (s.upstream) {
+            s.upstream->reader_gone();
+            s.upstream.reset();
+        }
+        if (s.pending_handler) deliver_error(s, asio::error::operation_aborted);
+        quic::QuicStream& q = s.q;
+        if (!q.at_end() && !q.reset_received) quic_.stream_stop_sending(q, err::request_cancelled);
+        quic_.stream_reset(q, err::request_cancelled);
+        q.fin_delivered = true;
+        s.body_done = true;
+        maybe_close(s);
     }
 
     void stop_streaming(H3Stream& s) noexcept {

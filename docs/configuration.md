@@ -1385,7 +1385,7 @@ location on the same socket must agree on them: set them once on the site.
 | `buffer_file_max` | `"1GB"` | temp-file cap; beyond it the rest of the reply is streamed |
 | `request_buffering` | `true` | collect the request body (memory, then temp file) before talking to fpm; `false` streams it |
 | `request_buffer_max` | `"256KB"` | request body bytes kept in memory before the temp file |
-| `connect_timeout`, `send_timeout`, `read_timeout` | 5, 30, 60 s | 504 when exceeded; `read_timeout` is between two records from fpm |
+| `connect_timeout`, `send_timeout`, `read_timeout` | 5, 30, 60 s | 504 when exceeded; `read_timeout` is between two records from fpm, while agensio waits for them (not while a client that reads slower holds a streamed answer back, section 8) |
 | `max_connections` | 16 | in-flight requests per worker to this socket; more wait in the queue |
 | `queue_depth`, `queue_wait` | 64, 5 s | queue size and longest wait; beyond either, 503 with `Retry-After` |
 | `priority_reserve` | 0 | share of `max_connections` kept for `priority = true` locations |
@@ -1655,6 +1655,19 @@ second into the exchange is cancelled (`499`), or cut where it streams (since 0.
 the whole stream); a client that wants the answer keeps its side open until the end. Before
 0.1.0-alpha.119 such a request was logged `200 0` over HTTP/1.1 and HTTP/3 and not at all over
 HTTP/2, and an HTTP/3 download cut short counted the whole file.
+
+A client that takes a streamed answer slower than its application gives it (a phone in a tunnel, a
+throttled background tab) holds the application back: agensio reads no more from it once 256 KB
+wait, and the application's `read_timeout` does not run meanwhile. It counts only while agensio
+waits for the application's next bytes, so it blames the application only when the application is
+the one that is quiet. Before 0.1.0-alpha.143 it ran on, and a pause longer than it cut the answer
+with an error line naming the application (the alpha.142 report). What bounds a client that takes
+nothing is the client's side: `idle_timeout` without progress closes an HTTP/1.1 connection and
+cancels an HTTP/2 stream (`RST_STREAM` `CANCEL`) or an HTTP/3 one (`H3_REQUEST_CANCELLED`, checked
+every 2 s, since 0.1.0-alpha.143; before, nothing but the application's `read_timeout` did). Each
+writes an info line naming the client, `no progress for 15 s, the client took nothing of the answer`
+(HTTP/1.1's since 0.1.0-alpha.143), and the application's exchange ends at once, so its slot comes
+back.
 
 A query whose `since` reaches back past the first line of the current file reads on into the
 rotated files as the shipped logrotate configuration leaves them (`packaging/agensio.logrotate`:
@@ -2248,7 +2261,7 @@ the kernel retransmitted, about fifteen minutes, holding both connections.
 | `tunnel_timeout` | 0 | seconds a tunnel may stay idle in both directions; 0 = no limit |
 | `buffering` | `true` | collect the whole answer (memory, then a temp file above `buffer_max`) so a slow client never holds the origin; `false` streams with backpressure |
 | `request_buffering` | `true` | collect the request body before connecting; `false` streams it as it arrives |
-| `connect_timeout`, `send_timeout`, `read_timeout` | 5, 30, 60 s | 504 when exceeded; `read_timeout` is between two reads from the origin; on a tunnel `send_timeout` bounds each write to either side |
+| `connect_timeout`, `send_timeout`, `read_timeout` | 5, 30, 60 s | 504 when exceeded; `read_timeout` is between two reads from the origin, while agensio waits for its bytes (not while a client that reads slower holds a streamed answer back, section 8); on a tunnel `send_timeout` bounds each write to either side |
 | `keep_conn`, `max_idle`, `idle_timeout` | `true`, 64, 30 s | keep-alive to the origin; idle connections kept per worker; how long one may stay idle before agensio closes it (0 = until the origin does) |
 | `max_connections`, `queue_depth`, `queue_wait` | 256, 1024, 5 s | per worker: in flight, waiting, and the longest wait before a 503 with `Retry-After` |
 | `head_max` | 64 KB | an origin head larger than this is a 502 |
@@ -3799,6 +3812,7 @@ Every HTTP/3 limit derives from keys you already know:
 | protocol glitches (flow-control or stream credit that does not raise the limit) before `PROTOCOL_VIOLATION` | fixed | 100 |
 | a streamed answer's bytes held until the client acknowledges them (an application with `buffering = false`, an event stream, CGI, an answer compressed in pieces); past it the server reads no more from the application until the client catches up | fixed | 512 KB a stream, 1 MB a connection |
 | a streamed answer whose application pauses (an event stream between events): the connection kept with a `PING` | the idle timeout, bounded by the location's `read_timeout` | every 7.5 s (half `idle_timeout`, at most 15 s) |
+| an answer the client takes nothing of (no credit granted, nothing acknowledged), its application not being read: cancelled with `H3_REQUEST_CANCELLED` and an info line, the application's exchange ended (section 8; since 0.1.0-alpha.143) | `idle_timeout` | 15 s, checked every 2 s |
 
 The one key of its own:
 

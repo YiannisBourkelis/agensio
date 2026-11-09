@@ -543,7 +543,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   (a half-close counts as gone, as nginx and Go have it); a client that vanishes without either
   is the kernel's to notice (keepalive or TCP_USER_TIMEOUT on long streams was proposed with it,
   2026-11-08, after reading nginx, httpd, Caddy/Go and lighttpd, and not built; the owner chose
-  the watch alone).
+  the watch alone). A client that holds a streamed answer back is timed on its own side (alpha.143,
+  the alpha.142 report's F3): the exchange's read deadline is disarmed while backpressure stops its
+  reads (`read_more`), and idle_timeout without progress ends the client (HTTP/1 closes, HTTP/2
+  cancels the stream, HTTP/3 `Http3Connection::on_check` every 2 s through
+  `QuicConnection::check_after`), each with a "no progress" info line.
 - **Range requests** (E1, `src/http1/range.hpp`): one `bytes=` range with If-Range; 206
   as a slice of the cache entry or a `FileBody` with an offset (sendfile keeps the fast
   path), 416 past the end, `Accept-Ranges: bytes` prebuilt into the entry block.

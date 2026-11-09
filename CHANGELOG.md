@@ -53,6 +53,20 @@
   start: on the burst refusal above, the same two datagrams each time. A loss now resends from where the
   client's acknowledgements end, as a streamed answer's already did, and a range declared lost that
   the client acknowledges meanwhile is dropped from the resend.
+- **Fix: a client that reads slowly no longer cuts a streamed answer as its application's
+  `read_timeout`.** When a client took a streamed answer slower than its application gave it (a phone
+  in a tunnel, a throttled background tab), agensio stopped reading from the application once 256 KB
+  waited, as it should. But the application's `read_timeout` kept running: a pause longer than it cut
+  the answer, and the error log blamed the application, which had bytes ready the whole time. On every
+  protocol the timer now runs only while agensio waits for the application's next bytes. A client that
+  takes nothing at all is bounded on its own side, by `idle_timeout` without progress:
+  - HTTP/1.1 closes the connection, as before;
+  - HTTP/2 cancels the stream, as before;
+  - HTTP/3 now cancels it too (`H3_REQUEST_CANCELLED`, checked every 2 s). Before, nothing but the
+    application's `read_timeout` ended it, while the server's keep-alive PINGs kept the connection.
+  Each writes an info line naming the client (`no progress for 15 s, the client took nothing of the
+  answer`; HTTP/1.1's is new), and the application's exchange ends at once, so its slot comes back.
+  Found by the test VPS's report on 0.1.0-alpha.142 (F3); `docs/configuration.md` 8.
 
 ## 0.1.0-alpha.142 (2026-11-09)
 
