@@ -3813,6 +3813,7 @@ Every HTTP/3 limit derives from keys you already know:
 | a streamed answer's bytes held until the client acknowledges them (an application with `buffering = false`, an event stream, CGI, an answer compressed in pieces); past it the server reads no more from the application until the client catches up | fixed | 512 KB a stream, 1 MB a connection |
 | a streamed answer whose application pauses (an event stream between events): the connection kept with a `PING` | the idle timeout, bounded by the location's `read_timeout` | every 7.5 s (half `idle_timeout`, at most 15 s) |
 | an answer the client takes nothing of (no credit granted, nothing acknowledged), its application not being read: cancelled with `H3_REQUEST_CANCELLED` and an info line, the application's exchange ended (section 8; since 0.1.0-alpha.143) | `idle_timeout` | 15 s, checked every 2 s |
+| the windows a connection reads files through (a file above `cache.max_file_size`, 64 KB each): a download past them sends its headers and starts as soon as one of them is done, in the order they came; a window is freed with its download (since 0.1.0-alpha.143) | fixed | 16 a connection, 1 MB |
 
 The one key of its own:
 

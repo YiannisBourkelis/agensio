@@ -56,11 +56,15 @@ def readable(sock, timeout):
 class Client:
     """One QUIC connection driven by hand: connect, request, pump."""
 
-    def __init__(self, token=None, alpn="h3"):
+    def __init__(self, token=None, alpn="h3", max_stream_data=None, max_data=None):
         cfg = QuicConfiguration(is_client=True, alpn_protocols=[alpn], verify_mode=ssl.CERT_NONE, server_name="localhost")
         cfg.idle_timeout = 10.0
         if token:
             cfg.token = token
+        if max_stream_data:
+            cfg.max_stream_data = max_stream_data
+        if max_data:
+            cfg.max_data = max_data
         self.quic = QuicConnection(configuration=cfg)
         self.h3 = h3c.H3Connection(self.quic)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -951,6 +955,84 @@ def row_reset_then_credit(args):
     return True, "nothing sent on the reset stream after the credit"
 
 
+def stream_sets(c):
+    """The streams that got their head, and those that got body bytes."""
+    heads = {ev.stream_id for ev in c.h3_events if isinstance(ev, HeadersReceived)}
+    bodies = {ev.stream_id for ev in c.h3_events if isinstance(ev, DataReceived) and ev.data}
+    return heads, bodies
+
+
+def row_file_windows(args):
+    """Twenty downloads on one connection of a file above cache.max_file_size, which the server reads
+    through a 64 KB window per stream: at most sixteen hold one at a time (design-http3 6.10), the
+    others send their head and wait. The client grants each stream 64 KB and never more, so every
+    holder stops, its window held, until the server cancels it for making no progress (idle_timeout
+    3 s here; the client's PINGs keep the connection, which would otherwise end idle at the same
+    time); then the four that waited get their windows and their bytes. They are not cancelled
+    with the holders: the connection's cap held them back, not the client. Until 0.1.0-alpha.143
+    every stream read through a window of its own, at once, and kept it in the stream pool until the
+    connection closed: 128 such streams held 8 MB."""
+    c = Client(max_stream_data=65536, max_data=16 << 20)
+    if not c.connect():
+        return False, "handshake did not complete"
+    c.quic._write_stream_limits = lambda *a, **k: None  # no MAX_STREAM_DATA: 64 KB a stream
+    sids = [c.request("/big.bin") for _ in range(20)]
+    c.pump(1.5, lambda: len(stream_sets(c)[1]) > 16)
+    heads, bodies = stream_sets(c)
+    if len(heads) != 20 or len(bodies) != 16:
+        c.close()
+        return False, "%d heads and %d bodies under way of 20 downloads, expected 20 and 16" % (len(heads), len(bodies))
+    holders = set(bodies)
+    waiting = set(sids) - holders
+    end = c.now() + 10.0
+    while not all(reset_arrived(c, s) for s in holders):  # PINGs keep the connection (nothing else moves)
+        if c.terminated or c.now() > end:
+            t = c.terminated
+            c.close()
+            return False, "the sixteen stalled holders were not cancelled in 10 s%s" % (
+                t and " (closed: %s)" % t.reason_phrase or "")
+        c.quic.send_ping(1)
+        c.pump(0.5, lambda: all(reset_arrived(c, s) for s in holders))
+    early = [s for s in waiting if reset_arrived(c, s)]
+    c.pump(2.0, lambda: waiting <= stream_sets(c)[1])
+    late = waiting - stream_sets(c)[1]
+    t = c.terminated
+    c.close()
+    if t is not None:
+        return False, "the connection closed with 0x%x (%s)" % (t.error_code, t.reason_phrase)
+    if early:
+        return False, "%d streams waiting for a window were cancelled with the holders" % len(early)
+    if late:
+        return False, "%d waiting streams got no bytes after the holders' windows came free" % len(late)
+    return True, "16 windows, the 4 waiting streams served once the stalled holders were cancelled"
+
+
+def row_file_windows_queue(args):
+    """Twenty range requests on one connection, 100 KB each at different places of a file above
+    cache.max_file_size: sixteen take a window, four wait, and each starts as one finishes; all twenty
+    arrive whole and right."""
+    with open(os.path.join(ROOT, "bench", "www", "big.bin"), "rb") as f:
+        data = f.read()
+    c = Client()
+    if not c.connect():
+        return False, "handshake did not complete"
+    size = 100000
+    want = {}
+    for k in range(20):
+        start = k * 400000 + 7
+        sid = c.request("/big.bin", headers=[(b"range", b"bytes=%d-%d" % (start, start + size - 1))])
+        want[sid] = data[start:start + size]
+    got = {sid: c.wait_response(sid, 10.0) for sid in want}
+    t = c.terminated
+    c.close()
+    if t is not None:
+        return False, "the connection closed with 0x%x (%s)" % (t.error_code, t.reason_phrase)
+    bad = [(sid, st, len(b or b"")) for sid, (st, b) in got.items() if st != 206 or b != want[sid]]
+    if bad:
+        return False, "%d of 20 ranges wrong, the first: stream %d status %s, %d bytes" % (len(bad), *bad[0])
+    return True, "20 ranges of 100 KB through 16 windows, all whole"
+
+
 def row_reload(args):
     """A reload whose configuration drops h3 from the listener: an open connection gets
     GOAWAY and a close with H3_NO_ERROR at once, a new client finds no QUIC server on the
@@ -1039,12 +1121,14 @@ ROWS = [
     ("reset-lost", row_reset_lost),
     ("reset-in-queue", row_reset_in_queue),
     ("reset-then-credit", row_reset_then_credit),
+    ("file-windows", row_file_windows),
+    ("file-windows-queue", row_file_windows_queue),
     ("reload", row_reload),
     ("shutdown", row_shutdown),  # last: it stops the server
 ]
 
 
-def write_config(port, retry, h3=True, control=False, ceiling=False):
+def write_config(port, retry, h3=True, control=False, ceiling=False, idle=None):
     os.makedirs(os.path.join(ROOT, "bench", "tmp"), exist_ok=True)
     conf = os.path.join(ROOT, "bench", "tmp", "h3-attacks.toml")
     with open(conf, "w") as f:
@@ -1052,6 +1136,8 @@ def write_config(port, retry, h3=True, control=False, ceiling=False):
         f.write('pid_file = "%s/bench/tmp/h3-attacks.pid"\n' % ROOT)
         if control:
             f.write('idle_timeout = 15\n')
+        elif idle:
+            f.write('idle_timeout = %d\n' % idle)
         if ceiling:
             f.write('max_connections = 3\n')
         f.write('[log]\naccess = "off"\n')
@@ -1065,8 +1151,8 @@ def write_config(port, retry, h3=True, control=False, ceiling=False):
     return conf
 
 
-def start_server(binary, port, retry, control=False, ceiling=False):
-    conf = write_config(port, retry, control=control, ceiling=ceiling)
+def start_server(binary, port, retry, control=False, ceiling=False, idle=None):
+    conf = write_config(port, retry, control=control, ceiling=ceiling, idle=idle)
     err = open(os.path.join(ROOT, "bench", "tmp", "h3-attacks.err"), "w")
     p = subprocess.Popen([binary, "-c", conf], stdout=subprocess.DEVNULL, stderr=err)
     for _ in range(50):
@@ -1104,7 +1190,8 @@ def main():
         p = start_server(args.binary, args.port, args.retry,
                          control=name in ("handshake-deadline", "handshake-authenticated",
                                           "handshake-budget", "connection-ceiling"),
-                         ceiling=name == "connection-ceiling")
+                         ceiling=name == "connection-ceiling",
+                         idle=3 if name == "file-windows" else None)
         args.server = p
         try:
             try:

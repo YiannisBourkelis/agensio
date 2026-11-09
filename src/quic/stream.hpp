@@ -70,9 +70,10 @@ struct QuicStream {
     const File* file = nullptr;   // or a file region after the head
     std::uint64_t file_offset = 0;
     std::uint64_t file_len = 0;
-    std::vector<char> chunk;      // a window of the file read ahead
+    std::vector<char> chunk;      // the window the file is read through, from QuicConnection::take_window
     std::uint64_t chunk_off = 0;
     std::size_t chunk_len = 0;
+    std::uint64_t window_wait = 0;  // waiting for a window: its place in the connection's queue (0: not)
     SendBlocks blocks;            // or a streamed body's bytes after the head, held until acknowledged
     bool fin = false;             // FIN after the last byte
     std::uint64_t total = 0;      // head + body
@@ -134,7 +135,9 @@ struct QuicStream {
         mem = {};
         file = nullptr;
         file_offset = file_len = 0;
+        std::vector<char>().swap(chunk);  // a pooled stream keeps no window: freed, not cleared
         chunk_off = chunk_len = 0;
+        window_wait = 0;
         blocks.clear();
         fin = false;
         total = next = 0;

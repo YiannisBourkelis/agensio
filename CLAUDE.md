@@ -971,7 +971,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   and close. `http3/connection.hpp` is HTTP/3 over it: the control and QPACK streams,
   request streams through `http/request_assembly.hpp` (the one copy HTTP/2 uses too) and
   `http/stream_pool.hpp`, the same dispatch as HTTP/2, answers as HEADERS and DATA frames
-  with the body referenced (a cache entry, a file read in 64 KB windows) or, streamed (a `StreamBody`,
+  with the body referenced (a cache entry, a file read through a 64 KB window, at most sixteen a
+  connection and freed with the stream, alpha.143: `take_window`, `drop_window`; before, one per stream
+  kept in the pool, 8 MB at 128 streams) or, streamed (a `StreamBody`,
   alpha.142, design 7.3), read piece by piece into send blocks kept until acknowledged
   (`quic/send_blocks.hpp`; reads paced by the packets, 512 KB a stream and 1 MB a connection, a PING
   at half the idle timeout while the source pauses, H3_REQUEST_CANCELLED and the error line when it

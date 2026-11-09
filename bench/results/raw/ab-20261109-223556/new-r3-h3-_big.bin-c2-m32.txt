@@ -1,0 +1,38 @@
+starting benchmark...
+spawning thread #0: 1 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+spawning thread #1: 1 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+Warm-up started for thread #1.
+Warm-up phase is over for thread #1.
+Main benchmark duration is started for thread #1.
+Warm-up started for thread #0.
+progress: 100% of clients started
+Warm-up phase is over for thread #0.
+Main benchmark duration is started for thread #0.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: ECDSA prime256v1 256 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+Main benchmark duration is over for thread #1. Stopping all clients.
+Stopped all clients for thread #1
+Main benchmark duration is over for thread #0. Stopping all clients.
+Stopped all clients for thread #0
+
+finished in 5.00s, 674.20 req/s, 6.62GB/s
+requests: 3371 total, 3435 started, 3371 done, 3371 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3432 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 33.09GB (35530254478) total, 180.98KB (185328) headers (space savings 72.31%), 33.09GB (35530034710) data
+UDP datagram: 89215 sent, 784157 received
+                 min         max         median      p95         p99         mean        sd         +/- sd
+request     :    43.60ms    181.63ms     89.39ms    137.15ms    170.09ms     94.00ms     19.61ms    79.59%
+connect     :      942us       951us       946us       951us       951us       946us         6us   100.00%
+TTFB        :     1.31ms      1.35ms      1.33ms      1.35ms      1.35ms      1.33ms        23us   100.00%
+req/s       :     328.39      345.79      337.09      345.79      345.79      337.09       12.30   100.00%
+min RTT     :        4us        17us        10us        17us        17us        10us         8us   100.00%
+smoothed RTT:      103us       103us       103us       103us       103us       103us         0us   100.00%
+packets sent:      42759       46460       44609       46460       46460    44609.50     2617.00   100.00%
+packets recv:     381687      402472      392079      402472      402472   392079.50    14697.21   100.00%
+packets lost:          0           0           0           0           0        0.00        0.00   100.00%
+GRO packets :          1          18           1           1           2        1.03        0.17    97.36%

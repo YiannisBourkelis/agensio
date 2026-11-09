@@ -1,0 +1,53 @@
+starting benchmark...
+spawning thread #0: 4 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+spawning thread #1: 4 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+spawning thread #2: 4 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+spawning thread #3: 4 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+Warm-up started for thread #3.
+Warm-up started for thread #1.
+Warm-up phase is over for thread #3.
+Main benchmark duration is started for thread #3.
+Warm-up phase is over for thread #1.
+Main benchmark duration is started for thread #1.
+Warm-up started for thread #2.
+Warm-up phase is over for thread #2.
+Main benchmark duration is started for thread #2.
+Warm-up started for thread #0.
+progress: 25% of clients started
+progress: 50% of clients started
+progress: 75% of clients started
+progress: 100% of clients started
+Warm-up phase is over for thread #0.
+Main benchmark duration is started for thread #0.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: ECDSA prime256v1 256 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+Main benchmark duration is over for thread #3. Stopping all clients.
+Stopped all clients for thread #3
+Main benchmark duration is over for thread #1. Stopping all clients.
+Stopped all clients for thread #1
+Main benchmark duration is over for thread #2. Stopping all clients.
+Stopped all clients for thread #2
+Main benchmark duration is over for thread #0. Stopping all clients.
+Stopped all clients for thread #0
+
+finished in 5.00s, 649.80 req/s, 6.36GB/s
+requests: 3249 total, 3265 started, 3249 done, 3249 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3264 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 31.81GB (34159421068) total, 172.13KB (176256) headers (space savings 72.31%), 31.81GB (34159540161) data
+UDP datagram: 123207 sent, 765998 received
+                 min         max         median      p95         p99         mean        sd         +/- sd
+request     :     9.48ms     74.75ms     23.50ms     36.56ms     51.50ms     24.54ms      7.23ms    76.24%
+connect     :      964us      2.23ms      1.95ms      2.23ms      2.23ms      1.85ms       368us    81.25%
+TTFB        :     2.17ms      2.74ms      2.52ms      2.74ms      2.74ms      2.48ms       145us    75.00%
+req/s       :      38.80       41.80       40.70       41.80       41.80       40.61        0.74    75.00%
+min RTT     :       77us       101us        87us       101us       101us        87us         5us    81.25%
+smoothed RTT:      636us       765us       710us       765us       765us       708us        31us    75.00%
+packets sent:       7482        7952        7714        7952        7952     7702.44      108.01    81.25%
+packets recv:      45865       49100       47965       49100       49100    47875.88      827.66    75.00%
+packets lost:          0           0           0           0           0        0.00        0.00   100.00%
+GRO packets :          1          18           1           1           2        1.04        0.23    96.08%

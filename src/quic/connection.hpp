@@ -194,6 +194,7 @@ public:
     void stream_reset(QuicStream& s, std::uint64_t code) noexcept {
         if (s.reset_sent || s.reset_due) return;
         dequeue(s);
+        drop_window(s);  // nothing of the stream goes again but the frame
         s.reset_due = true;
         s.reset_send_code = code;
         control_.push_back(&s);
@@ -219,6 +220,7 @@ public:
     // peer may open another in its place.
     void stream_closed(QuicStream& s) noexcept {
         dequeue(s);
+        drop_window(s);
         for (std::size_t i = 0; i < control_.size();)
             if (control_[i] == &s) control_.erase(control_.begin() + static_cast<std::ptrdiff_t>(i)); else ++i;
         for (std::size_t i = 0; i < credit_.size();)
@@ -1104,6 +1106,7 @@ private:
                     }
                     if (!s->send_done && s->fin_acked && (s->total == 0 || s->acked.contains(0, s->total))) {
                         s->send_done = true;
+                        drop_window(*s);
                         app_.on_stream_sent(*s);
                     }
                     break;
@@ -1112,6 +1115,7 @@ private:
                     QuicStream* s = app_.find_stream(it.id);
                     if (s && s->open && s->reset_sent && !s->send_done) {
                         s->send_done = true;
+                        drop_window(*s);
                         app_.on_stream_sent(*s);
                     }
                     break;
@@ -1447,6 +1451,16 @@ private:
                         dequeue(s);
                         continue;
                     }
+                    // A file body's bytes go through a window: with none to take, the head goes alone
+                    // and the stream waits for one.
+                    if (take && s.file && s.chunk.empty() && b + take > s.head_end() && !take_window(s)) {
+                        if (b >= s.head_end()) {
+                            if (!s.window_wait) s.window_wait = ++window_seq_;
+                            dequeue(s);
+                            continue;
+                        }
+                        take = static_cast<std::size_t>(s.head_end() - b);
+                    }
                     fin = s.fin && b + take == s.total;
                     const std::size_t h = put_stream_header(payload + w, room - w, s.id, b, take, fin, true);
                     if (!h) break;
@@ -1550,7 +1564,7 @@ private:
     }
 
     // The bytes [offset, offset + len) of a stream's send data into dst: the head, then the
-    // memory body, the file (through a chunk read ahead) or a streamed body's blocks.
+    // memory body, the file (through its window) or a streamed body's blocks.
     bool copy_stream_bytes(QuicStream& s, std::uint64_t offset, std::size_t len, unsigned char* dst) noexcept {
         std::size_t done = 0;
         while (done < len) {
@@ -1576,7 +1590,7 @@ private:
             if (!s.file) return false;
             if (body_at >= s.file_len) return false;
             if (!(body_at >= s.chunk_off && body_at < s.chunk_off + s.chunk_len)) {  // read the next window
-                if (s.chunk.size() < 65536) s.chunk.resize(65536);
+                if (s.chunk.empty()) return false;  // taken before the frame (take_window)
                 const std::size_t n = static_cast<std::size_t>(std::min<std::uint64_t>(s.chunk.size(), s.file_len - body_at));
                 const auto r = s.file->read_at(s.chunk.data(), n, s.file_offset + body_at);
                 if (r <= 0) return false;
@@ -1687,6 +1701,35 @@ private:
         }
         s.ready = false;
         s.next_ready = nullptr;
+    }
+    // A window for a file body while the connection holds fewer than kFileWindows. The streams are
+    // counted when one is taken, once per file, never per packet.
+    bool take_window(QuicStream& s) {
+        std::size_t held = 0;
+        app_.for_each_stream([&held](QuicStream& o) { held += !o.chunk.empty(); });
+        if (held >= kFileWindows) return false;
+        s.chunk.resize(static_cast<std::size_t>(std::min<std::uint64_t>(kFileWindow, s.file_len)));
+        s.chunk_off = s.chunk_len = 0;
+        s.window_wait = 0;
+        return true;
+    }
+    // The stream is done with its window (every byte acknowledged, reset, or closed): it goes to the
+    // first stream waiting for one, which joins the ready list, or is freed.
+    void drop_window(QuicStream& s) noexcept {
+        s.window_wait = 0;
+        if (s.chunk.empty()) return;
+        s.chunk_off = s.chunk_len = 0;
+        QuicStream* first = nullptr;
+        app_.for_each_stream([&first](QuicStream& o) {
+            if (o.window_wait && o.open && (!first || o.window_wait < first->window_wait)) first = &o;
+        });
+        if (first) {
+            first->chunk.swap(s.chunk);
+            first->chunk.resize(static_cast<std::size_t>(std::min<std::uint64_t>(kFileWindow, first->file_len)));
+            first->window_wait = 0;
+            enqueue(*first);
+        }
+        std::vector<char>().swap(s.chunk);
     }
     void rotate() noexcept {  // the head to the tail
         QuicStream* h = ready_head_;
@@ -1819,6 +1862,14 @@ private:
     std::vector<QuicStream*> credit_;   // MAX_STREAM_DATA due
     QuicStream* ready_head_ = nullptr;
     QuicStream* ready_tail_ = nullptr;
+    // File windows (design-http3 6.10): a file body (above cache.max_file_size) is read through a
+    // window of its own, at most 64 KB, and the connection holds at most 16 (1 MB). A stream past them
+    // sends its head and waits out of the ready list, in the order it came (window_seq_); a window
+    // that comes free goes to the first waiting. Until 0.1.0-alpha.143 every such stream read through
+    // one at once and kept it in the stream pool until the connection closed: 128 streams, 8 MB.
+    static constexpr std::size_t kFileWindow = 65536;
+    static constexpr std::size_t kFileWindows = 16;
+    std::uint64_t window_seq_ = 0;
     // Close.
     bool close_app_ = false, close_due_ = false;
     std::uint64_t close_code_ = 0, close_frame_type_ = 0;

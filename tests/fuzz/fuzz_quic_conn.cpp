@@ -5,7 +5,9 @@
 // connection ids, key phases and the close all meet the fuzzer with real packet
 // protection. Every other request is answered as a streamed body through the stream's send
 // blocks (quic/send_blocks.hpp, 0.1.0-alpha.142), appended at each turn of the packetiser and
-// freed as the acknowledgements pass them: a resend that asks for a freed byte traps. Built
+// freed as the acknowledgements pass them: a resend that asks for a freed byte traps. Of the
+// rest, every other is a file read through the connection's windows (sixteen at most,
+// 0.1.0-alpha.143): more held, one on a closed stream, or a byte copied without one traps. Built
 // with -DAGENSIO_TLS=ON (OpenSSL 3.5), see CMakeLists.txt.
 #include <netinet/in.h>
 
@@ -30,8 +32,20 @@ struct FuzzEndpoint final : EndpointBase {
     void arm_if_earlier(std::chrono::steady_clock::time_point) override {}
 };
 
+// A 160 KB file whose bytes are their offsets, for the file answers: three windows' worth.
+const agensio::File& fuzz_file() {
+    static const agensio::File f = [] {
+        agensio::File t = agensio::File::temporary();
+        std::vector<char> bytes(160 * 1024);
+        for (std::size_t k = 0; k < bytes.size(); ++k) bytes[k] = static_cast<char>(k & 0xff);
+        if (!t.append(bytes.data(), bytes.size())) __builtin_trap();
+        return t;
+    }();
+    return f;
+}
+
 // The application: streams as a plain list, every readable byte consumed and answered
-// with a short body or a streamed one, resets and stops answered as the HTTP/3 layer would.
+// with a short body, a streamed one or a file, resets and stops answered as the HTTP/3 layer would.
 struct FuzzApp {
     using Quic = QuicConnection<FuzzApp>;
     static constexpr std::uint64_t kExcessiveLoad = 0x107;
@@ -63,6 +77,14 @@ struct FuzzApp {
                     s.total = 1;
                     s.blocks.budget(&blocks_held);
                     streaming.push_back(&s);
+                } else if ((s.id >> 2) & 2) {  // a file region behind a one-byte head: small ones too
+                    const std::uint64_t index = s.id >> 2;
+                    s.head = "h";
+                    s.file = &fuzz_file();
+                    s.file_offset = (index * 977) % 4096;
+                    s.file_len = 1 + (index * 7919) % (160 * 1024 - 4096);
+                    s.total = 1 + s.file_len;
+                    s.fin = true;
                 } else {
                     s.mem = "ok\n";
                     s.total = 3;
@@ -114,6 +136,19 @@ struct FuzzApp {
     template <class F>
     void for_each_stream(F f) {
         for (auto& s : streams) f(*s);
+    }
+    // The windows: at most sixteen held, none by a closed stream or one that waits, and no body byte
+    // copied without one (the transport resets such a stream with 0x102).
+    void check_windows() const {
+        std::size_t held = 0;
+        for (const auto& s : streams) {
+            if (s->chunk.empty()) continue;
+            ++held;
+            if (!s->open || s->window_wait) __builtin_trap();
+        }
+        if (held > 16) __builtin_trap();
+        for (const auto& s : streams)
+            if ((s->reset_due || s->reset_sent) && s->reset_send_code == 0x102) __builtin_trap();
     }
     void maybe_close(QuicStream& s) {
         if (!s.open) return;
@@ -176,6 +211,7 @@ extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, std::size_t siz
             conn.produce(ep.batch, now);
             ep.batch.clear();
             conn.reschedule(now);
+            app.check_windows();
             continue;
         }
         if (pos >= size) break;
@@ -232,6 +268,7 @@ extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, std::size_t siz
         conn.produce(ep.batch, now);
         ep.batch.clear();
         conn.reschedule(now);
+        app.check_windows();
         now += std::chrono::microseconds(500 + (op % 50) * 100);
     }
     if (!conn.closed()) {

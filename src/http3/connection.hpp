@@ -534,7 +534,9 @@ public:
     // Every kCheckEvery while answers are open (armed as an answer starts, QuicConnection::check_after):
     // an answer the client takes nothing of for idle_timeout (no credit granted, nothing acknowledged)
     // is cancelled, as HTTP/2 cancels one that makes no progress; one waiting on its application's next
-    // bytes (a read out) is the application's to bound, by its read_timeout. Progress is sampled here,
+    // bytes (a read out) is the application's to bound, by its read_timeout, and one waiting for a file
+    // window (the connection's sixteen are held, design 6.10) waits on the answers ahead of it, which
+    // this check bounds, not on the client; its time counts from when it gets one. Progress is sampled here,
     // never per packet: the bytes put into packets plus the bytes acknowledged. Until 0.1.0-alpha.143
     // nothing bounded such an answer over HTTP/3 but its application's read_timeout, which then cut it
     // while the application had bytes waiting (the alpha.142 report, F3).
@@ -551,7 +553,7 @@ public:
             }
             watching = true;
             const std::uint64_t mark = q.next + q.acked.contiguous_from(0);
-            if (s.pulling || s.since == TimePoint{} || mark != s.progress) {
+            if (s.pulling || q.window_wait || s.since == TimePoint{} || mark != s.progress) {
                 s.progress = mark;
                 s.since = now;
                 ++i;

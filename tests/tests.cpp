@@ -14982,6 +14982,16 @@ static void test_quic_send_batch() {
 
 static void test_quic() {
     using namespace quic;
+    {
+        // A stream back in the pool keeps no file window. The pool holds up to max_concurrent_streams
+        // released streams for the connection's life; until 0.1.0-alpha.143 each kept the 64 KB it had
+        // read a file through, so a connection that once served 128 large files at a time held 8 MB.
+        QuicStream s;
+        s.chunk.resize(65536);
+        s.chunk_len = 65536;
+        s.reset_quic();
+        CHECK(s.chunk.capacity() == 0 && s.chunk_len == 0);
+    }
     // Variable-length integers (RFC 9000 16): the RFC's examples and the boundaries.
     for (std::uint64_t v : {std::uint64_t{0}, std::uint64_t{63}, std::uint64_t{64}, std::uint64_t{16383}, std::uint64_t{16384},
                             std::uint64_t{1073741823}, std::uint64_t{1073741824}, kVarintMax}) {

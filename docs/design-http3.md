@@ -465,8 +465,16 @@ HTTP/2 write-stall rule).
 The send side of a stream keeps no copy of a memory body: the response's bytes stay
 where they are (a cache entry through its `shared_ptr`, the handler's `MemoryBody`) and
 the stream keeps offsets: sent, acknowledged in order, and the lost ranges to resend
-first. A file body is read again from the file for a lost range, through a 64 KB window
-read ahead per stream. A streamed body (`StreamBody`, 7.3, 0.1.0-alpha.142) cannot be
+first. A file body is read again from the file for a lost range, through a window read
+ahead per stream: 64 KB, or the file's size when smaller, and at most sixteen per connection
+(1 MB; `take_window`, `drop_window`, 0.1.0-alpha.143). A stream past them sends its head and
+waits out of the ready list; a window its stream is done with (every byte acknowledged, a
+reset, a close) goes to the first stream waiting, in the order they asked, and is freed when
+none waits. Such a stream is not the client's stall: 7.3's check counts its time from when it
+has a window. Before, every stream reading a file took a 64 KB window at once and kept it in
+the stream pool until the connection closed: 8 MB at 128 streams. The window is a read
+buffer, not the bytes in flight, which only the client's credit and the congestion window
+bound. A streamed body (`StreamBody`, 7.3, 0.1.0-alpha.142) cannot be
 pulled twice, so its bytes are appended into the stream's send blocks
 (`quic/send_blocks.hpp`): 16 KB blocks taken as the pieces arrive, each piece with its DATA
 frame header inside one block (a block may end short; the offsets run on), freed as the
@@ -563,10 +571,10 @@ per wake-up, the HTTP/2 rule.
 | CRYPTO reassembly | up to 16 KB per level while the handshake lasts | freed with the level |
 | QPACK decoder table | at most 4 KB | the peer decides how much of it to use |
 | QPACK encoder table | at most 1 KB | as HTTP/2's |
-| per active stream | Stream (6.4 KB) + arena at the request's exact size + the gap map and body buffer up to its window | pooled at the concurrency limit, emptied by the idle shed, as HTTP/2 |
-| output in flight | memory bodies nothing; a 64 KB file window per stream reading a file (kept with the pooled stream, not capped per connection: up to 8 MB at 128 streams); streamed bodies' blocks at most 1 MB, 512 KB a stream | 6.6 |
+| per active stream | Stream (6.4 KB) + arena at the request's exact size + the gap map and body buffer up to its window | pooled at the concurrency limit for the connection's life: HTTP/3 has no idle shed, an idle connection ends at `idle_timeout` (6.9) |
+| output in flight | memory bodies nothing; a file body's window, at most 64 KB, at most sixteen per connection (1 MB), freed with its stream (0.1.0-alpha.143; before, one per stream reading a file, kept with the pooled stream: up to 8 MB at 128 streams); streamed bodies' blocks at most 1 MB, 512 KB a stream | 6.6 |
 | idle connection, target | under 12 KB after the shed | HTTP/2 today 19 KB, of which 8 KB is the HPACK ring a client fills; the QPACK table is bounded at 4 KB |
-| worst case at the defaults | 16 KB + 4 KB + 128 x 18 KB + 1 MB + 512 KB, about 3.8 MB | the HTTP/2 number; nothing unbounded |
+| worst case at the defaults | 16 KB + 4 KB + 128 x 18 KB + 1 MB + 512 KB, about 3.8 MB, and the file windows' 1 MB: about 4.8 MB | the HTTP/2 number plus the windows; nothing unbounded (before 0.1.0-alpha.143 the windows were not capped and this row left them out) |
 
 The datagram buffers are the worker's, not the connection's: 2 MB for receiving and
 2 MB for the send batch per worker, allocated once.
@@ -917,7 +925,7 @@ time) and the same profile load (`profile-transport.txt` and the files before it
 | ACK frame with many ranges | CPU per frame | 32 ranges processed, the rest ignored; frames bounded by the packet | 32 | `fuzz_quic_packet` |
 | Connection id games (the 2024 quic-go class) | NEW_CONNECTION_ID with `Retire Prior To` floods, RETIRE floods | at most four active ids from the peer, CONNECTION_ID_LIMIT_ERROR beyond; the retirements a `Retire Prior To` demands are queued as one range, never one frame each; a retirement of an id we never issued is PROTOCOL_ERROR; retirements beyond the ids issued are glitches | 4 ids | `h3-attacks.py cid-flood` |
 | Stream flood, Rapid Reset over QUIC | streams beyond the limit; streams reset at once | STREAM_LIMIT_ERROR beyond MAX_STREAMS; the reset counter (RESET_STREAM and STOP_SENDING before the answer, resets we send) closes at 128 per second; the glitch budget | 128 streams, 128 resets per second, 100 glitches | `h3-attacks.py stream-flood`, `rapid-reset` |
-| Flow-control games | a zero window held, 1-byte MAX_STREAM_DATA dribbles, DATA_BLOCKED floods; a client that never reads a streamed answer | a streamed answer's reads stop while its bytes wait (512 KB a stream, 1 MB a connection, 7.3), test `h2-streamed-bodies.py h3-backpressure`; the write-stall rule (0.1.0-alpha.143, the alpha.142 report's F3): an answer the client takes nothing of (no byte put into packets or acknowledged) for `idle_timeout`, its application not being read, is reset with H3_REQUEST_CANCELLED and its exchange ended, by a check every 2 s while answers are open (`Http3Connection::on_check`, the progress sampled there, never per packet), test `h2-streamed-bodies.py h3-stalled-reader`; the application's `read_timeout` no longer runs while such a client holds it back; updates under 1 KB while more is pending are glitches | | `h3-attacks.py slow-read`, `dribble` |
+| Flow-control games | a zero window held, 1-byte MAX_STREAM_DATA dribbles, DATA_BLOCKED floods; a client that never reads a streamed answer | a streamed answer's reads stop while its bytes wait (512 KB a stream, 1 MB a connection, 7.3), test `h2-streamed-bodies.py h3-backpressure`; the write-stall rule (0.1.0-alpha.143, the alpha.142 report's F3): an answer the client takes nothing of (no byte put into packets or acknowledged) for `idle_timeout`, its application not being read, is reset with H3_REQUEST_CANCELLED and its exchange ended, by a check every 2 s while answers are open (`Http3Connection::on_check`, the progress sampled there, never per packet; an answer waiting for a file window, 6.6, is not counted until it has one), test `h2-streamed-bodies.py h3-stalled-reader`, `h3-attacks.py file-windows`; the application's `read_timeout` no longer runs while such a client holds it back; updates under 1 KB while more is pending are glitches | | `h3-attacks.py slow-read`, `dribble` |
 | Reassembly memory | out-of-order STREAM and CRYPTO data held in gaps | bounded by the windows we granted (beyond is FLOW_CONTROL_ERROR) and the CRYPTO cap per level; the sum is 6.10 | 16 KB per level, the stream's window | `h3-attacks.py gaps`; `fuzz_quic_conn` |
 | QPACK bomb, blocked-stream hold, encoder-stream games | a huge entry referenced thousands of times; sections referencing inserts that never come; capacity games | the decoder table at most 4 KB, blocked streams at most 16 with at most 16 KB each, the decoded list stopped at the first byte over `max_header_size`, capacity above ours or an insert above the capacity is QPACK_ENCODER_STREAM_ERROR | 4 KB, 16 streams, 16 KB | `fuzz_qpack` differential; `h3-attacks.py qpack-bomb`, `blocked-hold` |
 | Control stream abuse | no SETTINGS first, a second SETTINGS, the control stream closed, frames on the wrong stream type, CANCEL_PUSH or PUSH_PROMISE, MAX_PUSH_ID games | the RFC's errors (7.1); reserved frame and stream types ignored, their bytes discarded and counted against the windows | | `fuzz_h3_frame`; `h3-attacks.py control-stream` |
@@ -927,7 +935,7 @@ time) and the same profile load (`profile-transport.txt` and the files before it
 | Spoofed stateless reset, Version Negotiation or CONNECTION_CLOSE | tear down a connection from outside | a reset must end in a token we issued (HMAC under the server secret); Version Negotiation answered only for unknown versions and ignored after the handshake; CONNECTION_CLOSE only from a packet that decrypts | | unit tests; the interop runner |
 | Slow handshake, slowloris | a client that dribbles | `max_idle_timeout` = `idle_timeout`; the handshake finishes within `idle_timeout` of the connection's creation, and only a packet that opens restarts the idle timer (alpha.116, audit 2026-10-07, item 2.4); planned and not built: `body_timeout` between DATA frames (item 2.10) | 15 s, 60 s | `h3-attacks.py handshake-deadline` (alpha.115 kept a half-open connection fed undecryptable packets; a silent control and a new handshake beside it) |
 | 0-RTT replay | a replayed early request | early data refused in phase I (`SSL_set_quic_tls_early_data_enabled` off); later opt-in for GET and HEAD only, with `Early-Data: 1` to upstreams | | unit |
-| Memory as a whole | anything that grows | every buffer belongs to a stream, a connection or the worker and has a cap; the worst case is 6.10 | about 3.8 MB per connection at the defaults | the attack suite samples RSS through every run |
+| Memory as a whole | anything that grows | every buffer belongs to a stream, a connection or the worker and has a cap; the worst case is 6.10; files above `cache.max_file_size` read through sixteen windows a connection at most, freed with their streams (0.1.0-alpha.143: before, one per stream, kept in the pool, 8 MB at 128 streams) | about 4.8 MB per connection at the defaults | the attack suite samples RSS through every run; `h3-attacks.py file-windows`, `file-windows-queue` |
 
 ### 9.2 Testing the code, not the list
 

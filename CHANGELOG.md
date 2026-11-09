@@ -67,6 +67,15 @@
   Each writes an info line naming the client (`no progress for 15 s, the client took nothing of the
   answer`; HTTP/1.1's is new), and the application's exchange ends at once, so its slot comes back.
   Found by the test VPS's report on 0.1.0-alpha.142 (F3); `docs/configuration.md` 8.
+- **HTTP/3 holds at most 1 MB per connection for large files, and frees it when they are done.** A
+  file above `cache.max_file_size` is sent through a 64 KB window. Every such download on a connection
+  took one at once, and the window stayed with the connection's pool of finished streams until the
+  connection closed: a page fetching 128 large files over one connection held 8 MB, and kept it after
+  the downloads ended. A connection now holds at most 16 windows (1 MB); a seventeenth download sends
+  its headers and starts as soon as one of the sixteen finishes, in the order the downloads came. A
+  window is freed when its download is done, never kept. Each download still runs as fast as the
+  network and the client allow: the window is a read buffer, not a limit on what is in flight
+  (`docs/design-http3.md` 6.6 and 6.10).
 
 ## 0.1.0-alpha.142 (2026-11-09)
 
