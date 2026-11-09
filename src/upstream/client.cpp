@@ -45,6 +45,29 @@ const char* to_string(UpstreamFailure f) noexcept {
     return "unknown";
 }
 
+namespace {
+std::string duration_text(std::chrono::milliseconds d) {
+    const auto ms = d.count();
+    return ms % 1000 == 0 ? std::to_string(ms / 1000) + " s" : std::to_string(ms) + " ms";
+}
+}  // namespace
+
+// Until 0.1.0-alpha.143 a CGI refusal named cgi.max_connections when the queue had refused it, and
+// the queue's timeout and the head limit named no key (the alpha.142 report, F4); a proxy's none.
+std::string limit_text(UpstreamFailure f, const UpstreamOptions& o, std::string_view table, std::string_view busy) {
+    const std::string t(table);
+    const std::string running = " behind the " + std::string(busy) + " busy on this worker (" + t + ".max_connections = " +
+                                std::to_string(o.max_connections) + ")";
+    switch (f) {
+        case UpstreamFailure::pool_saturated:
+            return ": the queue was full (" + t + ".queue_depth = " + std::to_string(o.queue_depth) + ")" + running;
+        case UpstreamFailure::queue_timeout: return ": waited " + t + ".queue_wait (" + duration_text(o.queue_wait) + ")" + running;
+        case UpstreamFailure::head_too_large:
+            return ": the head is larger than " + t + ".head_max (" + std::to_string(o.head_max) + " bytes)";
+        default: return {};
+    }
+}
+
 int status_for(UpstreamFailure f) noexcept {
     switch (f) {
         case UpstreamFailure::pool_saturated:
@@ -574,11 +597,7 @@ std::string UpstreamRequest::failure_text() const {
     std::string t = table + " " + peer() + " " + to_string(result_.failure) + " after " + std::to_string(delivered_) + " bytes of the answer";
     if (result_.error) t += " (" + result_.error.message() + ")";
     switch (result_.failure) {
-        case UpstreamFailure::read_timeout: {
-            const auto ms = options_.read_timeout.count();
-            t += ": no bytes for " + (ms % 1000 == 0 ? std::to_string(ms / 1000) + " s" : std::to_string(ms) + " ms") + " (" + table + ".read_timeout)";
-            break;
-        }
+        case UpstreamFailure::read_timeout: t += ": no bytes for " + duration_text(options_.read_timeout) + " (" + table + ".read_timeout)"; break;
         case UpstreamFailure::closed_early: t += ": the connection closed before the answer's end"; break;
         default: break;
     }

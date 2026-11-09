@@ -160,6 +160,10 @@ enum class UpstreamFailure : std::uint8_t {
 const char* to_string(UpstreamFailure f) noexcept;
 // The HTTP status we answer with: 503 (pool), 504 (timeouts), 502 (the rest).
 int status_for(UpstreamFailure f) noexcept;
+// What decided a refusal by the pool or the head limit, for the error-log line, naming the keys of
+// `table` ("cgi", "proxy") with their values; `busy` says what fills the pool ("processes of this
+// location"). Empty for any other failure.
+std::string limit_text(UpstreamFailure f, const UpstreamOptions& o, std::string_view table, std::string_view busy);
 
 // The FastCGI code and its tests use these names.
 using FcgiAddress = UpstreamAddress;

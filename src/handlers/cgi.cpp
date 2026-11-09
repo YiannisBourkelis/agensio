@@ -127,11 +127,7 @@ void CgiHandler::finish(Exchange& x, UpstreamResult& res) {
                 msg += ": no output for " + std::to_string(x.loc->cgi.options.read_timeout.count() / 1000) +
                        " s (cgi.read_timeout); the process was killed";
                 break;
-            case UpstreamFailure::pool_saturated:
-                msg += ": " + std::to_string(x.loc->cgi.options.max_connections) +
-                       " processes already running for this location on this worker (cgi.max_connections)";
-                break;
-            default: break;
+            default: msg += limit_text(res.failure, x.loc->cgi.options, "cgi", "processes of this location"); break;
         }
         log_.error(msg);
         const int status = status_for(res.failure);

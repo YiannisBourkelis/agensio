@@ -30,6 +30,16 @@
   (an event stream on the same page) it could stay open for good. The stream now ends when the client
   acknowledges the reset, and a lost one goes again (RFC 9000 3.1, 13.3). Found by the test VPS's
   report on 0.1.0-alpha.142 (F1).
+- **Fix: the error-log line of a CGI or proxy refusal names the key that decided it.** A CGI request
+  refused because the location's queue was full was logged as "1 processes already running for this
+  location on this worker (cgi.max_connections)", naming the cap and not the `queue_depth` that
+  refused it; a wait past `queue_wait` and a head past `head_max` named no key, and a proxy's three
+  refusals named none. They now read, for example, `cgi /srv/cgi/sse.py pool_saturated: the queue was
+  full (cgi.queue_depth = 1) behind the processes of this location busy on this worker
+  (cgi.max_connections = 1)`, `queue_timeout: waited cgi.queue_wait (5 s) behind ...` and
+  `head_too_large: the head is larger than cgi.head_max (1024 bytes)`, with the `proxy.` keys and
+  "the connections to this origin" for a proxy. Found by the test VPS's report on 0.1.0-alpha.142
+  (F4).
 
 ## 0.1.0-alpha.142 (2026-11-09)
 

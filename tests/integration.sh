@@ -396,6 +396,11 @@ path = "/cgi-slow/"
 alias = "{root}/tests/cgi"
 cgi = {{ read_timeout = 1, max_connections = 1, queue_depth = 0 }}
 
+[[site.location]]                       # one process, a queue of one that waits a second, a 1 KB head
+path = "/cgi-queue/"
+alias = "{root}/tests/cgi"
+cgi = {{ max_connections = 1, queue_depth = 1, queue_wait = 1, head_max = "1KB" }}
+
 [[site.location]]                       # E9: one slot, no queue (its own origin: pool limits are per upstream)
 path = "/abort/"
 upstream = "http://127.0.0.1:9109/"
@@ -3775,7 +3780,12 @@ except OSError:
   check "cgi: missing script is 404" "404" "$(code $P/cgi-bin/nope.cgi)"
   check "cgi: timeout kills the script, 504" "504" "$(code $P/cgi-slow/slow.cgi)"
   check "cgi: process cap with no queue: 503 at once" "503" "$( (curl -sS -o /dev/null $P/cgi-slow/slow.cgi &) ; sleep 0.3; code $P/cgi-slow/slow.cgi)"
-  sleep 1.5
+  # The refusals name the key that decided them (the alpha.142 report, F4: the full queue's line named
+  # cgi.max_connections, the queue's timeout and the head limit no key).
+  check "cgi: the full queue's refusal names cgi.queue_depth" "yes" "$(grep -q 'slow.cgi pool_saturated: the queue was full (cgi.queue_depth = 0) behind the processes of this location busy on this worker (cgi.max_connections = 1)' bench/tmp/error.log && echo yes)"
+  check "cgi: a wait past queue_wait is a 503 naming cgi.queue_wait" "503 yes" "$( (curl -sS -o /dev/null $P/cgi-queue/slow.cgi &) ; sleep 0.3; code $P/cgi-queue/slow.cgi) $(grep -q 'slow.cgi queue_timeout: waited cgi.queue_wait (1 s) behind the processes of this location busy' bench/tmp/error.log && echo yes)"
+  sleep 2  # the queued request's script (3 s) ends before the next one
+  check "cgi: a head past head_max is a 502 naming cgi.head_max" "502 yes" "$(code $P/cgi-queue/bighead.cgi) $(grep -q 'bighead.cgi head_too_large: the head is larger than cgi.head_max (1024 bytes)' bench/tmp/error.log && echo yes)"
   # TLS to the origin (D4b): the suite's HTTPS site is the origin; the body is the docroot's index.
   check "proxy: https origin, verification off" "$IDX" "$(curl -sS $P/tls/ | sum)"
   check "proxy: https origin verified against the configured CA and name" "$IDX" "$(curl -sS $P/tlsverify/ | sum)"
@@ -3818,6 +3828,8 @@ PYT
 )
   check "proxy: an abandoned request frees its pool slot within a tick" "200 fast" "$abort"
   check "proxy: the abandoned request was cancelled, not answered" "yes" "$(grep -q '"target":"/abort/slow?ms=1500".*"status":0' bench/tmp/access.log 2>/dev/null && echo yes || { sleep 1.2; grep -q '"target":"/abort/slow?ms=1500"' bench/tmp/access.log && echo yes; })"
+  check "proxy: the full queue's refusal names proxy.queue_depth" "503 yes" "$( (curl -sS -o /dev/null "$P/abort/slow?ms=800" &) ; sleep 0.3; code "$P/abort/slow?ms=801") $(grep -q 'pool_saturated for GET /abort/slow?ms=801: the queue was full (proxy.queue_depth = 0) behind the connections to this origin busy on this worker (proxy.max_connections = 1)' bench/tmp/error.log && echo yes)"
+  sleep 0.8
   # Upgrade tunnelling (D3): 101 passed through with Upgrade/Connection, bytes flow both
   # ways (including the ones sent right behind the request head), the origin's close ends it.
   tunnel=$(python3 - <<'PYT'

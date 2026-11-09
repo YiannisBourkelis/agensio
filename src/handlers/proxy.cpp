@@ -301,7 +301,7 @@ void ProxyHandler::finish(Exchange& x, UpstreamResult& res) {
                     msg += "; without server_name the certificate must name " + x.req->address().host +
                            ": set proxy.tls.server_name to the name it carries";
                 break;
-            default: break;
+            default: msg += limit_text(res.failure, loc.proxy.options, "proxy", "connections to this origin"); break;
         }
         if (!x.req->health_note().empty()) msg += "; " + x.req->health_note();
         log_.error(msg);
