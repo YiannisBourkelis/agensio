@@ -202,6 +202,57 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-11-10, the release check of 0.1.0-alpha.143, before the tag, on 6e8bdb54 (HTTP/3's GSO burst limit,
+the alpha.142 report's F1 to F4, the dropped-datagram count in status, no resend of what the client has,
+a slow client no longer cut as its application's `read_timeout`, the file windows capped per connection).
+The release build: unit, integration (856, isolation, the cookbook, `h3-attacks.py` and
+`h2-streamed-bodies.py` inside it), reload (29), control (28), pools (26), auth (51, in
+`agensio-devbox:php` with its network) and Pebble (21) pass. The builds without OpenSSL, without
+libxcrypt, without libbrotli and without libzstd link and pass their unit tests. The sanitizer build
+(`build-asan`, GCC 14): unit, the integration suite (856) and Pebble (21) clean, no sanitizer report in
+the 23,029 files the runs wrote. `scripts/fuzz-all.sh -t 300`, every target (twenty-six, twenty-four at
+once, one process each, five minutes): 634.2 M runs, no finding; `fuzz_quic_conn`, which answers files
+through the connection's windows since this release, at 1,832 edges (1,713 at alpha.142). The A/B
+against alpha.142 in the devbox (`--network none`): `bench/ab.sh v0.1.0-alpha.142 -3 -r 4`
+(`ab-20261109-235913.md`) 0.997 to 1.034, the h3 rows among them; `-2 -P -C -r 3`
+(`ab-20261109-234527.md`) 0.936 to 1.058, the four h2 rows at 1.032 to 1.058, though no HTTP/2 code
+changed. `-2 -r 4` again (`ab-20261110-000657.md`): the h2 rows 0.925 to 1.021, the static
+rows 0.969 to 1.037 but `http / c=64` at 1.117, from one round of four in which the new side's first
+four rows were all slow (2.75, 7.28, 3.41 and 22.55 µs; the two runs before had the row at 1.042 and
+1.029, each from one high round). `perf
+stat` on that row, the two binaries alternated twice (`perfstat-plain-20261110-001900.md`): 18.4 to
+18.5 k instructions a request on both, the same or fewer cycles and 261 L1i misses against 273 to 277
+on the new side: the same work, noise.
+
+| target | runs | edges | result |
+|---|---|---|---|
+| fuzz_archive | 16.75 M | 641 | clean |
+| fuzz_auth_users | 12.38 M | 497 | clean |
+| fuzz_chunked | 92.28 M | 63 | clean |
+| fuzz_compressed_body | 0.57 M | 606 | clean |
+| fuzz_cron_lines | 10.49 M | 120 | clean |
+| fuzz_dotenv | 1.18 M | 2363 | clean |
+| fuzz_fcgi | 54.10 M | 96 | clean |
+| fuzz_fields | 4.47 M | 588 | clean |
+| fuzz_h2_bodies | 0.03 M | 9238 | clean |
+| fuzz_h2_conn | 0.67 M | 11985 | clean |
+| fuzz_hpack | 2.23 M | 530 | clean |
+| fuzz_hpack_roundtrip | 0.35 M | 466 | clean |
+| fuzz_http_head | 56.86 M | 152 | clean |
+| fuzz_json | 5.60 M | 552 | clean |
+| fuzz_log_line | 5.18 M | 772 | clean |
+| fuzz_parser | 39.88 M | 240 | clean |
+| fuzz_path | 6.49 M | 236 | clean |
+| fuzz_php_constraint | 11.32 M | 766 | clean |
+| fuzz_qpack | 7.00 M | 646 | clean |
+| fuzz_quic_conn | 0.39 M | 1832 | clean |
+| fuzz_quic_packet | 21.45 M | 217 | clean |
+| fuzz_redirect | 4.58 M | 1232 | clean |
+| fuzz_refuse | 3.01 M | 875 | clean |
+| fuzz_response_headers | 0.51 M | 3355 | clean |
+| fuzz_sql_scan | 7.23 M | 158 | clean |
+| fuzz_transport_params | 269.15 M | 211 | clean |
+
 2026-11-09, the release check of 0.1.0-alpha.142, before the tag, on c4574f48 (HTTP/3 carrying streamed
 answers through the send blocks with the keep-alive PING, the reset fixes, compression in pieces over
 HTTP/3, the weekly CI run's suite fixes). The release build: unit, integration (851, isolation and the
