@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.143 (unreleased)
+## 0.1.0-alpha.143 (2026-11-10)
 
 - **Fix: HTTP/3 no longer loses a whole burst of datagrams, which stalled large answers.** The server
   hands the kernel a burst of datagrams to one client as one message that the kernel splits (GSO).
