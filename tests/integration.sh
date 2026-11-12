@@ -3708,6 +3708,9 @@ except OSError:
   kill $IDLE_PID 2>/dev/null; wait $IDLE_PID 2>/dev/null
   check "proxy: origin down gives 502" "502" "$(code $P/down/json)"
   check "proxy: 502 reason in the error log" "yes" "$(grep -q 'proxy 127.0.0.1:9199 connect_refused' bench/tmp/error.log && echo yes)"
+  # A lone origin is never marked down: there is no other member to go to, every request tries it, so
+  # "marked down for 10 s" in the error log was false (the alpha.143 report, N4: seen with one origin).
+  check "proxy: a lone origin that fails is not marked down (nothing is skipped there)" "502 502 502 502 no" "$(curl -sS -o /dev/null -o /dev/null -o /dev/null -o /dev/null -w '%{http_code} ' $P/down/json $P/down/json $P/down/json $P/down/json | sed 's/ $//') $(grep -q '127.0.0.1:9199 marked down for 10 s' bench/tmp/error.log && echo yes || echo no)"
   before=$(curl -sS $UPS/stats | sed 's/.*"connections":\([0-9]*\).*/\1/')
   for _ in 1 2 3 4 5 6 7 8 9 10; do curl -sS -o /dev/null $P/json; done
   after=$(curl -sS $UPS/stats | sed 's/.*"connections":\([0-9]*\).*/\1/')

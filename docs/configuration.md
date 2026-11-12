@@ -2148,7 +2148,8 @@ request whose origin refuses the connection or times out before answering moves 
 next member: any request when nothing was sent yet (a refused connection), only GET and
 HEAD once bytes went out, so a POST is never delivered twice. Each member is a pool of its
 own with the location's limits; all members must share the URI part. Both events are in
-the error log: `marked down for 10 s after 3 failure(s)` and `is back`. No weights and no
+the error log: `marked down for 10 s after 3 failure(s)` and `is back`. A location with one
+origin marks nothing and logs neither: every request tries it. No weights and no
 active health checks until a real deployment asks for them.
 
 **TLS to the origin.** `upstream = "https://10.0.0.11:8443"` talks TLS to the origin,

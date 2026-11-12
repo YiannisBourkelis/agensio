@@ -24,6 +24,13 @@
   that cannot be reached, times out, closes early or does not answer as HTTP still counts. The
   `502` and its error-log line are unchanged. Found by the test VPS's report on 0.1.0-alpha.143
   (N4); `docs/configuration.md` 12.
+- **Fix: a location with one origin no longer logs `marked down` and `is back`.** Passive health
+  skips a failing member of a list of origins. A location with a single origin has no other to go
+  to, and every request tried it anyway, but after three failures the error log said
+  `marked down for 10 s`, and `is back` at its next answer: lines that sent whoever read the log
+  looking for requests being skipped. Its failures also counted for a list naming the same
+  address in another location, under that list's `max_fails`. A lone origin is not marked now;
+  each failure keeps its own error-log line with the reason. `docs/configuration.md` 12.
 
 ## 0.1.0-alpha.143 (2026-11-10)
 

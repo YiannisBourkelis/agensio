@@ -1048,7 +1048,10 @@ bool UpstreamRequest::try_next_address(UpstreamFailure why) {
 
 void UpstreamRequest::fail(UpstreamFailure why, std::error_code ec) {
     if (phase_ == Phase::cancelled || phase_ == Phase::finished || phase_ == Phase::failed) return;
-    if (counts_against_origin(why)) pool_.mark_failure(address_, options_, note_);
+    // Only a member of a list is marked: a lone origin has no other to go to and every request tries
+    // it, so its "marked down" line was false, and its failures counted for a list naming the same
+    // address under that list's own max_fails (until 0.1.0-alpha.144).
+    if (counts_against_origin(why) && group_ && group_->size() > 1) pool_.mark_failure(address_, options_, note_);
     if (try_next_address(why)) return;
     const Phase was = phase_;
     phase_ = Phase::failed;
