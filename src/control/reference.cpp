@@ -162,7 +162,7 @@ const std::vector<KeyDef>& key_defs() {
         {"php = {}", "max_idle", "int", "8", "Kept idle connections per worker (keep_conn).", "reload", "site file", "7"},
         {"php = {}", "idle_timeout", "seconds", "30", "Kept connection closed after this long idle (0 = never); lets an ondemand child exit.", "reload", "site file", "7"},
         {"php = {}", "queue_depth", "int", "64", "Requests waiting for a connection per worker; 503 beyond.", "reload", "site file", "7"},
-        {"php = {}", "queue_wait", "seconds", "5", "Longest wait in that queue; 503 with Retry-After beyond.", "reload", "site file", "7"},
+        {"php = {}", "queue_wait", "seconds", "5", "Longest wait in that queue; 503 beyond, whose Retry-After is this value in whole seconds, rounded up.", "reload", "site file", "7"},
         {"php = {}", "priority_reserve", "share", "0", "Share of max_connections (0 to 1) kept for priority = true locations.", "reload", "site file", "7"},
         {"php = {}", "keep_conn", "bool", "false (true with a generated static or dynamic pool of at least one child per worker)", "FastCGI keep-alive; php-fpm pins a child to every kept connection, so not with pm = ondemand, and max_connections x workers at most the children.", "reload", "site file", "7"},
         {"php = {}", "buffering", "bool", "true", "Buffer php-fpm's whole answer (memory, then a temp file) so the child is freed at once; false streams it.", "reload", "site file", "7"},
@@ -190,7 +190,7 @@ const std::vector<KeyDef>& key_defs() {
         {"proxy = {}", "max_idle", "int", "64", "Kept idle connections per worker.", "reload", "site file", "12"},
         {"proxy = {}", "idle_timeout", "seconds", "30", "Kept connection closed after this long idle (0 = until the origin closes it).", "reload", "site file", "12"},
         {"proxy = {}", "queue_depth", "int", "1024", "Requests waiting per worker; 503 beyond.", "reload", "site file", "12"},
-        {"proxy = {}", "queue_wait", "seconds", "5", "Longest wait in the queue.", "reload", "site file", "12"},
+        {"proxy = {}", "queue_wait", "seconds", "5", "Longest wait in the queue; 503 beyond, whose Retry-After is this value in whole seconds, rounded up.", "reload", "site file", "12"},
         {"proxy = {}", "priority_reserve", "share", "0", "Share of max_connections (0 to 1) kept for priority = true locations.", "reload", "site file", "12"},
         {"proxy = {}", "buffering", "bool", "true", "Buffer the origin's answer or stream it.", "reload", "site file", "12"},
         {"proxy = {}", "buffer_max", "size", "1MB", "Memory before the answer spills to a temp file.", "reload", "site file", "12"},
@@ -264,7 +264,7 @@ const std::vector<KeyDef>& key_defs() {
         {"cgi = {}", "send_timeout", "seconds", "30", "Writing the request body to the script's stdin.", "reload", "site file", "13"},
         {"cgi = {}", "max_connections", "int", "8", "Scripts running at once per worker; the rest wait in the queue.", "reload", "site file", "13"},
         {"cgi = {}", "queue_depth", "int", "32", "Requests waiting for a process per worker; 503 beyond.", "reload", "site file", "13"},
-        {"cgi = {}", "queue_wait", "seconds", "5", "Longest wait in that queue; 503 with Retry-After beyond.", "reload", "site file", "13"},
+        {"cgi = {}", "queue_wait", "seconds", "5", "Longest wait in that queue; 503 beyond, whose Retry-After is this value in whole seconds, rounded up.", "reload", "site file", "13"},
         {"cgi = {}", "priority_reserve", "share", "0", "Share of max_connections (0 to 1) kept for priority = true locations.", "reload", "site file", "13"},
     };
     return defs;

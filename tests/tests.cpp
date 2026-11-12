@@ -3356,6 +3356,12 @@ static void test_pools() {
     Config cfg = load_config(dir / "a.toml");
     const SiteConfig& a = cfg.sites[0];
     const SiteConfig& b = cfg.sites[1];
+    // A site whose pool is derived and that writes no php table still says Retry-After on its
+    // queue's 503 (until 0.1.0-alpha.144 only a parsed table set the value, so such a site sent none).
+    write("nophp.toml", server + shop);
+    const Config nophp = load_config(dir / "nophp.toml");
+    CHECK(Router::location(nophp.sites[0], "/index.php").kind == HandlerKind::fastcgi &&
+          Router::location(nophp.sites[0], "/index.php").fastcgi.retry_after == "5");
     // Derived socket, connections sized to children / workers, project root in open_basedir; no
     // keep-alive to an ondemand pool (the default pm): php-fpm forks a child per event on its socket
     // and a child on a kept connection never takes another (the alpha.66 report). The pool's name is
@@ -5408,6 +5414,28 @@ static void test_proxy() {
     CHECK((Router::location(ccfg.sites[0], "/cgi-bin/x").index == std::vector<std::string>{"index.cgi"}) &&
           (Router::location(ccfg.sites[0], "/cgi-own/x").index == std::vector<std::string>{"start.pl"}) &&
           (Router::location(ccfg.sites[0], "/x").index == std::vector<std::string>{"index.html"}));
+    // A queue's 503 carries Retry-After: the location's queue_wait in whole seconds, rounded up
+    // (after it every request that waited has left the queue). Until 0.1.0-alpha.144 a CGI
+    // location said 1 whatever its queue_wait (the alpha.143 report, N3), a location whose
+    // handler had no table of its own (a proxy with `upstream` alone) said nothing, and 1.5 s
+    // was rounded down to 1.
+    write("retry.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\nphp = { socket = \"127.0.0.1:9000\" }\n"
+                        "[[site.location]]\npath = \"/cgi-seven/\"\nhandler = \"cgi\"\ncgi = { queue_wait = 7 }\n"
+                        "[[site.location]]\npath = \"/cgi-plain/\"\nhandler = \"cgi\"\n"
+                        "[[site.location]]\npath = \"/cgi-short/\"\nhandler = \"cgi\"\ncgi = { queue_wait = 0.4 }\n"
+                        "[[site.location]]\npath = \"/api/\"\nupstream = \"http://127.0.0.1:9100\"\n"
+                        "[[site.location]]\npath = \"/api-long/\"\nupstream = \"http://127.0.0.1:9101\"\nproxy = { queue_wait = 30 }\n"
+                        "[[site.location]]\npath = \"/php/\"\nhandler = \"fastcgi\"\n"
+                        "[[site.location]]\npath = \"/php-own/\"\nhandler = \"fastcgi\"\nfastcgi = { socket = \"127.0.0.1:9001\", queue_wait = 1.5 }\n");
+    const Config rcfg = load_config(dir / "retry.toml");
+    const SiteConfig& rsite = rcfg.sites[0];
+    CHECK(Router::location(rsite, "/cgi-seven/x").cgi.retry_after == "7");
+    CHECK(Router::location(rsite, "/cgi-plain/x").cgi.retry_after == "5");  // the default queue_wait
+    CHECK(Router::location(rsite, "/cgi-short/x").cgi.retry_after == "1");  // never 0
+    CHECK(Router::location(rsite, "/api/x").proxy.retry_after == "5");
+    CHECK(Router::location(rsite, "/api-long/x").proxy.retry_after == "30");
+    CHECK(Router::location(rsite, "/php/x").fastcgi.retry_after == "5");
+    CHECK(Router::location(rsite, "/php-own/x").fastcgi.retry_after == "2");  // 1.5 s rounded up
 
     // The forwarded head: hop-by-hop dropped, Host kept, X-Forwarded-* set.
     Stream st;

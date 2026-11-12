@@ -579,8 +579,6 @@ void parse_fcgi_table(const toml::table& t, const fs::path& base_dir, FcgiConfig
         if (*v < 0.0 || *v > 1.0) fail(where + ".priority_reserve must be in [0, 1]");
         out.options.priority_reserve = *v;
     }
-    const auto wait_s = std::chrono::duration_cast<std::chrono::seconds>(out.options.queue_wait).count();
-    out.retry_after = std::to_string(wait_s < 1 ? 1 : wait_s);
 }
 
 // `where` names the table itself (".add_headers", a proxy's ".request_headers"), so a message
@@ -812,7 +810,6 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         loc.cgi.address.key = "cgi:" + site.server_names.front() + loc.path;  // one pool per location
         loc.cgi.addresses = {loc.cgi.address};
         loc.cgi.configured = true;
-        loc.cgi.retry_after = "1";
         loc.methods = kFcgiMethods;
         loc.allow = allow_header(kFcgiMethods);
         loc.priority = t["priority"].value_or(false);
@@ -4352,6 +4349,20 @@ void finalize_site(SiteConfig& site) {
             if (std::find(v.deny_suffixes.begin(), v.deny_suffixes.end(), b) == v.deny_suffixes.end()) v.deny_suffixes.push_back(b);
         v.origin = "http";
         if (v.id == 0) v.id = next_id.fetch_add(1, std::memory_order_relaxed);
+    }
+    // What a queue's 503 says in Retry-After: the location's queue_wait in whole seconds, rounded up,
+    // since after it every request that waited has left the queue. Set here, for every location
+    // that has a queue, whatever table its limits came from: until 0.1.0-alpha.144 the table's
+    // parser set it, so a location without one (a proxy with `upstream` alone) sent none, a CGI
+    // location said 1 whatever its queue_wait (the alpha.143 report, N3), and 1.5 s said 1.
+    for (auto& loc : site.locations) {
+        UpstreamConfig* u = loc.kind == HandlerKind::fastcgi ? &loc.fastcgi
+                        : loc.kind == HandlerKind::proxy ? &loc.proxy
+                        : loc.kind == HandlerKind::cgi   ? &loc.cgi
+                                                         : nullptr;
+        if (!u) continue;
+        const auto ms = u->options.queue_wait.count();
+        u->retry_after = std::to_string(ms <= 1000 ? 1 : (ms + 999) / 1000);
     }
     // An https origin's kept connections are pooled with the location's TLS policy, so one
     // opened under one policy never serves a location with another (2026-10-09, the

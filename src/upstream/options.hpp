@@ -133,7 +133,7 @@ struct UpstreamConfig {
     std::string interpreter;
     std::vector<std::pair<std::string, std::string>> env;
     std::string params_prefix;  // FastCGI: constant FCGI_PARAMS pairs of this location, encoded once at load
-    std::string retry_after;    // "Retry-After" value for 503s (queue_wait in seconds)
+    std::string retry_after;    // "Retry-After" value for 503s: queue_wait in whole seconds, rounded up (finalize_site)
 };
 
 // Why an exchange failed, for the error log (with a fix hint) and the access log.

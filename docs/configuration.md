@@ -1387,7 +1387,7 @@ location on the same socket must agree on them: set them once on the site.
 | `request_buffer_max` | `"256KB"` | request body bytes kept in memory before the temp file |
 | `connect_timeout`, `send_timeout`, `read_timeout` | 5, 30, 60 s | 504 when exceeded; `read_timeout` is between two records from fpm, while agensio waits for them (not while a client that reads slower holds a streamed answer back, section 8) |
 | `max_connections` | 16 | in-flight requests per worker to this socket; more wait in the queue |
-| `queue_depth`, `queue_wait` | 64, 5 s | queue size and longest wait; beyond either, 503 with `Retry-After` |
+| `queue_depth`, `queue_wait` | 64, 5 s | queue size and longest wait; beyond either, 503 with `Retry-After`: the `queue_wait` in whole seconds, rounded up (after it every request that waited has left the queue) |
 | `priority_reserve` | 0 | share of `max_connections` kept for `priority = true` locations |
 | `max_idle` | 8 | idle connections kept per worker to this socket when `keep_conn` is on |
 | `idle_timeout` | 30 | seconds a kept connection may stay idle before agensio closes it (0 = kept until the peer closes); a kept connection pins a php-fpm child |
@@ -2263,7 +2263,7 @@ the kernel retransmitted, about fifteen minutes, holding both connections.
 | `request_buffering` | `true` | collect the request body before connecting; `false` streams it as it arrives |
 | `connect_timeout`, `send_timeout`, `read_timeout` | 5, 30, 60 s | 504 when exceeded; `read_timeout` is between two reads from the origin, while agensio waits for its bytes (not while a client that reads slower holds a streamed answer back, section 8); on a tunnel `send_timeout` bounds each write to either side |
 | `keep_conn`, `max_idle`, `idle_timeout` | `true`, 64, 30 s | keep-alive to the origin; idle connections kept per worker; how long one may stay idle before agensio closes it (0 = until the origin does) |
-| `max_connections`, `queue_depth`, `queue_wait` | 256, 1024, 5 s | per worker: in flight, waiting, and the longest wait before a 503 with `Retry-After` |
+| `max_connections`, `queue_depth`, `queue_wait` | 256, 1024, 5 s | per worker: in flight, waiting, and the longest wait before a 503 with `Retry-After` (the `queue_wait` in whole seconds, rounded up) |
 | `head_max` | 64 KB | an origin head larger than this is a 502 |
 | `max_fails`, `fail_timeout` | 3, 10 s | consecutive failures that mark a group member down, and for how long |
 | `tls` | verify on, system store | `{ verify, server_name, ca }` for `https://` origins |
@@ -2520,7 +2520,8 @@ location's `env` entries, and a plain `PATH`. The request body is its stdin, its
 is the response (a CGI head with `Status:` or `Location:`, then the body until it exits),
 its stderr goes to the error log. The options are those of section 7 that a process has, with
 these defaults: `max_connections = 8` processes per worker and `queue_depth = 32` waiting
-(more are a 503, `queue_wait` the longest wait, `priority_reserve` the share kept for
+(more are a 503 with `Retry-After`, `queue_wait` the longest wait and what `Retry-After` says,
+`priority_reserve` the share kept for
 `priority = true`), `read_timeout = 30` (no output for that long: the process is killed, 504, or
 a streamed answer cut), `send_timeout`, `head_max`, buffering and request buffering on
 (`buffer_max`, `buffer_file_max`, `request_buffer_max`). `buffering = false` sends the output as

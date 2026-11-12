@@ -3783,6 +3783,9 @@ except OSError:
   check "cgi: missing script is 404" "404" "$(code $P/cgi-bin/nope.cgi)"
   check "cgi: timeout kills the script, 504" "504" "$(code $P/cgi-slow/slow.cgi)"
   check "cgi: process cap with no queue: 503 at once" "503" "$( (curl -sS -o /dev/null $P/cgi-slow/slow.cgi &) ; sleep 0.3; code $P/cgi-slow/slow.cgi)"
+  # Retry-After on a queue's 503 is the location's queue_wait, 5 s by default (the alpha.143 report, N3: a
+  # CGI location said 1 whatever its queue_wait).
+  check "cgi: the queue's 503 carries Retry-After, the location's queue_wait" "503 5" "$( (curl -sS -o /dev/null $P/cgi-slow/slow.cgi &) ; sleep 0.3; curl -sS -o /dev/null -D - $P/cgi-slow/slow.cgi | tr -d '\r' | awk '/^HTTP/{c=$2} tolower($1)=="retry-after:"{r=$2} END{print c, r}')"
   # The refusals name the key that decided them (the alpha.142 report, F4: the full queue's line named
   # cgi.max_connections, the queue's timeout and the head limit no key).
   check "cgi: the full queue's refusal names cgi.queue_depth" "yes" "$(grep -q 'slow.cgi pool_saturated: the queue was full (cgi.queue_depth = 0) behind the processes of this location busy on this worker (cgi.max_connections = 1)' bench/tmp/error.log && echo yes)"

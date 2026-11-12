@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0-alpha.144 (unreleased)
+
+- **Fix: `Retry-After` on a queue's 503 is the location's `queue_wait`, for CGI too.** When a
+  location's queue is full, or a request waited `queue_wait` in it, the answer is a 503 with
+  `Retry-After`, the `queue_wait` in seconds: after it every request that waited has left the queue.
+  Three things were off:
+  - a CGI location said `Retry-After: 1` whatever its `cgi.queue_wait` (5 s by default), so a client
+    that honours the field (`curl --retry`, Python's urllib3, a crawler) came back while the same
+    scripts still ran, at the handler where a retry costs a process;
+  - a location whose handler had no table of its own sent no `Retry-After` at all: a proxy with
+    `upstream` alone, and a PHP site with its own account (`user`) and no `php` table, the usual
+    shape of a managed site;
+  - a fractional `queue_wait` was rounded down (`1.5` said 1); it is rounded up now.
+  Found by the test VPS's report on 0.1.0-alpha.143 (N3); `docs/configuration.md` 7, 12, 13.
+
 ## 0.1.0-alpha.143 (2026-11-10)
 
 - **Fix: HTTP/3 no longer loses a whole burst of datagrams, which stalled large answers.** The server
