@@ -5621,6 +5621,15 @@ static void test_proxy() {
         CHECK(note == "127.0.0.1:9108 is back");
         pool.mark_success(grp[1], note);  // a healthy member says nothing
     }
+    // What counts toward max_fails: a member that cannot be reached or does not answer as HTTP.
+    // Never agensio's own verdict on one exchange: its queue, its temp file, and (since
+    // 0.1.0-alpha.144; the alpha.143 report, N4) its head_max: the member answered, at once and in
+    // HTTP, and every other member would answer that path the same.
+    using UF = UpstreamFailure;
+    for (UF f : {UF::connect_refused, UF::socket_missing, UF::socket_permission, UF::connect_error, UF::connect_timeout,
+                 UF::send_timeout, UF::read_timeout, UF::closed_early, UF::bad_response_head, UF::protocol_error, UF::tls_error})
+        CHECK(counts_against_origin(f));
+    for (UF f : {UF::pool_saturated, UF::queue_timeout, UF::spill_error, UF::head_too_large}) CHECK(!counts_against_origin(f));
     // The proxy preset (D6): a site with `upstream` and no root; other locations coexist.
     write("preset.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\napp = \"proxy\"\nupstream = \"http://127.0.0.1:3000\"\nproxy = { read_timeout = 120 }\n"
                          "[[site.location]]\npath = \"/assets/\"\nalias = \"" + dir.string() + "/www\"\n");

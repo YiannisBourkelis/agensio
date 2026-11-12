@@ -14,6 +14,16 @@
     shape of a managed site;
   - a fractional `queue_wait` was rounded down (`1.5` said 1); it is rounded up now.
   Found by the test VPS's report on 0.1.0-alpha.143 (N3); `docs/configuration.md` 7, 12, 13.
+- **Fix: an answer whose head is over `head_max` no longer counts against its origin.** In a list
+  of origins (`upstream = [...]`), a member that fails `max_fails` times in a row is skipped for
+  `fail_timeout`. An answer refused for the size of its head (a `502`, `head_too_large`) counted as
+  such a failure, though the member had answered at once and every other member would answer that
+  path the same: six requests for one such URL took both members of a pair out of rotation, and
+  for the next 10 s every request went to one of them. Anyone who could reach such a URL could
+  repeat it. It counts neither as a failure nor as a success now, like a full queue; an origin
+  that cannot be reached, times out, closes early or does not answer as HTTP still counts. The
+  `502` and its error-log line are unchanged. Found by the test VPS's report on 0.1.0-alpha.143
+  (N4); `docs/configuration.md` 12.
 
 ## 0.1.0-alpha.143 (2026-11-10)
 

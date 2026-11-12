@@ -2139,7 +2139,11 @@ path = "/assets/"
 **Groups.** `upstream = ["http://10.0.0.11:3000", "http://10.0.0.12:3000"]` spreads
 requests over several origins, round-robin within each worker. An origin that fails
 `max_fails` times in a row (default 3) is skipped for `fail_timeout` (default 10 s), then
-tried again; when every member is down the one marked longest ago is tried anyway. A
+tried again; when every member is down the one marked longest ago is tried anyway. A failure
+is an origin that cannot be reached or does not answer as HTTP (a refused connection, a timeout,
+a failed TLS handshake, a connection closed early, an invalid head); agensio's own verdict on
+one request never counts: a full queue, and an answer whose head is over `head_max`, which came
+from an origin that is up and which every other member would answer the same. A
 request whose origin refuses the connection or times out before answering moves to the
 next member: any request when nothing was sent yet (a refused connection), only GET and
 HEAD once bytes went out, so a POST is never delivered twice. Each member is a pool of its

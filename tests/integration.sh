@@ -346,6 +346,11 @@ proxy = {{ forwarded = "both", request_headers = {{ "X-Forwarded-Proto" = "https
 path = "/group/"
 upstream = ["http://127.0.0.1:9107/", "http://127.0.0.1:9108/"]
 
+[[site.location]]                       # the same two origins behind a 1 KB head limit (their /bighead is 2 KB)
+path = "/group-head/"
+upstream = ["http://127.0.0.1:9107/", "http://127.0.0.1:9108/"]
+proxy = {{ head_max = "1KB" }}
+
 [[site.location]]                       # D4: one dead member, skipped after max_fails
 path = "/failover/"
 upstream = ["http://127.0.0.1:9199/", "http://127.0.0.1:9108/"]
@@ -3813,6 +3818,11 @@ except OSError:
   # alternates the members; the dead member of the failover group is tried, marked down
   # after max_fails, and then skipped; a POST is retried too (a connect failure sent nothing).
   check "proxy: group round-robin alternates the members" "yes" "$(curl -sS -i $P/group/json $P/group/json $P/group/json $P/group/json | tr -d '\r' | awk '/^X-Upstream-Port:/{print $2}' | paste -sd' ' | grep -Eq '^(9107 9108 9107 9108|9108 9107 9108 9107)$' && echo yes)"
+  # A head over head_max is agensio's verdict on one answer, not the origin's failure (the alpha.143
+  # report, N4): six of them in a row, three a member, took both members out of rotation for
+  # fail_timeout, and the four requests after them all went to one.
+  check "proxy: answers over head_max do not count against their origins: the members still take turns" "502 502 502 502 502 502 200 200 200 200 | yes" \
+    "$(curl -sS -i $P/group-head/bighead $P/group-head/bighead $P/group-head/bighead $P/group-head/bighead $P/group-head/bighead $P/group-head/bighead $P/group-head/json $P/group-head/json $P/group-head/json $P/group-head/json | tr -d '\r' > bench/tmp/ghead.txt; grep -o 'HTTP/1.1 [0-9][0-9][0-9]' bench/tmp/ghead.txt | awk '{printf "%s ", $2}' | sed 's/ $//') | $(awk '/^X-Upstream-Port:/{print $2}' bench/tmp/ghead.txt | paste -sd' ' | grep -Eq '^(9107 9108 9107 9108|9108 9107 9108 9107)$' && echo yes)"
   check "proxy: failover group answers from the live member" "200 200 200 | 3" "$(curl -sS -o /dev/null -o /dev/null -o /dev/null -w '%{http_code} ' $P/failover/json $P/failover/json $P/failover/json | sed 's/ $//') | $(curl -sS -i $P/failover/json $P/failover/json $P/failover/json | tr -d '\r' | grep -c '^X-Upstream-Port: 9108')"
   check "proxy: dead member marked down after max_fails" "yes" "$(grep -q '127.0.0.1:9199 marked down for 30 s after 2 failure' bench/tmp/error.log && echo yes)"
   check "proxy: POST retried on the next member after a connect failure" "abc 9108" "$(printf abc | curl -sS -i --data-binary @- $P/failover/echo | tr -d '\r' | awk '/^X-Upstream-Port:/{p=$2} END{print $0, p}')"

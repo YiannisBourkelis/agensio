@@ -68,6 +68,17 @@ std::string limit_text(UpstreamFailure f, const UpstreamOptions& o, std::string_
     }
 }
 
+// Passive health counts a member that cannot be reached or does not answer as HTTP. Never agensio's
+// own verdict on one exchange: its queue, its temp file, and its head_max. An answer whose head is
+// over the limit came at once and in HTTP, from a member that is up, and every other member would
+// answer that path the same: until 0.1.0-alpha.144 it counted, so three such answers a member took
+// healthy members out of rotation for fail_timeout (the alpha.143 report, N4; nginx counts it too,
+// as an invalid header).
+bool counts_against_origin(UpstreamFailure f) noexcept {
+    return f != UpstreamFailure::pool_saturated && f != UpstreamFailure::queue_timeout && f != UpstreamFailure::spill_error &&
+           f != UpstreamFailure::head_too_large;
+}
+
 int status_for(UpstreamFailure f) noexcept {
     switch (f) {
         case UpstreamFailure::pool_saturated:
@@ -1037,9 +1048,7 @@ bool UpstreamRequest::try_next_address(UpstreamFailure why) {
 
 void UpstreamRequest::fail(UpstreamFailure why, std::error_code ec) {
     if (phase_ == Phase::cancelled || phase_ == Phase::finished || phase_ == Phase::failed) return;
-    if (why != UpstreamFailure::pool_saturated && why != UpstreamFailure::queue_timeout &&
-        why != UpstreamFailure::spill_error)
-        pool_.mark_failure(address_, options_, note_);
+    if (counts_against_origin(why)) pool_.mark_failure(address_, options_, note_);
     if (try_next_address(why)) return;
     const Phase was = phase_;
     phase_ = Phase::failed;

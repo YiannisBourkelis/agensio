@@ -408,7 +408,8 @@ at once, whatever its method. After `max_fails` failures in a row a worker skips
 for `fail_timeout` seconds, then tries it again; when every member is down, the one marked
 longest ago is tried anyway. A failure is a refused connection, a timeout, a failed TLS
 handshake, a connection closed before the answer ended or an answer that is not HTTP; an answer
-the application gives, a `500` included, is a success. Once bytes went out, only a GET or HEAD
+the application gives, a `500` included, is a success, and an answer agensio refuses for its
+size (a head over `head_max`: a `502`) counts neither way. Once bytes went out, only a GET or HEAD
 moves to the next member, so a POST is never delivered twice. Each worker keeps its own count,
 and each member has its own pool with the location's limits. No weights and no active health
 checks.

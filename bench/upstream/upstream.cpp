@@ -222,6 +222,11 @@ private:
         if (path == "/page") return send(head(std::to_string(g_page.size()), close, false, "text/html; charset=utf-8"), g_page, close);
         if (path == "/pages") return send(head(std::to_string(g_pages.size()), close, false, "text/html; charset=utf-8"), g_pages, close);
         if (path == "/close") return send(head(std::to_string(kJson.size()), true), kJson, true);
+        if (path == "/bighead") {  // a head of 2 KB, for a location whose head_max is below it (tests/integration.sh)
+            std::string h = head(std::to_string(kJson.size()), close);
+            h.insert(h.size() - 2, "X-Fill: " + std::string(2000, 'x') + "\r\n");
+            return send(std::move(h), kJson, close);
+        }
         if (path == "/chunked") {
             static const std::string chunks = "d\r\n{\"ok\":true,\"s\r\n" "f\r\nervice\":\"upstre\r\n" "4\r\nam\"}\r\n" "0\r\n\r\n";
             return send(head({}, close, true), chunks, close);
