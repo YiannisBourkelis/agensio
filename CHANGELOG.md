@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.144 (unreleased)
+## 0.1.0-alpha.144 (2026-11-13)
 
 - **Fix: `Retry-After` on a queue's 503 is the location's `queue_wait`, for CGI too.** When a
   location's queue is full, or a request waited `queue_wait` in it, the answer is a 503 with
