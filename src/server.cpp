@@ -844,6 +844,22 @@ void Server::open_control() {
 
 // ---- HTTP/3 (phase I) ----
 
+// What the h3 startup line says of its sockets' buffers (server.hpp). Outside the QUIC block: it is
+// plain text, and the unit tests of a build without OpenSSL call it too.
+// Linux reports twice the granted size; a cap below what was asked means the sysctl.
+std::string quic_buffers_note(int rcvbuf, int sndbuf, int asked) {
+    std::string note;
+    if (rcvbuf > 0 && rcvbuf < asked)
+        note += ", receive buffer " + std::to_string(rcvbuf / 2048) + " KB (raise net.core.rmem_max for bursts of handshakes; " +
+                std::to_string(asked >> 20) + " MB asked)";
+    // The send buffer too (0.1.0-alpha.144; the alpha.143 report, N6): a datagram it has no room for is
+    // dropped and sent again, which status counts (h3_datagrams_dropped) and this line did not name.
+    if (sndbuf > 0 && sndbuf < asked)
+        note += ", send buffer " + std::to_string(sndbuf / 2048) + " KB (raise net.core.wmem_max for bursts of answers, status "
+                "h3_datagrams_dropped; " + std::to_string(asked >> 20) + " MB asked)";
+    return note;
+}
+
 #ifdef AGENSIO_HAS_QUIC
 struct Server::H3Endpoints {
     std::vector<std::unique_ptr<quic::Endpoint<h3::Http3Connection>>> list;
@@ -899,20 +915,6 @@ static asio::ip::address quic_peer_address(const sockaddr_storage& from) {
 // The endpoints of one h3 listener: one per worker with reuse_port (the group's members in
 // worker order, steered by connection id), else one on worker 0. `start` posts their
 // reads at once (a listener a reload added); at startup start_h3 does it for all.
-// Linux reports twice the granted size; a cap below what was asked means the sysctl.
-std::string quic_buffers_note(int rcvbuf, int sndbuf, int asked) {
-    std::string note;
-    if (rcvbuf > 0 && rcvbuf < asked)
-        note += ", receive buffer " + std::to_string(rcvbuf / 2048) + " KB (raise net.core.rmem_max for bursts of handshakes; " +
-                std::to_string(asked >> 20) + " MB asked)";
-    // The send buffer too (0.1.0-alpha.144; the alpha.143 report, N6): a datagram it has no room for is
-    // dropped and sent again, which status counts (h3_datagrams_dropped) and this line did not name.
-    if (sndbuf > 0 && sndbuf < asked)
-        note += ", send buffer " + std::to_string(sndbuf / 2048) + " KB (raise net.core.wmem_max for bursts of answers, status "
-                "h3_datagrams_dropped; " + std::to_string(asked >> 20) + " MB asked)";
-    return note;
-}
-
 bool Server::open_h3_listener(const Listener& l, const Config& cfg, bool start, std::string& error, int* code) {
     const std::size_t count = reuse_port_ ? workers_.size() : 1;
     bool steering = true, gro = true;
