@@ -1,0 +1,31 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Acquire-By-Hash: yes
+Architectures: amd64
+Codename: trixie
+Components: main
+Date: Fri, 13 Nov 2026 23:32:27 +0000
+Description: agensio web server (trixie)
+Label: agensio
+Origin: agensio
+Suite: trixie
+MD5Sum:
+ 7829f2ad855d1362dbf61cc24b0c1dbf             1830 main/binary-amd64/Packages
+ 7516ec87d289250ce76a2ab1d34b230a              816 main/binary-amd64/Packages.gz
+SHA1:
+ 823ecc49ee5145bafa623ec7aadb4320fa95cbad             1830 main/binary-amd64/Packages
+ 02c6efe5bc9fac3fd78b7e5f09846bc9d66bb019              816 main/binary-amd64/Packages.gz
+SHA256:
+ eb9f83e25c5489d86aa501abc2dd91b39d63eedd3923edac8af3da7eafca3750             1830 main/binary-amd64/Packages
+ 3f68c120eb2b78e8eb3eadca624d8def877ce760d60a7efced29e069c9eb2bf2              816 main/binary-amd64/Packages.gz
+SHA512:
+ 71ca06dd1f37c91c416c5b4b623578f19aaf4aa78844a427789688348387d76e53971f95165bb130d1a25f5dd026c22eff2e838dec562fc477c68735ce2f1d30             1830 main/binary-amd64/Packages
+ 9612363403ac169b4352096b42ffb92bd2b91ca053bbe1deecbb8627f9f7ca2f375241c1bd8c6959a72c077d7c70fc28ae17dbe6650ec76e159f4bf065c33d69              816 main/binary-amd64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQSt0AahYlRDWiIbMcX+eB1CErYPEQUCaveeCwAKCRD+eB1CErYP
+EYmxAQCGgv5TMkVGwgvdapDIX5av5/e5UuXwYmnspvVsTW3KxwEAnyLrFvtqhksT
+FfGFKP9HF7BPdZl71D0PW8WijMMACw0=
+=fjF0
+-----END PGP SIGNATURE-----
