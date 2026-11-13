@@ -56,6 +56,7 @@ struct X509Deleter { void operator()(X509* x) const noexcept { X509_free(x); } }
 struct ReqDeleter { void operator()(X509_REQ* r) const noexcept { X509_REQ_free(r); } };
 struct MdCtxDeleter { void operator()(EVP_MD_CTX* c) const noexcept { EVP_MD_CTX_free(c); } };
 struct BnDeleter { void operator()(BIGNUM* b) const noexcept { BN_free(b); } };
+struct NameDeleter { void operator()(X509_NAME* n) const noexcept { X509_NAME_free(n); } };
 using Pkey = std::unique_ptr<EVP_PKEY, PkeyDeleter>;
 using Bio = std::unique_ptr<BIO, BioDeleter>;
 using Cert = std::unique_ptr<X509, X509Deleter>;
@@ -211,6 +212,15 @@ std::string base64url_decode(std::string_view in) {
     return out;
 }
 
+// A subject of one entry, CN = `cn`, to be set on a request or a certificate, which copies it. Built on its own
+// because OpenSSL 4 hands out the name inside an X509 or an X509_REQ as const (3.x let it be edited in place).
+// A name the entry does not take is left out, as before: the names that count are in subjectAltName.
+std::unique_ptr<X509_NAME, NameDeleter> common_name(const char* cn) {
+    std::unique_ptr<X509_NAME, NameDeleter> name(X509_NAME_new());
+    if (name) X509_NAME_add_entry_by_txt(name.get(), "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>(cn), -1, -1, 0);
+    return name;
+}
+
 // DER CSR for `names` signed by `key`, base64url encoded.
 std::string make_csr(EVP_PKEY* key, const std::vector<std::string>& names, std::string& error) {
     std::unique_ptr<X509_REQ, ReqDeleter> req(X509_REQ_new());
@@ -218,9 +228,7 @@ std::string make_csr(EVP_PKEY* key, const std::vector<std::string>& names, std::
         error = "CSR: " + ssl_error();
         return {};
     }
-    X509_NAME* subject = X509_REQ_get_subject_name(req.get());
-    X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>(names.front().c_str()),
-                               -1, -1, 0);
+    if (const auto subject = common_name(names.front().c_str())) X509_REQ_set_subject_name(req.get(), subject.get());
     std::string san;
     for (const auto& n : names) san += (san.empty() ? "DNS:" : ",DNS:") + n;
     STACK_OF(X509_EXTENSION)* exts = sk_X509_EXTENSION_new_null();
@@ -256,10 +264,10 @@ std::string placeholder_pem(EVP_PKEY* key, const std::vector<std::string>& names
     X509_gmtime_adj(X509_getm_notBefore(x.get()), 0);
     X509_gmtime_adj(X509_getm_notAfter(x.get()), 7 * 24 * 3600);
     X509_set_pubkey(x.get(), key);
-    X509_NAME* name = X509_get_subject_name(x.get());
-    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>(kPlaceholderName), -1,
-                               -1, 0);
-    X509_set_issuer_name(x.get(), name);
+    if (const auto name = common_name(kPlaceholderName)) {
+        X509_set_subject_name(x.get(), name.get());
+        X509_set_issuer_name(x.get(), name.get());
+    }
     std::string san;
     for (const auto& n : names) san += (san.empty() ? "DNS:" : ",DNS:") + n;
     if (X509_EXTENSION* ext = X509V3_EXT_conf_nid(nullptr, nullptr, NID_subject_alt_name, san.c_str())) {

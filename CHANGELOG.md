@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-alpha.145 (unreleased)
+
+- **Fix: agensio builds against OpenSSL 4.** Arch Linux moved to OpenSSL 4.1, and the release's
+  Arch package of 0.1.0-alpha.144 did not build: OpenSSL 4 hands out the subject name inside a
+  certificate or a certificate request as `const`, and the ACME code (`tls = "auto"`) wrote the
+  common name into it in place, for the request it sends to the CA and for the placeholder
+  certificate a site starts with. Both now build the name on its own and set it, which OpenSSL 3.0
+  to 4.1 all take; the request and the placeholder are what they were. Those two lines were the
+  only errors of the whole tree. 0.1.0-alpha.144 has no Arch package; its `.deb` and `.rpm`
+  packages and the APT repository are not affected, and nothing changes for a server built against
+  OpenSSL 3.
+  Checked on Arch (OpenSSL 4.1.0, GCC 16.2): the whole tree builds, the unit tests pass, and the
+  built server answers over HTTP/1.1, HTTP/2 and HTTP/3; on OpenSSL 3.5 the unit tests and the
+  certificate suite against Pebble (21 rows), on the release and the sanitizer builds.
+  Still to do: OpenSSL 4 marks three functions agensio calls as deprecated (`SSL_set1_host`,
+  `X509_NAME_get_text_by_NID`, `ASN1_STRING_length`); they work and only warn at build time.
+
 ## 0.1.0-alpha.144 (2026-11-13)
 
 - **Fix: `Retry-After` on a queue's 503 is the location's `queue_wait`, for CGI too.** When a

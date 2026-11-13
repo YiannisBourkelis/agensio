@@ -32,8 +32,8 @@ for what comes next, and [docs/legacy-analysis.md](docs/legacy-analysis.md) for 
 ## Build
 
 Requirements: a C++20 compiler (GCC 12+, Clang 16+, Apple clang 15+, MSVC 2022), CMake 3.24+,
-Asio headers (fetched automatically if not installed), OpenSSL 3 for TLS (optional; 3.5 or
-later for HTTP/3, which Debian 13 and Fedora 42 ship).
+Asio headers (fetched automatically if not installed), OpenSSL 3 or 4 for TLS (optional; 3.5 or
+later for HTTP/3, which Debian 13 and Fedora 42 ship; Arch ships 4.1).
 
 ```sh
 # macOS
