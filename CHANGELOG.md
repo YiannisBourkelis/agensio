@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.145 (unreleased)
+## 0.1.0-alpha.145 (2026-11-13)
 
 - **Fix: agensio builds against OpenSSL 4.** Arch Linux moved to OpenSSL 4.1, and the release's
   Arch package of 0.1.0-alpha.144 did not build: OpenSSL 4 hands out the subject name inside a
