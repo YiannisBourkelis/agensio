@@ -44,6 +44,20 @@ inline bool sink_field(RequestSeen& seen, Request& req, std::string& cookie, std
                                : n == ":path" ? &seen.path : n == ":authority" ? &seen.authority : nullptr;
         if (!slot) { seen.bad = true; seen.reason = "unknown or response pseudo-header"; return true; }
         if (!slot->empty() || (slot == &seen.authority && seen.pseudo & 8)) { seen.bad = true; seen.reason = "duplicate pseudo-header"; return true; }
+        // The value's bytes (core/fields.hpp: HTTP/1's rules for a request line and a Host), once
+        // per dynamic-table entry like any field's; a static pair is clean by construction.
+        if (!o.static_table && !(o.checked && *o.checked)) {
+            if (slot == &seen.path) {
+                if (!fields::valid_target(v)) { seen.bad = true; seen.reason = ":path with whitespace or a control character"; return true; }
+            } else if (slot == &seen.authority) {
+                if (!fields::valid_host(v)) { seen.bad = true; seen.reason = ":authority with whitespace, a control character or a delimiter"; return true; }
+            } else if (slot == &seen.method) {
+                if (!fields::valid_method(v)) { seen.bad = true; seen.reason = ":method not a token"; return true; }
+            } else if (!fields::valid_scheme(v)) {
+                seen.bad = true; seen.reason = ":scheme not a scheme"; return true;
+            }
+            if (o.checked) *o.checked = 1;
+        }
         *slot = v;
         seen.pseudo |= slot == &seen.method ? 1 : slot == &seen.scheme ? 2 : slot == &seen.path ? 4 : 8;
         return true;
@@ -56,6 +70,7 @@ inline bool sink_field(RequestSeen& seen, Request& req, std::string& cookie, std
         if (!o.static_table) {
             if (!fields::valid_name(n)) { seen.bad = true; seen.reason = "field name not a lower-case token"; return true; }
             if (!fields::valid_value(v)) { seen.bad = true; seen.reason = "field value with CR, LF, NUL or edge whitespace"; return true; }
+            if (n.size() == 4 && n == "host" && !fields::valid_host(v)) { seen.bad = true; seen.reason = "host with whitespace, a control character or a delimiter"; return true; }
         }
         if (fields::connection_specific(n)) { seen.bad = true; seen.reason = "connection-specific field"; return true; }
         if (n == "te" && v != "trailers") { seen.bad = true; seen.reason = "te other than trailers"; return true; }

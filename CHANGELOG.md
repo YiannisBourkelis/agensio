@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.1.0-alpha.146 (unreleased)
+
+- **Security fix: the pseudo-headers of an HTTP/2 or HTTP/3 request are held to HTTP/1's rules.**
+  An HPACK or QPACK string carries any byte; HTTP/1's request line and Host field hold no space
+  and no control character. The values of `:method`, `:path` and `:authority` were stored as they
+  came, and a request target was examined only up to its `?`, so over HTTP/2 or HTTP/3 a request
+  could carry bytes in its query or its authority that HTTP/1 never can, and the reverse proxy
+  wrote them into the HTTP/1.1 head it sends the origin. RFC 9113 8.2.1 and RFC 9114 4.2 call
+  such a request malformed, and their sections 10.3 name the reason. Ordinary fields were always
+  checked; the four pseudo-headers were not.
+  - Who was exposed: a site whose requests go to an application server (`app = "proxy"`,
+    `rails`, `redmine`, `django`, `wagtail`, `node`, or an `upstream` location) and that is
+    reached over HTTP/2 or HTTP/3. PHP and CGI sites receive the target in length-prefixed
+    parameters and were not exposed to this. Upgrade.
+  - What changed: `:path` takes no byte a request line cannot hold (a space, a control
+    character, DEL), `:authority` and `host` the same and none of `/ \ " < >`, `:method` is a
+    token, `:scheme` a URI scheme. The rule is the HTTP/1 parser's own, byte for byte, applied
+    where both protocols assemble a request (`core/fields.hpp`, `http/request_assembly.hpp`),
+    once per HPACK or QPACK table entry like the other field rules. Such a request is now a
+    stream error (HTTP/2: `RST_STREAM PROTOCOL_ERROR`; HTTP/3: `H3_MESSAGE_ERROR`) with its
+    reason in the error log at `info`, and nothing of it reaches a handler.
+  - Found by reading the code against RFC 9113 and RFC 9114 requirement by requirement
+    (2026-11-13, `docs/design-v1.md`), then reproduced on 0.1.0-alpha.145.
+  - Tests, written before the fix: a unit test that compares the verdict with the HTTP/1
+    parser's for every byte value in a target, a host and a method, and holds the table-entry
+    mark; `tests/pseudo-header-bytes.py` (run by the integration suite) sends such requests over
+    h2c, HTTP/2 over TLS and HTTP/3 through a proxied site to an origin that records every byte.
+    On 0.1.0-alpha.145 all three rows fail; now each request is refused and the origin receives
+    nothing of it.
+  - Measured, `bench/ab.sh` against the commit before, static, HTTP/2 and HTTP/3 rows, three
+    rounds (`bench/results/ab-20261113-192601.md`): HTTP/2 0.943 to 0.974, HTTP/3 at 1 KB 0.976 to
+    1.016, the HTTP/1 rows (code not touched) 0.953 to 1.034; the HTTP/3 100 KB row read 1.047
+    with its rounds overlapping, and 0.994 over ten rounds a side in the rerun
+    (`bench/results/ab-20261113-193413.md`, HTTP/3 rows 0.966 to 1.036 at five rounds).
+  `docs/design-http2.md` 6.4 and its threat table said this class was closed; they now say what
+  holds.
+
 ## 0.1.0-alpha.145 (2026-11-13)
 
 - **Fix: agensio builds against OpenSSL 4.** Arch Linux moved to OpenSSL 4.1, and the release's

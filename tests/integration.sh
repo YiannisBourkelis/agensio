@@ -3297,6 +3297,18 @@ if [ "$(uname -s)" = Linux ] && python3 -c 'import h2' 2>/dev/null; then
 else
   echo "skip HTTP/2 streamed bodies (Linux and python3-h2 required; run in the devbox)"
 fi
+# The bytes of :method, :path and :authority (RFC 9113 8.2.1 and 10.3, RFC 9114 4.2 and 10.3): an
+# HPACK or QPACK string holds any byte, the request line agensio writes to an origin holds no space
+# and no control character. Before alpha.146 the pseudo-headers were stored unchecked and a line
+# break in a query or in :authority reached a proxied origin as a line of its own.
+if [ "$(uname -s)" = Linux ] && python3 -c 'import h2' 2>/dev/null; then
+  python3 tests/pseudo-header-bytes.py "$BIN" > bench/tmp/pseudo-header-bytes.log 2>&1
+  pseudo_result=$?
+  cat bench/tmp/pseudo-header-bytes.log
+  check "pseudo-header bytes: a space, a control character or a line break in :method, :path or :authority is a stream error over h2c, HTTP/2 and HTTP/3, and nothing of it reaches the origin" "0 all rows passed" "$pseudo_result $(tail -1 bench/tmp/pseudo-header-bytes.log)"
+else
+  echo "skip pseudo-header bytes (Linux and python3-h2 required; run in the devbox)"
+fi
 
 # The site's files (F12): list, read, write, edit, mkdir, move, delete, history, restore on a private
 # server without the helper, every change approved with a code (tests/site-files.py).

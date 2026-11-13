@@ -36,6 +36,54 @@ inline bool valid_value(std::string_view value) noexcept {
     return true;
 }
 
+// The pseudo-headers and `host`. Their values are field values like any other (RFC 9113 8.2.1,
+// RFC 9114 4.2) and more: they are what HTTP/1 carries in its request line and its Host field,
+// and what agensio writes there for an origin (RFC 9113 10.3, RFC 9114 10.3, the intermediary
+// encapsulation attacks). An HPACK or QPACK string holds any byte; a request line holds no
+// space and no control character, so the rule here is the HTTP/1 parser's own
+// (`http1/parser.cpp`), byte for byte, held equal by the unit test: nothing reaches a handler
+// over HTTP/2 or HTTP/3 that HTTP/1 could not have carried. Until 0.1.0-alpha.146 these four
+// were stored as they came and the target was looked at only up to its "?".
+
+// A request target: no space, no control character, no DEL (HTTP/1: the request line's rule).
+inline bool valid_target(std::string_view value) noexcept {
+    for (const unsigned char c : value)
+        if (c <= 0x20 || c == 0x7f) return false;
+    return true;
+}
+
+// :authority and host: the same, and none of the delimiters HTTP/1's Host is refused for.
+inline bool valid_host(std::string_view value) noexcept {
+    for (const unsigned char c : value)
+        if (c <= 0x20 || c == 0x7f || c == '/' || c == '\\' || c == '"' || c == '<' || c == '>') return false;
+    return true;
+}
+
+// :method: a token (RFC 9110 9.1), either case.
+inline bool valid_method(std::string_view value) noexcept {
+    for (const unsigned char c : value) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) continue;
+        switch (c) {
+            case '!': case '#': case '$': case '%': case '&': case '\'': case '*': case '+': case '-': case '.':
+            case '^': case '_': case '`': case '|': case '~':
+                continue;
+            default: return false;
+        }
+    }
+    return true;
+}
+
+// :scheme: a letter, then letters, digits, "+", "-", "." (RFC 3986 3.1).
+inline bool valid_scheme(std::string_view value) noexcept {
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(value[i]);
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) continue;
+        if (i > 0 && ((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.')) continue;
+        return false;
+    }
+    return true;
+}
+
 // Connection-specific fields are malformed in HTTP/2 and HTTP/3 (RFC 9113 8.2.2). `te` is
 // allowed only with the value "trailers" (checked by the caller).
 inline bool connection_specific(std::string_view name) noexcept {

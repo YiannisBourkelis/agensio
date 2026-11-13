@@ -943,7 +943,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   blocks on TLS as scatter entries between the buffer's runs, a quantum per ready stream
   within its windows, so a read's answers are one send; StreamBody pulls bounded per
   connection; the clock read once per socket event), `connection.hpp` (frames, streams, request assembly with the field rules
-  of `core/fields.hpp`, receive windows sized to the body limit, timeouts (the idle close reads
+  of `core/fields.hpp` (the pseudo-headers' values and `host` by the HTTP/1 parser's own rules for a request
+  line and a Host field, byte for byte, held equal by the unit test: alpha.146, before which they were stored
+  unchecked and a line break in a query or in `:authority` reached a proxied origin; `tests/pseudo-header-bytes.py`),
+  receive windows sized to the body limit, timeouts (the idle close reads
   `last_progress_`, moved by a completed frame, the preface or a write, never by a byte that
   completes nothing, and the header-block deadline holds with no stream open; alpha.116, audit
   2.3; a write in flight with none completed for four idle timeouts closes the connection whatever

@@ -14393,6 +14393,117 @@ static void test_request_assembly_cookies() {
     }
 }
 
+// A pseudo-header's value is a field value (RFC 9113 8.2.1, RFC 9114 4.2), and it becomes the
+// request line and the Host line agensio writes to an origin (RFC 9113 10.3, RFC 9114 10.3): an
+// HPACK or QPACK string carries any byte, HTTP/1's request line cannot. Until 0.1.0-alpha.146
+// the four pseudo-headers were stored unchecked and the target was only looked at up to its "?",
+// so a line break in a query or in :authority reached a proxied origin as a line of its own.
+// The rule is HTTP/1's, byte for byte: what its parser refuses in a request line or a Host
+// field, HTTP/2 and HTTP/3 refuse in :method, :path, :authority and host.
+static void test_request_assembly_field_bytes() {
+    using Fields = std::vector<std::pair<std::string, std::string>>;
+    auto assemble = [](const Fields& fields, std::uint8_t* mark = nullptr, std::size_t marked = 0) {
+        std::string arena, cookie;
+        arena.reserve(64 * 1024);
+        Request req;
+        http::RequestSeen seen;
+        for (std::size_t i = 0; i < fields.size(); ++i) {
+            const std::size_t a = arena.size();
+            arena.append(fields[i].first);
+            const std::size_t b = arena.size();
+            arena.append(fields[i].second);
+            codec::Origin origin;
+            if (mark && i == marked) origin.checked = mark;
+            http::sink_field(seen, req, cookie, std::string_view(arena).substr(a, fields[i].first.size()), std::string_view(arena).substr(b, fields[i].second.size()), origin);
+        }
+        bool known = false;
+        std::uint64_t len = 0;
+        return !seen.overflow && http::finish_request(seen, req, cookie, "HTTP/2.0", known, len) == http::Assembled::ok;
+    };
+    auto with = [](std::string_view method, std::string_view scheme, std::string_view path, std::string_view authority) {
+        return Fields{{":method", std::string(method)}, {":scheme", std::string(scheme)}, {":path", std::string(path)}, {":authority", std::string(authority)}};
+    };
+    using namespace std::string_literals;
+
+    // What every client sends, and what an application may be sent, stays a request.
+    CHECK(assemble(with("GET", "https", "/", "a.test")));
+    CHECK(assemble(with("PROPFIND", "https", "/dav/files/?x=%20y&z=\xce\xb1#frag", "a.test:8443")));
+    CHECK(assemble(with("OPTIONS", "http", "*", "[::1]:8080")));
+    CHECK(assemble(with("GET", "coap+tls-1.3", "/", "a.test")));
+
+    // :path: a line break in the query (what reached the origin), in the path, and the other
+    // bytes no HTTP/1 request line holds.
+    CHECK(!assemble(with("GET", "https", "/q?x=1\r\nX-Injected: yes", "a.test")));
+    CHECK(!assemble(with("GET", "https", "/q?x=1\nX-Injected: yes", "a.test")));
+    CHECK(!assemble(with("GET", "https", "/a\r\nb", "a.test")));
+    CHECK(!assemble(with("GET", "https", "/a b", "a.test")));
+    CHECK(!assemble(with("GET", "https", "/q?a b", "a.test")));
+    CHECK(!assemble(with("GET", "https", "/a\tb", "a.test")));
+    CHECK(!assemble(with("GET", "https", "/a\x7f", "a.test")));
+    CHECK(!assemble(with("GET", "https", "/a\0b"s, "a.test")));
+    CHECK(!assemble(with("GET", "https", "/ HTTP/1.1", "a.test")));
+
+    // :authority and host: the same, plus the delimiters HTTP/1's Host refuses.
+    CHECK(!assemble(with("GET", "https", "/", "a.test\r\nX-Injected: yes")));
+    CHECK(!assemble(with("GET", "https", "/", "[::1]\r\nX-Injected: yes")));
+    CHECK(!assemble(with("GET", "https", "/", "a.test:\r\nx")));
+    CHECK(!assemble(with("GET", "https", "/", "a test")));
+    CHECK(!assemble(with("GET", "https", "/", "a.test/x")));
+    CHECK(!assemble(with("GET", "https", "/", "a.test\\x")));
+    CHECK(!assemble(with("GET", "https", "/", "a.test\x7f")));
+    CHECK(!assemble(with("GET", "https", "/", "a.test\0"s)));
+    {
+        Fields f = {{":method", "GET"}, {":scheme", "https"}, {":path", "/"}, {"host", "a test"}};
+        CHECK(!assemble(f));
+        f.back().second = "a.test/x";
+        CHECK(!assemble(f));
+        f.back().second = "a.test:8443";
+        CHECK(assemble(f));
+    }
+
+    // :method is a token, :scheme a URI scheme.
+    CHECK(!assemble(with("GET /x HTTP/1.1\r\nX:", "https", "/", "a.test")));
+    CHECK(!assemble(with("GE T", "https", "/", "a.test")));
+    CHECK(!assemble(with("GET\r", "https", "/", "a.test")));
+    CHECK(!assemble(with("GET", "ht tp", "/", "a.test")));
+    CHECK(!assemble(with("GET", "http\r\n", "/", "a.test")));
+    CHECK(!assemble(with("GET", "1http", "/", "a.test")));
+
+    // A dynamic-table entry is judged once: its mark is set by a value that passed and by no
+    // other, so a bad entry is refused each time it is referenced.
+    {
+        std::uint8_t mark = 0;
+        CHECK(!assemble(with("GET", "https", "/q?x\r\ny", "a.test"), &mark, 2) && mark == 0);
+        CHECK(!assemble(with("GET", "https", "/q?x\r\ny", "a.test"), &mark, 2) && mark == 0);
+        CHECK(assemble(with("GET", "https", "/q?x=y", "a.test"), &mark, 2) && mark == 1);
+        mark = 0;
+        CHECK(!assemble(with("GET", "https", "/", "a.test\r\nx"), &mark, 3) && mark == 0);
+        CHECK(assemble(with("GET", "https", "/", "a.test"), &mark, 3) && mark == 1);
+    }
+
+    // Byte for byte what the HTTP/1 parser takes: in a request target, in a Host value and in a
+    // method. One byte placed in each; the two protocols' verdicts must agree for all 256.
+    for (int c = 0; c < 256; ++c) {
+        const std::string b(1, static_cast<char>(c));
+        auto h1 = [](const std::string& head) {
+            Request r;
+            return parse_request(head, r) == ParseStatus::complete;
+        };
+        const bool target1 = h1("GET /a" + b + "b HTTP/1.1\r\nHost: a.test\r\n\r\n");
+        const bool target2 = assemble(with("GET", "https", "/a" + b + "b", "a.test"));
+        if (target1 != target2) std::printf("target byte 0x%02x: HTTP/1 %d, HTTP/2 %d\n", c, target1, target2);
+        CHECK(target1 == target2);
+        const bool host1 = h1("GET / HTTP/1.1\r\nHost: a" + b + "b\r\n\r\n");
+        const bool host2 = assemble(with("GET", "https", "/", "a" + b + "b"));
+        if (host1 != host2) std::printf("host byte 0x%02x: HTTP/1 %d, HTTP/2 %d\n", c, host1, host2);
+        CHECK(host1 == host2);
+        const bool method1 = h1("G" + b + "T / HTTP/1.1\r\nHost: a.test\r\n\r\n");
+        const bool method2 = assemble(with("G" + b + "T", "https", "/", "a.test"));
+        if (method1 != method2) std::printf("method byte 0x%02x: HTTP/1 %d, HTTP/2 %d\n", c, method1, method2);
+        CHECK(method1 == method2);
+    }
+}
+
 static void test_h2_frame_and_settings() {
     using namespace h2;
     unsigned char buf[kFrameHeaderSize];
@@ -16408,6 +16519,7 @@ int main() {
     test_h2_frame_and_settings();
     test_hpack();
     test_request_assembly_cookies();
+    test_request_assembly_field_bytes();
     test_static_tables_match_rfcs();
     test_qpack();
     test_qpack_dynamic();
