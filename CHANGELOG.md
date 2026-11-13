@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.146 (unreleased)
+## 0.1.0-alpha.146 (2026-11-14)
 
 - **Security fix: the pseudo-headers of an HTTP/2 or HTTP/3 request are held to HTTP/1's rules.**
   An HPACK or QPACK string carries any byte; HTTP/1's request line and Host field hold no space
