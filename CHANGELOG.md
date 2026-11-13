@@ -48,6 +48,15 @@
   (859), the install suite (27, an HTTPS download from an IP address) and the certificate suite
   against Pebble (21, release and sanitizer builds).
 
+- **The Arch package is built before the tag.** `scripts/arch-check.sh` runs the release job's
+  steps on the working tree, in a container of the day's Arch (`bench/docker/Dockerfile.arch`):
+  makepkg with the shipped `PKGBUILD`, `pacman -U`, the account and files, one request over
+  HTTP/1.1, HTTP/2 and HTTP/3 against the installed server, and the unit tests; about three
+  minutes, nothing on GitHub. Arch is rolling, so it meets a new OpenSSL or GCC before any other
+  package does, and until now it met it in the release job, after the tag. It is one line of the
+  list run before every tag (`CLAUDE.md`). Run on the tag of 0.1.0-alpha.144 it fails with the
+  release job's two errors; on this tree it passes.
+
 ## 0.1.0-alpha.144 (2026-11-13)
 
 - **Fix: `Retry-After` on a queue's 503 is the location's `queue_wait`, for CGI too.** When a

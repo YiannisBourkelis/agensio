@@ -15,8 +15,11 @@ Pre-alpha `0.1.0-alpha.1` (2026-09-19): phases A-D, E1/E9, F0-F7, H1, H3 done, G
 `docs/design-site-operations.md`) 2026-09-26; see `CHANGELOG.md`. Everything under "Architecture" below is what the code does now, not a
 proposal. Before every tag: the suites (unit, integration, reload, pools, control, acme),
 `tests/auth.sh`, the sanitizer and fuzz runs listed in `docs/security-control-plane.md`, the
-builds without OpenSSL and without libxcrypt (link and unit tests; see "Build and run"), and
-`bench/ab.sh` against the previous tag.
+builds without OpenSSL and without libxcrypt (link and unit tests; see "Build and run"), the
+Arch build (`scripts/arch-check.sh`: the release job's makepkg on the working tree in a container
+of the day's Arch, the package installed, a request over each protocol, the unit tests; about
+three minutes, nothing on GitHub; Arch is where a new OpenSSL or GCC is met first, and the tag of
+alpha.144 met OpenSSL 4.1 in the release job), and `bench/ab.sh` against the previous tag.
 
 ## Hard constraints
 
@@ -149,6 +152,7 @@ cmake -S . -B build-notls -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TLS=OFF 
 cmake -S . -B build-nobr -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_BROTLI=OFF  # without libbrotli (or -DAGENSIO_ZSTD=OFF): that coding not offered, a configuration naming it refused
 cmake -S . -B build-noauth -G Ninja -DCMAKE_BUILD_TYPE=Release -DXCRYPT_LIBRARY=/nonexistent  # as without libxcrypt: no passwords
 (cd build && cpack -G DEB)                 # the .deb (packaging/, tests/package.sh runs it in the root devbox)
+scripts/arch-check.sh -j 12                # the Arch package from the working tree, as the release job builds it (docker)
 cmake -S . -B build -DAGENSIO_DEB_SUFFIX=deb13  # the release's Debian 13 .deb (version +deb13; HTTP/3 needs OpenSSL >= 3.5.1)
 bench/run.sh                               # 5 s per case; -d 15s for publishable numbers
 scripts/lint.sh && scripts/format.sh       # clang-tidy / clang-format

@@ -1,0 +1,14 @@
+# Current Arch Linux with what the release workflow's `arch` job installs before makepkg, and a
+# build user (makepkg refuses to run as root). scripts/arch-check.sh builds this image and runs
+# the job's steps in it on the working tree, before a tag: Arch is rolling, so it is where a new
+# OpenSSL or GCC is met first (OpenSSL 4.1 and GCC 16 on 2026-11-13, which the tag of alpha.144
+# met in the release job and failed on).
+#
+# REFRESH changes once a day in the script, so the packages are those of the day of the check
+# and a second run the same day reuses the layer.
+FROM archlinux:latest
+ARG REFRESH=none
+RUN echo "packages as of ${REFRESH}" \
+    && pacman -Syu --noconfirm --needed base-devel git cmake ninja asio openssl zlib sudo \
+    && pacman -Scc --noconfirm
+RUN useradd -m build && echo 'build ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/build
