@@ -18,10 +18,12 @@ requests, in-memory cache + sendfile, TLS with our own stream, TOML config, benc
 harness. One worker beats ten nginx workers on plain HTTP; per request agensio uses 2.5-3.5x
 less CPU than nginx (`bench/results/20260915-114007.md`).
 
-Current source map (`src/`): `server` (workers, listeners, accept), `connection.hpp`
-(one class: reads, parses, writes; HTTP/1.1 only), `handler` (request -> ResponsePlan),
-`http_parser`, `path`, `cache`, `tls_stream.hpp`, `file`, `mime`, `http_date`,
-`response`, `config`, `main`.
+The checkboxes below were held to the code on 2026-11-13 (0.1.0-alpha.145): a box is `[x]`
+only where the code, a suite or a measurement shows the item whole, `[~]` says what is built
+and what is left, and a line starting "Audit 2026-11-13" is that reading. Phases A to D are
+complete; E to I each have open items. What is needed for version 1 and what waits until after
+it is not decided here: `docs/design-v1.md` is the draft of that scope. The source map and what
+each part does today are in `CLAUDE.md` ("Build and run", "Architecture (as implemented)").
 
 ---
 
@@ -33,7 +35,7 @@ Current source map (`src/`): `server` (workers, listeners, accept), `connection.
                  +------+-----------------+-------------------------+--------+
                         |                 |                         |
    protocol       Http1Connection    Http2Connection          Http3Connection
-   connections    (1 stream at a time)  (own framing+HPACK)  (ngtcp2 + nghttp3)
+   connections    (1 stream at a time)  (own framing+HPACK)  (own QUIC + QPACK)
                         \                |                         /
                          \               v                        /
                           +---------> Stream <--------------------+
@@ -75,7 +77,9 @@ Design decisions that make "no protocol pays for another" true:
 - **Protocol libraries are allowed** where writing them ourselves would be a project of
   its own: nghttp2 (HTTP/2 framing + HPACK), ngtcp2 + nghttp3 (QUIC + HTTP/3). Both are C,
   callback-driven, own no sockets, and slot into our loop. Everything else stays standard
-  library + Asio. (Open question 1 below.)
+  library + Asio. (Open question 1 below.) Decided otherwise when each was built: HTTP/2
+  (2026-09-23) and QUIC with HTTP/3 (2026-09-24) are agensio's own, with those libraries
+  only in the test beds (`docs/design-http2.md`, `docs/design-http3.md`).
 
 Target source layout:
 
@@ -83,7 +87,7 @@ Target source layout:
 src/core/        stream.hpp, request.hpp, response.hpp, body_source.hpp, headers.hpp, router.*
 src/http1/       parser.*, connection.hpp, chunked.*
 src/http2/       frame, hpack, settings, stream, writer, connection (own, docs/design-http2.md)
-src/http3/       listener.*, connection.hpp (ngtcp2 + nghttp3 glue)
+src/quic/, src/http3/  own QUIC transport, HTTP/3 and QPACK (docs/design-http3.md)
 src/handlers/    static.*, fastcgi.*, proxy.*, cgi.*, redirect.*, control.*
 src/upstream/    fcgi_client.*, http_client.*, process.*, pool.hpp
 src/services/    config.*, tls.*, cache.*, log.*, metrics.*, control_socket.*
@@ -108,7 +112,7 @@ site presets and is built after those presets exist. See section 6 for the appli
 matrix. (Earlier documents and commits before 2026-09-17 used the previous lettering:
 old B2-B9 are now E1-E8, old C is F, old D is C, old E is D, old F is G, old G is H, old H is I.)
 
-### Phase A. Core refactor: streams, bodies, router  `[ ]`
+### Phase A. Core refactor: streams, bodies, router  `[x]`
 Prerequisite for everything else. No new features; the static path must benchmark the
 same after it (that is the checkpoint).
 
@@ -156,7 +160,7 @@ same after it (that is the checkpoint).
       per request equal within noise on all six rows; unit tests cover the chunked decoder,
       the router, try_files, the config schema and the log formatters.
 
-### Phase B. Methods beyond GET/HEAD  `[ ]`
+### Phase B. Methods beyond GET/HEAD  `[x]`
 Small on purpose: the first real applications need forms, logins and uploads; the rest of HTTP/1.1 is phase E.
 - [x] B1 (2026-09-17) Methods: the parser knows every standard method; a location carries
       the `MethodSet` its handler implements (static: GET/HEAD/OPTIONS, `methods = [...]`
@@ -164,7 +168,7 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       else 405 + Allow, TRACE and CONNECT always. POST/PUT/DELETE/PATCH reach the handler
       with their body (A3); the static handler declines them, FastCGI (C1) will accept.
 
-### Phase C. PHP by design (FastCGI to php-fpm), Laravel first  `[ ]`
+### Phase C. PHP by design (FastCGI to php-fpm), Laravel first  `[x]`
 - [x] C1 (2026-09-17) `FcgiClient` (`src/upstream/`, `src/handlers/fastcgi.*`): async
       FastCGI/1.1 over unix or TCP, per-worker bounded pool with an explicit queue
       (`max_connections`, `queue_depth`, `queue_wait` -> 503 + Retry-After, `priority_reserve`
@@ -262,7 +266,7 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       sessions), and abandoned client requests keep their pool slots (E9).
 - [x] Checkpoint (2026-09-17): Laravel welcome page served with one worker; table above.
 
-### Phase D. Reverse proxy  `[ ]`
+### Phase D. Reverse proxy  `[x]`
 - [x] D0 (2026-09-17) Benchmark upstream and baseline before the first line of proxy code:
       `bench/upstream/upstream.cpp` (target `agensio_upstream`, Asio, shares nothing with
       agensio) answers 500k+ req/s on one core so the proxy in front of it is the
@@ -388,7 +392,7 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       usable behind agensio; Rocket.Chat has its example config, a bed can follow when a
       MongoDB-backed setup is wanted.
 
-### Phase E. Complete HTTP/1.1 and hardening  `[ ]`
+### Phase E. Complete HTTP/1.1 and hardening  `[~]`
 - [x] E1 (2026-09-18) Range requests: `http1/range.hpp` parses one `bytes=` range
       (first-last, first-, -suffix; lists and malformed values mean the whole body, 200)
       and If-Range (strong ETag or exact Last-Modified); the static handler answers 206
@@ -411,14 +415,31 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       in memory, per site, off by default, its CPU and latency cost measured and documented:
       designed in `docs/design-compression.md` (2026-10-30, from the research of 2026-10-26,
       `reports/Web server response compression.md`), staged in its section 11.
-- [~] E3 Request-smuggling and parser hardening: **done 2026-09-16** for the request head
+      Audit 2026-11-13: steps 1 to 6 of that plan are built (the keys, the copies of cached
+      files, whole and streamed dynamic answers in gzip, zstd and brotli, the signed-in guard;
+      HTTP/3 since 0.1.0-alpha.142). Left: the rest of step 7 (`path_check`'s reasons, health's
+      findings, the log fields, the cookbook's check) and step 8 (`X-Accel-Buffering: no`,
+      `Incremental: ?1` and `text/event-stream` honoured for buffered exchanges).
+- [x] E3 Request-smuggling and parser hardening: **done 2026-09-16** for the request head
       (CL vs TE rules, duplicate CL/Host, obs-fold, bare CR, CTLs, header count limit,
       `Host` validation; libFuzzer targets for the parser and path normaliser). Remaining:
       chunked decoder fuzzing once bodies exist (A3), running fuzzers in CI.
+      Audit 2026-11-13: both done (`fuzz_chunked` among the twenty-six targets of
+      `scripts/fuzz-all.sh`; `.github/workflows/fuzz.yml` runs them and the sanitizer suites
+      weekly).
 - [~] E4 Timeouts everywhere: header read, body read, write stall, keep-alive idle,
       per-connection request cap (**done 2026-09-16**: `max_requests_per_connection`; idle
       timeout also bounds slow header sends); `Connection: close` on shutdown; graceful drain.
-- [ ] E5 IPv6 listeners tested; `SO_REUSEPORT` path tested on Linux (Docker).
+      Audit 2026-11-13: the timeouts are built (head, body, a client that takes nothing of
+      an answer, the tunnel's writes) on HTTP/1 and HTTP/2, and on HTTP/3 all but a request
+      body's own timer (I1b). Left: the shutdown. `Server::stop`
+      sends GOAWAY to HTTP/3 connections and then ends every worker's loop at once, so an
+      HTTP/1 or HTTP/2 request in flight at SIGTERM is cut: no `Connection: close`, no HTTP/2
+      GOAWAY, no drain with a deadline. A reload drains; a restart (every upgrade) does not.
+- [x] E5 IPv6 listeners tested; `SO_REUSEPORT` path tested on Linux (Docker).
+      Audit 2026-11-13: `[::]` is the default address since 2026-11-03 (`listen_tls`,
+      `listen_plain`), with the dual-stack and family-split rows in the integration suite;
+      `SO_REUSEPORT` is the Linux default every suite and benchmark runs on.
 - [x] E6 Path policies (2026-09-16): `hidden_files`, `symlinks = "deny"`, Windows path rules.
 - [x] E7 Hardened build flags, sanitizer and fuzz build options, accept-loop EMFILE backoff
       (2026-09-16).
@@ -446,8 +467,12 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       503s; gate `ab-20260918-003305.md` flat (proxy JSON 1.010, static 0.96-1.00).
 - [ ] Checkpoint: h1 compliance run (a scripted curl/python suite in `tests/`), fuzzers
       clean for 1h, benchmark unchanged.
+      Audit 2026-11-13: the fuzzers run weekly and every change has its A/B; the compliance
+      suite as its own script does not exist (the integration suite holds single rules). The
+      requirement-by-requirement reading of RFC 9110 and 9112 against the code of 2026-11-13
+      (`docs/design-v1.md`) is what such a suite would be written from.
 
-### Phase F. Control API and agentic interface  `[ ]`
+### Phase F. Control API and agentic interface  `[~]`
 Independent of the other phases and useful for all of them (inspect cache, reload config).
 
 **Pulled before the pre-alpha (decided 2026-09-18)**: the owner and early adopters set up
@@ -554,7 +579,7 @@ Rules:
       `docs/configuration.md` 15). All GET, viewer role. Not done: `cache`,
       `connections`, `metrics`/Prometheus and per-upstream pool state (per-worker, needs a
       cross-worker collection step); they follow after the alpha.
-- [ ] F2b Read-only commands, remaining (`Accept: text/plain` gives a human answer):
+- [~] F2b Read-only commands, remaining (`Accept: text/plain` gives a human answer):
       `status`, `cache` (count, bytes, hit ratio) and `cache/entries` (path, size, age,
       hits), `sites`, `config` (effective, with sources), `connections`, `metrics`
       (Prometheus text as well; per upstream and per certificate metrics from phases D/G,
@@ -564,6 +589,12 @@ Rules:
       hints, retry counts, queue timeouts and the slowest scripts and routes. Those are
       the first answers an administrator or an agent asks for ("why is this site 502?")
       and cost nothing new.
+      Audit 2026-11-13: built: `status` (connections, refusals, cache entries and bytes,
+      compression, listeners, the certificate watch), `sites`, `config/reference`,
+      `config/validate`, `php`, `protection`, `logs` (with each upstream failure's reason).
+      Not built: answers as plain text, the cache's hit ratio and entries, a list of
+      connections, Prometheus metrics, and the upstream pools' state (in flight, queued,
+      idle, retries, queue timeouts, slowest routes).
 - [x] F3 (2026-09-18) Mutating commands (POST, `confirm` required, `reason` audited):
       `reload` (`Server::reload` now returns the refusal), `logs-reopen`, `site-create`
       / `site-update NAME` / `site-disable` / `site-enable` / `site-delete`, `cert-renew`
@@ -608,8 +639,11 @@ Rules:
 - [ ] Checkpoint: control traffic measured to add zero cost to data-plane workers (runs on
       worker 0's loop but only when called); docs page with every command, every role and
       the threat model.
+      Audit 2026-11-13: the pages exist (`docs/mcp.md`, `docs/security-control-plane.md`);
+      no measurement of control traffic beside a data-plane load is recorded in
+      `bench/results/`.
 
-### Phase G. HTTP/2  `[ ]`
+### Phase G. HTTP/2  `[~]`
 Design: `docs/design-http2.md` (proposed 2026-09-23, awaiting the owner's review). It
 proposes our own framing, HPACK, flow control and scheduler with nghttp2 in the test bed
 only (h2load, a differential HPACK fuzzer, `nghttp`), h2spec for conformance, a protocol
@@ -641,10 +675,12 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       small row. Not done from the G0 list: `fuzz_h2_frame` with a fake socket (G3, with
       the attack suite); built 2026-10-12 as `fuzz_h2_conn`, the real connection over a
       socket pair (`docs/design-http2.md` 8.2), the attack suite still open.
-- [ ] G1 Request bodies: DATA to `StreamBody`, windows sized to the site's body limit
+- [x] G1 Request bodies: DATA to `StreamBody`, windows sized to the site's body limit
       (uploads at the consumer's pace, not 64 KB per round trip), POST through FastCGI,
       proxy and CGI, the presets' uploads over h2 in the root suite, abort by RST_STREAM,
       trailers, the content-length rule, h2spec complete.
+      Audit 2026-11-13: built with G0 and after (the integration suite's POST to PHP, the 413
+      up front, h2spec on both listeners; `fuzz_h2_bodies`, `tests/h2-streamed-bodies.py`).
 - [x] G2 (2026-09-23) Performance pass. Four workers each (`h2-20260923-201044.md`):
       agensio 1.59M req/s on h2c and 1.28M over TLS at ten streams per connection against
       nginx's 665k and 559k, ahead on every row. h2c streams (`h2-20260923-202135.md`): the
@@ -663,10 +699,16 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       fills (8 KB) are what remains per idle connection. Gates: `ab-20260923-205035.md`
       flat on every HTTP/1 row, integration with four idle-then-request checks, reload,
       sanitizer run clean.
-- [ ] G3 Hardening: `tests/h2-attacks.py` (rapid reset, MadeYouReset, CONTINUATION,
+- [~] G3 Hardening: `tests/h2-attacks.py` (rapid reset, MadeYouReset, CONTINUATION,
       HPACK bomb and the 2026 Bomb hold, slow read, floods) with memory sampled, budgets
       tuned, sanitizer and fuzz records, the security page's HTTP/2 section, counters in
       `server_status` and `health`, MCP texts.
+      Audit 2026-11-13: built: the budgets themselves (design section 8), `fuzz_h2_conn`,
+      the security page's section, and the misbehaving-client rows of
+      `tests/timeout-regressions.py` (stalled readers, the idle clock, an unfinished header
+      block, a WINDOW_UPDATE flood, GOAWAY with a stalled reader). Not built:
+      `tests/h2-attacks.py` as HTTP/3 has one (a row per attack with memory sampled), the
+      differential fuzz against nghttp2, HTTP/2 counters in `server_status` and `health`.
 - [x] G2c (2026-09-24) The dynamic-table head: `server`, `date`, `content-type`, `vary`,
       `content-encoding` and what a text block repeats through a per-connection HPACK
       dynamic table with a 1 KB cap, validators and everything else literal; design in
@@ -690,10 +732,15 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       protocols via SNI, the TLS-ALPN-01 hook. (GOAWAY on reload reviewed 2026-09-23: the
       frame follows the streams in flight, new streams are refused meanwhile, both cases
       in `tests/reload.sh`.)
+      Audit 2026-11-13: `protocols` per site is built (sites on one address agree); the
+      other three are not.
 - [ ] Checkpoint: h2spec passes; HTTP/1.1 rows unchanged in every A/B (no cost when h2 is
       idle or off); CPU per request and memory per connection below nginx on the same box.
+      Audit 2026-11-13: h2spec passes in the integration suite, the HTTP/1 rows are held by
+      every `bench/ab.sh -2`, CPU per request is below nginx on every row; memory is not: an
+      idle HTTP/2 connection costs 19 KB against nginx's 7.5 (`h2-memory-20260923-204605.md`).
 
-### Phase H. Production hardening  `[ ]`
+### Phase H. Production hardening  `[~]`
 - [x] H1 (2026-09-18) Zero-downtime reload: a `Generation` owns a loaded `Config` with
       its routers and TLS contexts; workers hold the current one and connections the one
       they started a request from (`refresh_generation`, one pointer compare per request),
@@ -892,20 +939,33 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       an empty reply (control installs and tasks, slow PHP and proxied requests); both
       fixed. Security page rows 26 and 27. `tests/tasks.sh` (fake interpreters, root devbox),
       `tests/rails.sh` (real Ruby: the whole workflow behind agensio).
-- [ ] F14 Managed application processes (`docs/design-site-operations.md` section 5):
+- [~] F14 Managed application processes (`docs/design-site-operations.md` section 5):
       `service = { runtime = "puma", ... }` rendered into a hardened systemd unit by the
       helper, unix socket by default, start/stop/restart/logs, `service_dead` and
       `service_resident` in health. Until then `docs/examples/puma.service`.
+      Audit 2026-11-13: the read-only half is built (design section 15): `site-unit` renders
+      the unit for root (Puma, Gunicorn, Node), `site-service` and `site-service-logs` read it
+      through the helper, health reports `site_service_missing`, `_down`, `_failed`. Not
+      built: the `service` key, the helper installing the unit, start, stop and restart.
 - [ ] Section 7 and 2b of the same design: `app/` beside `web/`, the `root_is_project`
       rule, `static = "public"` with an `@upstream` fallback, `detect_app` learning Rails.
+      Audit 2026-11-13: not built as designed. Near it: `served_dir` on `app = "php"`
+      (0.1.0-alpha.109: the project's directory as root, a subdirectory served) and the
+      Django preset's `/static/` and `/media/` from the project.
 - [ ] Section 6: the upstream prober, `upstream_unreachable`, `upstream_exposed` with the
       firewall rule handed back.
-- [ ] F12 The site's files as the site's account, one tool per operation (list, read,
-      write, edit, mkdir, move, delete), credential reads audited.
-- [ ] F12b Deleting a site with its files into a root-only recycle bin, restore, expiry.
-- [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
-      key }` sites; automatic ones already reload themselves); reload must not stall new
-      QUIC connections (nginx's known weakness).
+      Audit 2026-11-13: not built.
+- [x] F12 (0.1.0-alpha.120) The site's files as the site's account, one tool per operation
+      (list, read, write, edit, mkdir, move, delete), credential reads audited; with a history
+      and a restore, every change under an approval (design sections 3 and 27.6).
+- [x] F12b (2026-09-30) Deleting a site with its files into a root-only recycle bin, restore,
+      expiry (design section 18, `tests/trash.sh`).
+- [x] H1b (0.1.0-alpha.93) Certificates watched and reloaded when the files change (manual
+      `tls = { cert, key }` sites; automatic ones already reload themselves): the hourly watch
+      and `Server::refresh_certificates`, no reload. Reload must not stall new QUIC connections
+      (nginx's known weakness): the UDP sockets stay open across a reload and each worker
+      switches between requests; one row of `tests/h3-attacks.py` holds a connection across a
+      reload. New connections arriving during a reload have no measurement of their own.
 - [~] H2 Start as root, bind, drop privileges (`user =`): **done 2026-09-17 with C3b-3**
       (`server.user`); log rotation via `SIGUSR1`/reopen done with A5; pid file with H1.
       `docs/install.md` (2026-09-18) fixes the directory layout per platform (Linux FHS,
@@ -915,6 +975,9 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       Remaining: ship the unit file and logrotate snippet in the repository, make the
       macOS defaults (`$PREFIX/var/log`, `$PREFIX/var/lib`) and the Windows defaults the
       binary's own, complete the macOS and Windows steps with the release, packages (H7).
+      Audit 2026-11-13: the unit, the logrotate file and the packages ship (`packaging/`),
+      and `docs/install.md` 4.1 holds the Linux steps. Left: sections 4.2 (macOS) and 4.3
+      (Windows), both still "to be written", and those platforms' defaults in the binary.
 - [x] H3 (2026-09-18) Automatic certificates: built-in ACME v2 client (RFC 8555) with
       HTTP-01 (`src/services/acme.*`, JSON in `src/services/json.hpp`, JWS ES256 and CSRs
       through OpenSSL, no new dependency). `tls = "auto"` on a site plus
@@ -940,6 +1003,7 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       challenges are Caddy's second most upvoted request; wildcards need it), external
       account binding (ZeroSSL), OCSP stapling / ARI renewal hints, a stop flag for an
       order in flight at shutdown.
+      Audit 2026-11-13: none of it is built; HTTP-01 is the one challenge.
 - [ ] H3b **Kernel-enforced containment of the web server itself** (Linux, FreeBSD): open
       files relative to a per-site root descriptor with `openat2(RESOLVE_BENEATH)` (and
       `RESOLVE_NO_SYMLINKS` for `symlinks = "deny"`), so containment does not depend on path
@@ -947,13 +1011,23 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       connecting to upstream sockets; a seccomp filter for the request-path syscalls.
       macOS/Windows keep the path checks (fuzzed). Closes the gap in the ISPConfig model,
       where PHP is isolated but the shared web server user can read every site.
-- [ ] H4 Rate limiting and connection limits per IP; request id header; error pages
+      Audit 2026-11-13: not built (no `openat2`, Landlock or seccomp in `src/` or the unit).
+- [~] H4 Rate limiting and connection limits per IP; request id header; error pages
       configurable.
-- [ ] H5 Metrics endpoint scraped by Prometheus; structured JSON logs option with a
+      Audit 2026-11-13: limits per address were decided on 2026-10-02 to be the firewall's
+      and fail2ban's, rendered for the host by `protection_show` (nftables table, jails),
+      with the server keeping its own ceiling (`server.max_connections`) and the protocol
+      budgets. Not built: a request id, configurable error pages.
+- [~] H5 Metrics endpoint scraped by Prometheus; structured JSON logs option with a
       request id that also appears in the error log; W3C `traceparent` passthrough for
       OpenTelemetry.
-- [ ] H6 Memory/CPU profile under 10k idle keep-alive connections; per-connection memory
+      Audit 2026-11-13: the JSON access log is built, and the proxy hands `traceparent` on
+      as any end-to-end field. Not built: the metrics endpoint, the request id.
+- [~] H6 Memory/CPU profile under 10k idle keep-alive connections; per-connection memory
       budget documented (target: < 8 KB idle h1 connection).
+      Audit 2026-11-13: measured and documented (`bench/h2/memory.sh`, 10,000 idle
+      connections; the idle shed of 2026-09-23): 13 KB for an idle HTTP/1 connection, 19 KB
+      for HTTP/2, nginx 7.5 KB. The 8 KB target is not met.
 - [~] H7 (2026-09-19, first part) Packaging: `packaging/` holds the systemd unit, the
       logrotate file, the packaged `/etc/agensio` (main file plus a default site on
       `/var/www/html`), the Debian maintainer scripts (account, groups, directories,
@@ -978,11 +1052,21 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       `trixie` (the `+deb13` build), each the release and the one before, indexes by hash, tested by
       `tests/apt-repo.sh`. Remaining: the GPG key and Pages setup for it, the COPR project and
       the AUR submission (need accounts), Docker image, Homebrew formula, aarch64 builds.
-- [ ] H7b CI additions: ASan/UBSan builds and the fuzzers on a schedule; Docker image;
+      Audit 2026-11-13: the APT repository is live (the test VPS installs from it since
+      0.1.0-alpha.115) and the Arch package is built before every tag
+      (`scripts/arch-check.sh`). Left: COPR, the AUR submission, a Docker image, a Homebrew
+      formula, aarch64.
+- [~] H7b CI additions: ASan/UBSan builds and the fuzzers on a schedule; Docker image;
       Homebrew formula; aarch64 packages.
+      Audit 2026-11-13: the sanitizer builds and the fuzzers run weekly (`fuzz.yml`); the
+      other three are not built.
 - [ ] Checkpoint: runs a real site for a week; documented ops guide.
+      Audit 2026-11-13: the test VPS has served real sites for weeks (fourteen sites on
+      0.1.0-alpha.145: WordPress, Drupal, Laravel, Grav, Rails, Redmine, Wagtail, Node, static),
+      and the guides exist for Linux (`docs/install.md` 4.1, `docs/tls.md`, `docs/fail2ban.md`,
+      `docs/configuration.md`). The owner decides whether that closes it.
 
-### Phase I. HTTP/3  `[ ]`
+### Phase I. HTTP/3  `[~]`
 Design: `docs/design-http3.md` (accepted 2026-09-24): our own QUIC transport, HTTP/3 and
 QPACK, OpenSSL 3.5's QUIC TLS API and primitives for the crypto, the code HTTP/2 and HTTP/3
 share lifted into `src/http/` first. The RFCs are in `docs/rfc/`.
@@ -1033,8 +1117,11 @@ share lifted into `src/http/` first. The RFCs are in `docs/rfc/`.
 - [x] I1b (0.1.0-alpha.142) Streamed answers (unbuffered upstreams, CGI, bodies
       compressed in pieces): pieces read into send blocks kept until acknowledged, the
       reads paced by the packets, the keep-alive PING while a source pauses (design 7.3).
-- [ ] I1b (rest) The body source and budgets lifted to `src/http/`, the write-stall and
+- [~] I1b (rest) The body source and budgets lifted to `src/http/`, the write-stall and
       body timeouts per stream, NEW_TOKEN.
+      Audit 2026-11-13: request assembly and the stream pool are in `src/http/`, and a client
+      that takes nothing of an answer is ended per stream (0.1.0-alpha.143). Left: a request
+      body's timer per HTTP/3 stream (deferred 2026-10-26) and NEW_TOKEN.
 - [x] I1c (decoder side, 2026-09-24) QPACK's dynamic table: the decoder with the encoder
       and decoder streams, blocked sections and the rules-once marks; RFC 9204 appendix B
       as unit tests. On the way: a stream whose id arrived after a higher one was dropped
@@ -1063,14 +1150,26 @@ share lifted into `src/http/` first. The RFCs are in `docs/rfc/`.
 - [x] I2 (2026-09-25) The receive buffer the kernel granted the QUIC sockets on the
       startup line, with the sysctl to raise (`net.core.rmem_max` caps the 4 MB asked at
       208 KB untuned; a burst of 256 handshakes on loopback lost Initials to it).
-- [ ] I2 (rest) The amplification row of the attack suite (a spoofed source), the security
+- [~] I2 (rest) The amplification row of the attack suite (a spoofed source), the security
       page's HTTP/3 section as a table, `server_status` and `health` for the transport.
-- [ ] I3 Performance: the levers of design 8.2 measured against nginx and Caddy, the
+      Audit 2026-11-13: status and health carry the transport's facts (`h3_datagrams_dropped`,
+      each listener's HTTP/3, `h3_not_bound`, `h3_waits_for_restart`), and the security page has
+      the section as prose. Left: the amplification row, the section as a table.
+- [~] I3 Performance: the levers of design 8.2 measured against nginx and Caddy, the
       dynamic QPACK head, CUBIC and pacing, memory per connection, the arena's two HTTP/3
       rows subscribed and run.
+      Audit 2026-11-13: measured against both (`bench/h3/run.sh`), the dynamic QPACK head
+      built both ways, the arena's two rows run here. Left: congestion control is NewReno
+      (no CUBIC, no pacing), and memory per HTTP/3 connection has no recorded measurement.
 - [ ] I4 Extras: 0-RTT as an opt-in for GET and HEAD, NEW_TOKEN, ECN, active migration,
       version 2, the `gateway-h3` entry.
+      Audit 2026-11-13: none of it is built (by choice so far: the interop runner's zerortt,
+      ecn, v2 and connectionmigration cases are declined).
 - [ ] Checkpoint: browsers connect over h3; h1/h2 numbers unchanged; the interop table clean.
+      Audit 2026-11-13: the HTTP/1 and HTTP/2 rows are held by every `bench/ab.sh -3`, and
+      every case the server supports passes with quic-go and ngtcp2 (eighteen each). No
+      record in the repository of a browser's connection; the owner can close this from the
+      test VPS.
 
 ### Principles confirmed by user research (`docs/web-server-feedback.md`)
 - Everything ships in the one open build; no feature is held back for a paid tier. The
@@ -1082,7 +1181,8 @@ share lifted into `src/http/` first. The RFCs are in `docs/rfc/`.
   footprint are why people look for alternatives.
 
 ### Later / ideas
-- Shared-dictionary compression (RFC 9842) once compression exists.
+- Shared-dictionary compression (RFC 9842) once compression exists. (Compression exists
+  since 0.1.0-alpha.118; this is not built.)
 - Asynchronous cold-cache file reads: a slow disk stalls the worker's loop for
   milliseconds today. Use Asio's own async file I/O (`asio::random_access_file`,
   `async_read_some_at`) on the worker's loop: io_uring on Linux (`ASIO_HAS_IO_URING`,
@@ -1097,8 +1197,10 @@ share lifted into `src/http/` first. The RFCs are in `docs/rfc/`.
   site installed into `releases/<name>` beside `shared/`, switched by renaming `current` and a
   reload, with rollback and cleanup; the design and its open questions are `docs/design-releases.md`.
 - kTLS on Linux: sendfile over TLS.
-- Brotli precompression at cache load time.
-- Static site presets (Hugo/Astro output), SPA fallback.
+- Brotli precompression at cache load time. (Built with compression step 2, 2026-10-30: copies
+  of cached files made once in memory at quality 11.)
+- Static site presets (Hugo/Astro output), SPA fallback. (`app = "static"` is built and the
+  cookbook has the single-page application; no generator-specific preset.)
 - **Hosting mode: one process per site user.** A front process accepts, reads SNI/Host,
   and passes the descriptor (SCM_RIGHTS) to the site's own agensio process running as the
   site user, so even a web-server exploit is confined to that user; per-site cgroups give

@@ -37,6 +37,19 @@
   `docs/design-http2.md` 6.4 and its threat table said this class was closed; they now say what
   holds.
 
+- **Docs: the roadmap held to the code, and a draft of version 1's scope.**
+  - `docs/ROADMAP.md`: every checkbox read against the code of 0.1.0-alpha.145. Phases A to D are
+    complete; six items that were built and still open are closed (parser hardening with the
+    fuzzers on a schedule, IPv6 listeners, HTTP/2 request bodies, the site's files, the trash,
+    the certificate watch); twelve say what is built and what is left; thirteen stay open. Each
+    reading is a line starting "Audit 2026-11-13". One finding of the reading: a stop (SIGTERM)
+    ends HTTP/1 and HTTP/2 requests in flight without a drain.
+  - `docs/design-v1.md` (a draft, nothing decided): what version 1 would hold, from the research
+    of the same day (`reports/Web server v1 readiness 2026.md`: the RFCs' requirements for
+    HTTP/1.x, HTTP/2 and HTTP/3 read against the code, TLS and certificates in 2026, what the
+    established servers ship, what administrators and applications ask for, what a stable
+    release needs beyond features), each item with a recommendation for the owner.
+
 ## 0.1.0-alpha.145 (2026-11-13)
 
 - **Fix: agensio builds against OpenSSL 4.** Arch Linux moved to OpenSSL 4.1, and the release's

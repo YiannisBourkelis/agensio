@@ -1601,6 +1601,12 @@ privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 complia
 
 ## Roadmap
 
+`docs/design-v1.md` is the draft of version 1's scope (2026-11-13, nothing decided until the owner answers its
+section 7): the RFC conformance and security rows first, one failing test and one commit each, then the features
+every established server has, then what applications and administrators expect, the readiness work and the
+stages; `reports/Web server v1 readiness 2026.md` is the research under it. `docs/ROADMAP.md`'s checkboxes were
+held to the code the same day (lines starting "Audit 2026-11-13").
+
 See `docs/ROADMAP.md`, lettered in execution order (renumbered 2026-09-17): A core refactor
 (streams, bodies, router; A1-A3 done), B methods beyond GET/HEAD, C PHP/FastCGI (Laravel,
 Statamic, WordPress), D reverse proxy (WebSocket, CGI; Rails, Node, Python, Java, Go apps),
