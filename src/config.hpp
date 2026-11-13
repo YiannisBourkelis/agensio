@@ -918,6 +918,12 @@ bool node_app(std::string_view app) noexcept;
 // An entry `entry = "..."` takes: a relative path inside the project directory ending in .js,
 // .mjs or .cjs, of letters, digits and . _ - /, no "..", no "//". "" or why.
 std::string check_entry(std::string_view entry);
+// proxy.tls.server_name: the one name asked of an origin as SNI and looked for in its certificate. A host
+// name (labels of ASCII letters, digits, '-' and '_', 63 bytes each at most, 253 in all, no final dot, the
+// last label not a number: RFC 6066 3, RFC 1123 2.1; an IDN in its xn-- form) or an IP address as the stack
+// reads one (no brackets, port or zone). "" when it is one, else why. What it calls an address the TLS client
+// checks as an address and never sends as SNI (tls::send_server_name), held together by the unit test.
+std::string check_peer_name(std::string_view name);
 // served_dir: a plain directory path relative to the project (public, web/public); "" when it is one.
 std::string check_served_dir(std::string_view dir);
 // env_file: a plain file path relative to the project (.env, shared/.env): letters, digits, '.', '_',

@@ -31,6 +31,29 @@ inline std::string_view normalize_host(std::string_view host, char (&buf)[256]) 
     return std::string_view(buf, host.size());
 }
 
+// The form of a host name (RFC 1123 2.1, RFC 6066 3, as written in a certificate or asked of a TLS
+// peer): labels of ASCII letters, digits, '-' and '_' joined by dots, 63 bytes a label and 253 in
+// all, no empty label and so no final dot, and a last label that is not a number (how an address
+// ends, never a name: "1.2.3", "010.0.0.1"). An international name is in its xn-- form.
+inline bool valid_host_name(std::string_view name) noexcept {
+    if (name.empty() || name.size() > 253) return false;
+    std::size_t label = 0;    // the length of the label being read
+    bool digits_only = true;  // of that label
+    for (const unsigned char c : name) {
+        if (c == '.') {
+            if (label == 0) return false;
+            label = 0;
+            digits_only = true;
+            continue;
+        }
+        const bool digit = c >= '0' && c <= '9';
+        if (!digit && !((c | 0x20) >= 'a' && (c | 0x20) <= 'z') && c != '-' && c != '_') return false;
+        if (++label > 63) return false;
+        digits_only = digits_only && digit;
+    }
+    return label != 0 && !digits_only;
+}
+
 // The names of one certificate: exact DNS names and IP addresses, and wildcard entries
 // kept as the suffix after "*" (".example.com" for "*.example.com").
 struct CertNames {

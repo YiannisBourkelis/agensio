@@ -386,7 +386,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   contexts cached per pool, `https://` and the location's TLS policy in the pool key
   (`UpstreamAddress::pool`, set in `finalize_site`), `proxy.tls = { verify,
   server_name, ca }`; without `server_name` the certificate must name the upstream's address
-  (`X509_VERIFY_PARAM_set1_ip_asc`, alpha.61). CGI (D5, `src/upstream/cgi_client.*`, `src/handlers/cgi.*`): the
+  (`X509_VERIFY_PARAM_set1_ip_asc`, alpha.61); `server_name` is one host name or one address, anything
+  else refused at load (`check_peer_name` over `valid_host_name` in `core/host.hpp`, alpha.146: a final dot
+  never verified, a `*.` pattern was sent as SNI), and an address is never sent as SNI
+  (`tls::send_server_name`, RFC 6066 3). CGI (D5, `src/upstream/cgi_client.*`, `src/handlers/cgi.*`): the
   exchange's connect step forks the script with a socketpair as stdin/stdout, so the
   shared exchange code does the rest; processes capped and reaped per worker pool.
 - **Presets** (C3): `app = "laravel" | "drupal" | "wordpress" | "grav" | "php" | "static"` (and the

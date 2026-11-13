@@ -2174,7 +2174,9 @@ request. The certificate is verified against the system store by default;
 `proxy = { tls = { ca = "/etc/ssl/internal-ca.pem", server_name = "app.internal" } }`
 names a private CA and the name the certificate must carry (also sent as SNI; an IP address
 written as `server_name` is looked for among the certificate's addresses and, as RFC 6066
-section 3 requires, not sent as SNI). Without
+section 3 requires, not sent as SNI). It is one host name or one address: a value that is neither is
+refused at load, among them a name with a final dot (`"app.internal."`, which no certificate carries) and
+a pattern (`"*.internal"`: the certificate may be a wildcard, the name asked for is one it covers). Without
 `server_name` the certificate must name the upstream's address itself (an IP address entry,
 `IP:10.0.0.11`), as nginx and Caddy check by default, and no SNI is sent; most certificates
 name hosts, not addresses, so set `server_name` to the name yours carries. `tls = { verify =

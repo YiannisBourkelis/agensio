@@ -60,6 +60,27 @@
   (`bench/results/ab-20261113-205515.md`): the name is set once per TLS connection agensio
   opens, never per request.
 
+- **`proxy.tls.server_name` is one host name or one IP address; anything else is refused at
+  load.** The value is the name asked of an origin as SNI and looked for in its certificate, and
+  it was taken as written: `"o.test."` (a final dot) loaded and then never verified, a `502` for
+  every request; `"*.w.test"` loaded, was sent as SNI, and matched a wildcard certificate letter
+  for letter (the test VPS's report on 0.1.0-alpha.145, O2). Now `agensio -t`, the start and a
+  reload refuse a value that is neither a host name (labels of letters, digits, `-` and `_`
+  joined by dots, 63 bytes a label, 253 in all, no final dot, an international name in its
+  `xn--` form; RFC 6066 3, RFC 1123 2.1) nor an IP address (no brackets, port or zone), saying
+  which it is and, for a final dot or a pattern, what to write. An included site file with such
+  a value is set aside like any other that does not load, and a managed change that would write
+  one is undone.
+  **A configuration with such a value loaded before and is refused now**: for a wildcard
+  certificate write a name the pattern covers (`"x.w.test"`), for a final dot the name without
+  it. An empty `server_name` still means none.
+  `check_peer_name` (`config.cpp`) over `valid_host_name` (`core/host.hpp`); what it reads as an
+  address is what the TLS client checks as an address and does not send as SNI, held together
+  by the unit test. Tests: the unit test (thirteen values taken, twenty-three refused, the load
+  of a location's and a site's `proxy` table). The reference row, `docs/configuration.md` 12 and
+  the cookbook's recipe say it.
+  Checked: unit tests, also in the build without OpenSSL; the integration suite (866, the
+  cookbook's recipes loaded by it); the A/B is the next entry's, both changes in one build.
 - **Docs: the roadmap held to the code, and a draft of version 1's scope.**
   - `docs/ROADMAP.md`: every checkbox read against the code of 0.1.0-alpha.145. Phases A to D are
     complete; six items that were built and still open are closed (parser hardening with the

@@ -5393,6 +5393,28 @@ static void test_proxy() {
     CHECK(refused("tls.toml", tls_site, "needs a build with TLS"));  // a build without OpenSSL refuses it, saying why
 #endif
     CHECK(refused("noup.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nhandler = \"proxy\"\n", "needs upstream"));
+    // proxy.tls.server_name is one host name or one IP address (the alpha.145 report's O2): the name asked of
+    // the origin as SNI (RFC 6066 3: a DNS host name, no final dot) and looked for in its certificate. Until
+    // 0.1.0-alpha.146 anything loaded: "o.test." never verified (a 502 per request) and "*.w.test" was sent as
+    // SNI and matched a wildcard certificate letter for letter.
+    for (const char* ok : {"o.test", "O.Test", "localhost", "a-b.example.com", "xn--bcher-kva.example", "my_app", "3com.example", "a.b.c4",
+                           "1.2.3.4", "::1", "0:0:0:0:0:0:0:1", "2001:db8::1", "::ffff:1.2.3.4"})
+        CHECK(check_peer_name(ok).empty());
+    const std::string label64(64, 'a'), name254 = std::string(63, 'a') + "." + std::string(63, 'b') + "." + std::string(63, 'c') + "." + std::string(62, 'd');
+    CHECK(check_peer_name(std::string(63, 'a') + ".test").empty() && !check_peer_name(label64 + ".test").empty());
+    CHECK(name254.size() == 254 && !check_peer_name(name254).empty() && check_peer_name(name254.substr(0, 253)).empty());
+    for (const char* bad : {"", "o.test.", ".", "*.w.test", "*", "a.*.test", "a..b", ".a", "a b", " a.test", "a.test ", "a/b", "a:443", "[::1]", "fe80::1%eth0",
+                            "1.2.3", "1.2.3.4.5", "010.0.0.1", "256.1.1.1", "1.2.3.4 ", "b\xc3\xbc" "cher.example", "http://a.test", "a.test\n"})
+        CHECK(!check_peer_name(bad).empty());
+    CHECK(check_peer_name("o.test.").find("final dot") != std::string::npos && check_peer_name("*.w.test").find("pattern") != std::string::npos);
+    {
+        const std::string head = "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"http://127.0.0.1:9100\"\n";
+        CHECK(refused("sni-dot.toml", head + "proxy = { tls = { server_name = \"o.test.\" } }\n", ".proxy.tls.server_name = \"o.test.\""));
+        CHECK(refused("sni-star.toml", head + "proxy = { tls = { verify = false, server_name = \"*.w.test\" } }\n", ".proxy.tls.server_name = \"*.w.test\""));
+        CHECK(refused("sni-site.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\nproxy = { tls = { server_name = \"a b\" } }\n", ".proxy.tls.server_name"));
+        write("sni-ok.toml", head + "proxy = { tls = { server_name = \"\" } }\n");  // empty is "none", as before
+        CHECK(load_config(dir / "sni-ok.toml").sites[0].locations.size() >= 1);
+    }
     // A handler's table on a location that runs another handler did nothing, silently: `proxy =
     // {...}` without upstream served the site's files where an application was meant (the
     // cookbook's finding, alpha.71). Refused, naming what to add.
@@ -5844,6 +5866,19 @@ static void test_openssl_compat() {
         if (as_address) CHECK(sent == nullptr);
         else CHECK(sent != nullptr && std::string_view(sent) == host);
         if ((sent == nullptr) != as_address) std::printf("SNI for %s: %s, checked as %s\n", host, sent ? sent : "(none)", as_address ? "an address" : "a name");
+    }
+    // What the loader takes as proxy.tls.server_name (check_peer_name) is read here the way the loader read
+    // it: an address there is checked as an address and not sent, a host name there is sent as it is.
+    for (const char* host : {"o.test", "my_app", "3com.example", "a.b.c4", "1.2.3.4a", "localhost", "1.2.3.4", "::1", "0:0:0:0:0:0:0:1",
+                             "2001:db8::1", "::ffff:1.2.3.4", "::"}) {
+        CHECK(check_peer_name(host).empty());
+        asio::error_code ec;
+        (void)asio::ip::make_address(host, ec);
+        std::unique_ptr<SSL, SslFree> ssl(SSL_new(ctx.get()));
+        SSL_set_connect_state(ssl.get());
+        CHECK(tls::send_server_name(ssl.get(), host) && tls::expect_peer_name(ssl.get(), host));
+        const char* sent = SSL_get_servername(ssl.get(), TLSEXT_NAMETYPE_host_name);
+        CHECK((sent == nullptr) == !ec && expected(ssl.get()).starts_with("|") == !ec);
     }
 }
 

@@ -455,7 +455,8 @@ proxy = { tls = { ca = "/etc/ssl/internal-ca.pem", server_name = "reports.intern
 **What it does.** agensio talks TLS to the origin and keeps the connections open, so a
 handshake is paid once per pooled connection, not per request. The origin's certificate is
 verified against `ca` (without it, the system's store), and `server_name` is both the name sent
-in SNI and the name the certificate must carry. Set it: an upstream is always an IP address,
+in SNI and the name the certificate must carry (one host name, written without a final dot; for a
+wildcard certificate, a name it covers, never the `*.` pattern: `agensio -t` refuses both). Set it: an upstream is always an IP address,
 and without `server_name` the certificate must name that address (`IP:127.0.0.1`), which most
 certificates do not, so the request is a `502` logged as `tls_error` with the line saying so.
 Each TLS policy keeps its own connections: a location with `verify = false` never lends one to

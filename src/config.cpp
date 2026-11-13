@@ -503,6 +503,10 @@ void parse_proxy_policy(const toml::table& t, const fs::path& base_dir, Upstream
         check_keys(*tt, {"proxy tls = {}"}, {}, where + ".tls");
         out.tls.verify = (*tt)["verify"].value_or(out.tls.verify);
         out.tls.server_name = (*tt)["server_name"].value_or(out.tls.server_name);
+        // One host name or one address (the alpha.145 report's O2): a value that is neither could only fail at
+        // the first request, or be sent to the origin as a name no host has.
+        if (!out.tls.server_name.empty())
+            if (const std::string why = check_peer_name(out.tls.server_name); !why.empty()) fail(where + ".tls.server_name = " + why);
         if (auto ca = (*tt)["ca"].value<std::string>()) {
             out.tls.ca_file = resolve(base_dir, *ca).string();
             if (!fs::is_regular_file(out.tls.ca_file)) fail(where + ".tls.ca: file not found: " + out.tls.ca_file);
@@ -3218,6 +3222,27 @@ std::string check_entry(std::string_view e) {
         return "entry '" + std::string(e) + "' must be a plain path: no '//', no segment starting with '.'";
     if (!e.ends_with(".js") && !e.ends_with(".mjs") && !e.ends_with(".cjs")) return "entry '" + std::string(e) + "' must be a .js, .mjs or .cjs file";
     return "";
+}
+
+std::string check_peer_name(std::string_view name) {
+    const std::string text(name);
+    const std::string quoted = "\"" + text + "\"";
+    // An address: what the stack reads as one, without a zone ("fe80::1%eth0" is no certificate's address).
+    if (name.find('%') == std::string_view::npos) {
+        asio::error_code ec;
+        (void)asio::ip::make_address(text, ec);
+        if (!ec) return {};
+    }
+    if (name.find('*') != std::string_view::npos)
+        return quoted + " is a pattern: server_name is the one name asked of the origin and looked for in its certificate (which may "
+                        "itself be a wildcard); write a name the pattern covers";
+    if (name.size() > 1 && name.back() == '.' && check_peer_name(name.substr(0, name.size() - 1)).empty())
+        return quoted + " ends with a final dot: no certificate names a host that way, so it would never verify; write \"" +
+               text.substr(0, text.size() - 1) + "\"";
+    const std::string why = quoted + " is neither a host name (labels of letters, digits, '-' and '_' joined by dots, an "
+                                     "international name in its xn-- form, no final dot, 253 characters at most) nor an IP address "
+                                     "(192.0.2.1, 2001:db8::1: no brackets, no port)";
+    return valid_host_name(name) ? std::string() : why;
 }
 
 std::string check_served_dir(std::string_view p) {
