@@ -71,6 +71,10 @@ mkdir -p bench/tmp/certs-ab bench/tmp/certs-wild bench/tmp/certs-live
 openssl x509 -checkend 1296000 -noout -in bench/tmp/certs-ab/cert.pem >/dev/null 2>&1 || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-ab/key.pem -out bench/tmp/certs-ab/cert.pem -days 30 -subj "/CN=a.test" -addext "subjectAltName=DNS:a.test,DNS:b.test" >/dev/null 2>&1
 openssl x509 -checkend 1296000 -noout -in bench/tmp/certs-wild/cert.pem >/dev/null 2>&1 || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-wild/key.pem -out bench/tmp/certs-wild/cert.pem -days 30 -subj "/CN=*.wild.test" -addext "subjectAltName=DNS:*.wild.test" >/dev/null 2>&1
 cp bench/tmp/certs-b/cert.pem bench/tmp/certs-b/key.pem bench/tmp/certs-live/
+# A certificate whose CN is not among its subjectAltName's names, and with an IPv6 address there:
+# what a certificate covers is read as a client reads it (the alpha.145 report's O3).
+mkdir -p bench/tmp/certs-cnsan
+openssl x509 -checkend 1296000 -noout -in bench/tmp/certs-cnsan/cert.pem >/dev/null 2>&1 || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-cnsan/key.pem -out bench/tmp/certs-cnsan/cert.pem -days 30 -subj "/CN=cn-old.test" -addext "subjectAltName=DNS:san-new.test,IP:::1" >/dev/null 2>&1
 # The HttpArena benchmark handler is a build option: its site and checks run only when this
 # binary accepts handler = "httparena" (a three-item dataset stands in for the arena's).
 cat > bench/tmp/arena-dataset.json <<'JSON'
@@ -275,6 +279,13 @@ server_name = ["*"]
 listen = ["127.0.0.1:8448"]
 root = "{root}/bench/www"
 tls = {{ cert = "{root}/bench/tmp/certs-b/cert.pem", key = "{root}/bench/tmp/certs-b/key.pem" }}
+
+[[site]]                                 # CN cn-old.test, subjectAltName san-new.test and ::1 (O3)
+server_name = ["san-new.test", "cn-old.test"]
+listen = ["127.0.0.1:18451"]
+default = true
+root = "{root}/bench/www"
+tls = {{ cert = "{root}/bench/tmp/certs-cnsan/cert.pem", key = "{root}/bench/tmp/certs-cnsan/key.pem" }}
 """
 # Redirects on a plain listener: http = "redirect" (docs/redirects.md 2.4, a proxy in front holds
 # the certificate: what 127.0.0.1, a trusted proxy here, marks https is served), and a domain that
@@ -656,6 +667,15 @@ check "authority: a wildcard certificate covers the sibling site" "200 200" "$(h
 check "authority: the bare domain is not covered by the wildcard (no site either)" "421" "$(hostcode x.wild.test wild.test 8449)"
 check "authority: a Host no site lists over a valid TLS connection is still 421" "421" "$(hostcode b.test c.test 8446)"
 check "authority: case, a trailing dot and a port in Host match as before" "200 200 200" "$(hostcode b.test B.TEST 8446) $(hostcode b.test b.test. 8446) $(hostcode b.test b.test:8446 8446)"
+# One reader for a certificate's names (the alpha.145 report's O3): the CN counts only when the
+# subjectAltName holds no DNS name, as a client's check has it (b.test's certificate above has no
+# subjectAltName and is served for its CN), an IPv6 address there covers a Host written in brackets
+# (until 0.1.0-alpha.146 cut at its last colon, so 421), and the listing prints what is served.
+check "authority: a certificate with DNS names in its subjectAltName covers those and not its CN; its IPv6 address covers [::1]" "200 421 200" \
+  "$(hostcode san-new.test san-new.test 18451) $(hostcode cn-old.test cn-old.test 18451) $(curl -sSk -o /dev/null -w '%{http_code}' -H 'Host: [::1]:18451' https://127.0.0.1:18451/)"
+tlsnames() { curl -sS --unix-socket bench/tmp/control.sock "http://control/v1/sites/$1" | python3 -c 'import json,sys; t=json.load(sys.stdin)["tls"]; print(",".join(t["names"]) + "=" + ",".join(t.get("served", {}).get("names", ["?"])))'; }
+check "control: a site's tls.names are what its connections answer for, on disk and as served: the CN of a certificate without a subjectAltName, else the subjectAltName's names and addresses" \
+  "b.test=b.test san-new.test,::1=san-new.test,::1" "$(tlsnames b.test) $(tlsnames san-new.test)"
 check "authority: no SNI, the catch-all's certificate is presented: a Host it covers is served, another is 421" "200 421" "$(curl -sSk -o /dev/null -w '%{http_code}' -H 'Host: b.test' https://127.0.0.1:8448/) $(curl -sSk -o /dev/null -w '%{http_code}' -H 'Host: other.test' https://127.0.0.1:8448/)"
 check "authority: HTTP/1.0 without Host over TLS still reaches the catch-all (no name claimed); HTTP/1.1 without Host stays 400" "200 400" "$(printf 'GET / HTTP/1.0\r\n\r\n' | openssl s_client -quiet -connect 127.0.0.1:8448 -noservername 2>/dev/null | head -1 | awk '{print $2}') $(printf 'GET / HTTP/1.1\r\n\r\n' | openssl s_client -quiet -connect 127.0.0.1:8448 -noservername 2>/dev/null | head -1 | awk '{print $2}')"
 check "authority: plain HTTP is unchanged: any site on the listener, 421 for none" "200 421" "$(code -H 'Host: strict.test' $S/) $(code -H 'Host: a.test' $S/)"

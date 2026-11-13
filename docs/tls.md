@@ -137,7 +137,11 @@ application's own removed (0.1.0-alpha.104; [redirects.md](redirects.md) 4.2). W
 
 `cert` is the certificate followed by the intermediates (`fullchain.pem`), `key` its private
 key, both PEM. The certificate must cover every name in `server_name`: a request for a name it
-does not cover is answered `421`, and a TLS client asking for a name no site lists is refused
+does not cover is answered `421`. Its names are the DNS names and addresses of its
+subjectAltName; the subject's CN counts only for a certificate whose subjectAltName holds no DNS
+name, as clients built on OpenSSL read one (browsers ignore the CN altogether, so give every name
+in the subjectAltName). `agensio ctl sites` and `agensio ctl site NAME` print the names a certificate
+is served for (`tls.names` for the file, `tls.served.names` for the one in memory). A TLS client asking for a name no site lists is refused
 during the handshake (`unrecognized_name`), so another site's certificate is never shown.
 `agensio ctl status` counts those refusals (`tls_handshakes_refused`, with the addresses).
 

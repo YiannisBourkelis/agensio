@@ -60,10 +60,18 @@ struct CertNames {
     std::vector<std::string> exact;
     std::vector<std::string> wildcard;
 
+    // `name` is a certificate's name, not a Host field: there is no port to cut and an IPv6 address
+    // is written bare. (Read as a Host field until 0.1.0-alpha.146, an IPv6 address lost what
+    // followed its last colon and covered no request.)
     void add(std::string_view name) {
+        if (!name.empty() && name.back() == '.') name.remove_suffix(1);
+        if (name.empty() || name.size() > 253) return;
         char buf[256];
-        const std::string_view n = normalize_host(name, buf);
-        if (n.empty()) return;
+        for (std::size_t i = 0; i < name.size(); ++i) {
+            const char c = name[i];
+            buf[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+        }
+        const std::string_view n(buf, name.size());
         if (n.size() > 2 && n[0] == '*' && n[1] == '.' && n.find('*', 1) == std::string_view::npos) wildcard.emplace_back(n.substr(1));
         else if (n.find('*') == std::string_view::npos) exact.emplace_back(n);
     }

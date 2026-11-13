@@ -429,31 +429,12 @@ void Server::arm_flush(Worker& w) {
 }
 
 #ifdef AGENSIO_HAS_TLS
-// The names a context's certificate covers: the subject CN and every DNS and IP entry of
-// the subjectAltName, parsed once at load; what a connection is authoritative for.
+// The names a context's certificate covers, read once at load: what a connection is authoritative
+// for. acme::certificate_names is the reader, the one the listing uses too (the alpha.145 report's
+// O3): the subjectAltName's DNS names and addresses, the CN only when it holds no DNS name.
 static CertNames certificate_names(SSL_CTX* ctx) {
     CertNames names;
-    X509* x = SSL_CTX_get0_certificate(ctx);
-    if (!x) return names;
-    if (const auto cn = tls::first_common_name(X509_get_subject_name(x), 255); !cn.empty()) names.add(cn);
-    if (auto* sans = static_cast<GENERAL_NAMES*>(X509_get_ext_d2i(x, NID_subject_alt_name, nullptr, nullptr))) {
-        for (int i = 0; i < sk_GENERAL_NAME_num(sans); ++i) {
-            const GENERAL_NAME* g = sk_GENERAL_NAME_value(sans, i);
-            if (g->type == GEN_DNS) {
-                names.add(tls::asn1_text(g->d.dNSName));
-            } else if (g->type == GEN_IPADD) {
-                const unsigned char* b = ASN1_STRING_get0_data(g->d.iPAddress);
-                const std::size_t len = tls::asn1_length(g->d.iPAddress);
-                if (len == 4) names.add(asio::ip::address_v4(std::array<unsigned char, 4>{b[0], b[1], b[2], b[3]}).to_string());
-                else if (len == 16) {
-                    std::array<unsigned char, 16> v6{};
-                    std::copy(b, b + 16, v6.begin());
-                    names.add(asio::ip::address_v6(v6).to_string());
-                }
-            }
-        }
-        GENERAL_NAMES_free(sans);
-    }
+    for (const auto& n : acme::certificate_names(SSL_CTX_get0_certificate(ctx))) names.add(n);
     return names;
 }
 

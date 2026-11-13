@@ -28,6 +28,7 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
+#include "core/host.hpp"
 #include "core/openssl_compat.hpp"
 #include "services/json.hpp"
 
@@ -688,6 +689,42 @@ bool certificate_info(const fs::path& cert_path, CertInfo& out, std::string& err
     return certificate_info_of(x.get(), out, error);
 }
 
+std::vector<std::string> certificate_names(const X509* x) {
+    std::vector<std::string> names;
+    if (!x) return names;
+    bool dns = false;  // a DNS name in the subjectAltName: the CN is then no name of the certificate
+    if (auto* sans = static_cast<GENERAL_NAMES*>(X509_get_ext_d2i(x, NID_subject_alt_name, nullptr, nullptr))) {
+        for (int i = 0; i < sk_GENERAL_NAME_num(sans); ++i) {
+            const GENERAL_NAME* g = sk_GENERAL_NAME_value(sans, i);
+            if (g->type == GEN_DNS) {
+                dns = true;
+                names.emplace_back(tls::asn1_text(g->d.dNSName));
+            } else if (g->type == GEN_IPADD) {
+                const unsigned char* b = ASN1_STRING_get0_data(g->d.iPAddress);
+                const std::size_t len = tls::asn1_length(g->d.iPAddress);
+                if (len == 4) {
+                    names.push_back(asio::ip::address_v4(std::array<unsigned char, 4>{b[0], b[1], b[2], b[3]}).to_string());
+                } else if (len == 16) {
+                    std::array<unsigned char, 16> v6{};
+                    std::copy(b, b + 16, v6.begin());
+                    names.push_back(asio::ip::address_v6(v6).to_string());
+                }
+            }
+        }
+        GENERAL_NAMES_free(sans);
+    }
+    if (dns) return names;
+    // The entry's bytes whole (a NUL byte inside makes it no host name, never a shorter one).
+    const X509_NAME* subject = X509_get_subject_name(x);
+    const int at = subject ? X509_NAME_get_index_by_NID(subject, NID_commonName, -1) : -1;
+    if (at < 0) return names;
+    const ASN1_STRING* data = X509_NAME_ENTRY_get_data(X509_NAME_get_entry(subject, at));
+    if (!data) return names;
+    const std::string_view cn = tls::asn1_text(data);
+    if (valid_host_name(cn.starts_with("*.") ? cn.substr(2) : cn)) names.emplace_back(cn);
+    return names;
+}
+
 bool certificate_info_of(const X509* x509, CertInfo& out, std::string& error) {
     if (!x509) {
         error = "no certificate";
@@ -710,15 +747,7 @@ bool certificate_info_of(const X509* x509, CertInfo& out, std::string& error) {
     const std::string_view cn = tls::first_common_name(X509_get_issuer_name(x.get()), 127);
     out.issuer = cn;
     out.placeholder = cn == kPlaceholderName;
-    out.names.clear();
-    if (auto* sans = static_cast<GENERAL_NAMES*>(X509_get_ext_d2i(x.get(), NID_subject_alt_name, nullptr, nullptr))) {
-        for (int i = 0; i < sk_GENERAL_NAME_num(sans); ++i) {
-            const GENERAL_NAME* g = sk_GENERAL_NAME_value(sans, i);
-            if (g->type == GEN_DNS)
-                out.names.emplace_back(tls::asn1_text(g->d.dNSName));
-        }
-        GENERAL_NAMES_free(sans);
-    }
+    out.names = certificate_names(x.get());
     if (!asn1_time(X509_get0_notBefore(x.get()), out.not_before) || !asn1_time(X509_get0_notAfter(x.get()), out.not_after)) {
         error = "unreadable validity";
         return false;

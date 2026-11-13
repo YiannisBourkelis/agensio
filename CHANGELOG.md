@@ -81,6 +81,39 @@
   the cookbook's recipe say it.
   Checked: unit tests, also in the build without OpenSSL; the integration suite (866, the
   cookbook's recipes loaded by it); the A/B is the next entry's, both changes in one build.
+- **Fix: a certificate's names are read by one function, as a client reads them.** Two readers
+  disagreed (the test VPS's report on 0.1.0-alpha.145, O3). The server, deciding what a TLS
+  connection answers for (anything else is `421`), counted the subject's CN beside the DNS names
+  and addresses of the subjectAltName; `sites_list` and `site_show` printed the DNS names
+  alone. A certificate without a subjectAltName was therefore served for its CN and listed as
+  naming nothing. Now `acme::certificate_names` is the one reader of both: the DNS names and IP
+  addresses of the subjectAltName, and the subject's first CN only when the subjectAltName holds
+  no DNS name and the CN has the form of a host name (`*.example.com` too). That is the rule of
+  RFC 6125 6.4.4 as OpenSSL's `X509_check_host` and `X509_check_ip` apply it, and the unit test
+  holds the reader to those two functions, certificate by certificate.
+  - **What changes for a site**: a certificate whose CN is not among the DNS names of its
+    subjectAltName no longer answers for that CN (a `421`, as a client that checked the
+    certificate would have refused it anyway). Certificates from a public CA repeat the CN in
+    the subjectAltName and are unaffected; a certificate without a subjectAltName keeps
+    answering for its CN.
+  - `tls.names` and `tls.served.names` of `sites_list` and `site_show` list what is served: the
+    CN of a certificate without a subjectAltName (none before), and the certificate's addresses
+    beside its DNS names.
+  - Found with it: an IPv6 address in a certificate covered no request. `CertNames::add` read a
+    certificate's name as it reads a `Host` field and cut the address at its last colon, as if a
+    port followed, so `Host: [2001:db8::1]` was a `421` whatever the certificate said. A
+    certificate's name is now taken whole.
+  Tests, written before the fix: the unit test builds thirteen certificates and compares the
+  reader, the listing and the `421` rule with OpenSSL's own checks for fifteen hosts each; the
+  IPv6 case in the host tests; the integration suite serves a certificate with CN `cn-old.test`,
+  subjectAltName `san-new.test` and `::1`, and checks the three answers and the listing of two
+  sites. `docs/configuration.md` 1b, `docs/tls.md` 3.1 and the `sites_list` tool's description
+  say it.
+  Checked: unit tests, also in the build without OpenSSL; the integration suite (866), the
+  isolation suite (53) and the certificate suite against Pebble (21); the static and TLS rows of
+  `bench/ab.sh` against the commit before, three rounds, 0.939 to 1.022
+  (`bench/results/ab-20261113-223758.md`): names are read when a certificate is loaded and a
+  configuration when it is parsed, nothing per request.
 - **Docs: the roadmap held to the code, and a draft of version 1's scope.**
   - `docs/ROADMAP.md`: every checkbox read against the code of 0.1.0-alpha.145. Phases A to D are
     complete; six items that were built and still open are closed (parser hardening with the

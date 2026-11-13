@@ -321,7 +321,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   say ahead of time which certificate or key the server's account cannot read after the drop;
   health judges the certificates as served (`Server::tls_facts`, `control::TlsFacts`, T2):
   `certificate_not_loaded`, `acme_renewal_overdue` and `acme_renewal_failed` with the manager's
-  last failure (`AcmeManager::failures`). The certificate refresh (T3,
+  last failure (`AcmeManager::failures`). A certificate's names have one reader (alpha.146,
+  `acme::certificate_names`: the subjectAltName's DNS names and addresses, the CN only when it holds no
+  DNS name, RFC 6125 6.4.4 as `X509_check_host` applies it, held to OpenSSL's checks by the unit test):
+  what a connection answers for (`CertNames`, the 421 rule; a certificate's name is taken whole, an IPv6
+  address was cut at its last colon before) and `tls.names` of `sites_list` and `site_show` are that list. The certificate refresh (T3,
   `Server::refresh_certificates` over `switch_to`, the half of a reload after the configuration is
   loaded): the running configuration's certificates read again, no configuration file read; ACME
   uses it after an order, an hourly watch (`arm_certificate_watch`, one stat per file,

@@ -5882,6 +5882,101 @@ static void test_openssl_compat() {
     }
 }
 
+// The names a certificate covers are read by one function (the alpha.145 report's O3): what a TLS
+// connection answers for (the 421 rule) and what sites_list and site_show print. Until
+// 0.1.0-alpha.146 the server counted the subject's CN beside the subjectAltName's names and the
+// listing read the DNS names alone, so a certificate without a subjectAltName was served for its CN
+// and listed as naming nothing. The rule is the one a client's check applies (RFC 6125 6.4.4, held
+// here to OpenSSL's X509_check_host and X509_check_ip_asc): the CN counts only when the
+// subjectAltName holds no DNS name.
+static void test_certificate_names() {
+    struct KeyFree { void operator()(EVP_PKEY* k) const noexcept { EVP_PKEY_free(k); } };
+    struct CertFree { void operator()(X509* x) const noexcept { X509_free(x); } };
+    using CertPtr = std::unique_ptr<X509, CertFree>;
+    const std::unique_ptr<EVP_PKEY, KeyFree> key(EVP_EC_gen("P-256"));
+    CHECK(key != nullptr);
+    if (!key) return;
+    // Self-signed, then through DER and back: read as a certificate loaded from a file is.
+    const auto make = [&](std::string_view cn, const char* san) -> CertPtr {
+        CertPtr x(X509_new());
+        X509_set_version(x.get(), 2);
+        ASN1_INTEGER_set(X509_get_serialNumber(x.get()), 1);
+        X509_gmtime_adj(X509_getm_notBefore(x.get()), 0);
+        X509_gmtime_adj(X509_getm_notAfter(x.get()), 86400);
+        X509_NAME* name = X509_NAME_new();
+        X509_NAME_add_entry_by_NID(name, NID_organizationName, V_ASN1_UTF8STRING, reinterpret_cast<const unsigned char*>("agensio tests"), -1, -1, 0);
+        if (!cn.empty())
+            X509_NAME_add_entry_by_NID(name, NID_commonName, V_ASN1_UTF8STRING, reinterpret_cast<const unsigned char*>(cn.data()), static_cast<int>(cn.size()), -1, 0);
+        X509_set_subject_name(x.get(), name);
+        X509_set_issuer_name(x.get(), name);
+        X509_NAME_free(name);
+        X509_set_pubkey(x.get(), key.get());
+        if (san && *san) {
+            X509_EXTENSION* ext = X509V3_EXT_conf_nid(nullptr, nullptr, NID_subject_alt_name, san);
+            CHECK(ext != nullptr);
+            if (ext) {
+                X509_add_ext(x.get(), ext, -1);
+                X509_EXTENSION_free(ext);
+            }
+        }
+        if (X509_sign(x.get(), key.get(), EVP_sha256()) <= 0) return nullptr;
+        unsigned char* der = nullptr;
+        const int len = i2d_X509(x.get(), &der);
+        if (len <= 0) return nullptr;
+        const unsigned char* p = der;
+        CertPtr back(d2i_X509(nullptr, &p, len));
+        OPENSSL_free(der);
+        return back;
+    };
+    using Names = std::vector<std::string>;
+    struct Case { const char* cn; const char* san; Names names; };
+    const Case cases[] = {
+        {"cn.test", "", {"cn.test"}},                                         // no subjectAltName: the CN (the listing gave none)
+        {"cn.test", "DNS:san.test", {"san.test"}},                            // a DNS name there: the CN no longer counts (the server counted it)
+        {"a.test", "DNS:a.test,DNS:b.test", {"a.test", "b.test"}},            // what a public CA issues: unchanged
+        {"cn.test", "DNS:a.test,DNS:*.w.test,IP:192.0.2.7,IP:2001:db8::1", {"a.test", "*.w.test", "192.0.2.7", "2001:db8::1"}},
+        {"cn.test", "IP:192.0.2.7", {"192.0.2.7", "cn.test"}},                // addresses alone leave the CN standing, as X509_check_host has it
+        {"cn.test", "email:x@y.test", {"cn.test"}},
+        {"*.cn.test", "", {"*.cn.test"}},
+        {"CN.Test", "", {"CN.Test"}},
+        {"My Company", "", {}},                                               // not the form of a host name: no name
+        {"192.0.2.9", "", {}},                                                // an address is checked among the addresses, never in the CN
+        {"cn.test.", "", {}},
+        {"", "", {}},
+        {"", "DNS:only.test", {"only.test"}},
+    };
+    const char* probes[] = {"cn.test", "CN.TEST", "san.test", "a.test", "b.test", "x.w.test", "a.b.w.test", "w.test", "x.cn.test", "only.test",
+                            "192.0.2.7", "192.0.2.9", "2001:db8::1", "2001:db8::2", "y.test"};
+    for (const Case& c : cases) {
+        const CertPtr x = make(c.cn, c.san);
+        CHECK(x != nullptr);
+        if (!x) continue;
+        const Names names = acme::certificate_names(x.get());
+        CHECK(names == c.names);
+        if (names != c.names) {
+            std::printf("certificate_names CN=%s SAN=%s:", c.cn, c.san);
+            for (const auto& n : names) std::printf(" %s", n.c_str());
+            std::printf("\n");
+        }
+        acme::CertInfo info;
+        std::string error;
+        CHECK(acme::certificate_info_of(x.get(), info, error) && info.names == c.names);  // the listing: the same list
+        CertNames covered;                                                                // the 421 rule: built from the same list
+        for (const auto& n : names) covered.add(n);
+        for (const char* host : probes) {
+            asio::error_code ec;
+            (void)asio::ip::make_address(host, ec);
+            const bool client = ec ? X509_check_host(x.get(), host, 0, 0, nullptr) == 1 : X509_check_ip_asc(x.get(), host, 0) == 1;
+            const std::string as_host = !ec && std::string_view(host).find(':') != std::string_view::npos ? "[" + std::string(host) + "]" : std::string(host);  // as a Host field writes it
+            CHECK(covered.covers(as_host) == client);
+            if (covered.covers(as_host) != client) std::printf("CN=%s SAN=%s host %s: covered %d, a client's check %d\n", c.cn, c.san, host, covered.covers(host), client);
+        }
+    }
+    CHECK(acme::certificate_names(nullptr).empty());
+    CHECK(valid_host_name("a.test") && valid_host_name("my_app") && valid_host_name("3com.example") && !valid_host_name("a.test.") && !valid_host_name("") &&
+          !valid_host_name("*.a.test") && !valid_host_name("1.2.3.4") && !valid_host_name("a..b") && !valid_host_name("a b"));
+}
+
 static void test_acme() {
     using namespace std::chrono;
     // base64url, RFC 4648 section 5 test vectors and no padding.
@@ -15841,6 +15936,15 @@ static void test_strict_hosts() {
         CHECK(c.covers("example.com") && c.covers("EXAMPLE.COM:443") && c.covers("example.com.") && c.covers("127.0.0.1:8443"));
         CHECK(c.covers("x.wild.test") && c.covers("X.Wild.Test:8446") && !c.covers("wild.test") && !c.covers("a.b.wild.test") && !c.covers(".wild.test"));
         CHECK(!c.covers("other.com") && !c.covers("") && !c.covers("sub.example.com") && !c.covers("[::1]"));
+        // A certificate's IPv6 address is written bare and a Host field carries it in brackets. Until
+        // 0.1.0-alpha.146 add() cut the address at its last colon as if a port followed, so no request by
+        // an IPv6 literal was ever covered (421), and a bare "2001:db8::2" would have matched "2001:db8::1".
+        CertNames v6;
+        v6.add("2001:db8::1");
+        v6.add("::1");
+        CHECK(v6.exact.size() == 2 && v6.exact[0] == "2001:db8::1" && v6.exact[1] == "::1");
+        CHECK(v6.covers("[2001:db8::1]") && v6.covers("[2001:db8::1]:8443") && v6.covers("[2001:DB8::1]") && v6.covers("[::1]:443"));
+        CHECK(!v6.covers("[2001:db8::2]") && !v6.covers("[::2]") && !v6.covers("2001:db8::1"));  // unbracketed is no Host form: "::1" read as a port
         CertNames none;
         CHECK(none.empty() && !none.covers("example.com"));
     }
@@ -16640,6 +16744,7 @@ int main() {
     test_install();
 #ifdef AGENSIO_HAS_TLS
     test_openssl_compat();
+    test_certificate_names();
     test_acme();
 #endif
     if (failures) {

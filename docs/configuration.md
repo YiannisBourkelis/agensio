@@ -221,8 +221,11 @@ and listeners in `tls_handshakes_refused_detail`: a scanner probing port 443 by 
 there. An HTTP/1.1 request without a Host header stays a 400.
 
 **A TLS connection is authoritative only for the names its certificate covers** (RFC 9110
-section 7.4, RFC 6125 matching: the subject CN, the DNS and IP entries of the
-subjectAltName, a wildcard for exactly one leftmost label). Whatever sites the listener
+section 7.4, RFC 6125 matching: the DNS and IP entries of the subjectAltName, a wildcard for
+exactly one leftmost label, and the subject CN only when the subjectAltName holds no DNS name,
+which is how a client's check reads a certificate and what `sites_list` and `site_show` print as
+`tls.names`; until 0.1.0-alpha.146 the CN counted beside the subjectAltName's names, the listing
+left it out, and an IPv6 address in the certificate covered no `Host: [address]`). Whatever sites the listener
 holds, a request whose Host the presented certificate does not name answers `421`, the
 same constant answer as an unknown Host: a connection opened with `b.example`'s
 certificate never serves `a.example`, and a catch-all site on a TLS listener is bounded
