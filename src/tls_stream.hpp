@@ -30,6 +30,8 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 
+#include "core/openssl_compat.hpp"
+
 namespace agensio {
 
 template <class Socket>
@@ -78,7 +80,7 @@ public:
         if (verify) {
             SSL_set_verify(ssl_.get(), SSL_VERIFY_PEER, nullptr);
             if (!server_name.empty()) {
-                if (SSL_set1_host(ssl_.get(), server_name.c_str()) != 1) return false;
+                if (!tls::expect_peer_name(ssl_.get(), server_name.c_str())) return false;
             } else if (ip.empty() || X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl_.get()), ip.c_str()) != 1) {
                 return false;
             }

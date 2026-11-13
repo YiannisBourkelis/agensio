@@ -28,6 +28,7 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
+#include "core/openssl_compat.hpp"
 #include "services/json.hpp"
 
 namespace agensio {
@@ -355,7 +356,7 @@ bool https_request(const AcmeConfig& cfg, const std::string& method, const std::
         ::setsockopt(stream.lowest_layer().native_handle(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
         ::setsockopt(stream.lowest_layer().native_handle(), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout);
         SSL_set_tlsext_host_name(stream.native_handle(), host.c_str());
-        SSL_set1_host(stream.native_handle(), host.c_str());
+        (void)tls::expect_peer_name(stream.native_handle(), host.c_str());
         stream.handshake(asio::ssl::stream_base::client);
 
         std::string req = method + " " + path + " HTTP/1.1\r\nHost: " + host + (port == "443" ? "" : ":" + port) +
@@ -706,17 +707,15 @@ bool certificate_info_of(const X509* x509, CertInfo& out, std::string& error) {
             out.fingerprint.push_back(hex[md[i] & 15]);
         }
     }
-    char cn[128] = {};
-    X509_NAME_get_text_by_NID(X509_get_issuer_name(x.get()), NID_commonName, cn, sizeof cn);
+    const std::string_view cn = tls::first_common_name(X509_get_issuer_name(x.get()), 127);
     out.issuer = cn;
-    out.placeholder = std::string_view(cn) == kPlaceholderName;
+    out.placeholder = cn == kPlaceholderName;
     out.names.clear();
     if (auto* sans = static_cast<GENERAL_NAMES*>(X509_get_ext_d2i(x.get(), NID_subject_alt_name, nullptr, nullptr))) {
         for (int i = 0; i < sk_GENERAL_NAME_num(sans); ++i) {
             const GENERAL_NAME* g = sk_GENERAL_NAME_value(sans, i);
             if (g->type == GEN_DNS)
-                out.names.emplace_back(reinterpret_cast<const char*>(ASN1_STRING_get0_data(g->d.dNSName)),
-                                       static_cast<std::size_t>(ASN1_STRING_length(g->d.dNSName)));
+                out.names.emplace_back(tls::asn1_text(g->d.dNSName));
         }
         GENERAL_NAMES_free(sans);
     }

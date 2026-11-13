@@ -14,8 +14,39 @@
   Checked on Arch (OpenSSL 4.1.0, GCC 16.2): the whole tree builds, the unit tests pass, and the
   built server answers over HTTP/1.1, HTTP/2 and HTTP/3; on OpenSSL 3.5 the unit tests and the
   certificate suite against Pebble (21 rows), on the release and the sanitizer builds.
-  Still to do: OpenSSL 4 marks three functions agensio calls as deprecated (`SSL_set1_host`,
-  `X509_NAME_get_text_by_NID`, `ASN1_STRING_length`); they work and only warn at build time.
+
+- **No call OpenSSL 4 deprecates is left.** OpenSSL 4.0 deprecates `SSL_set1_host` and
+  `X509_NAME_get_text_by_NID`, 4.1 `ASN1_STRING_length`; they still work and a build against 4.1
+  warned about each. agensio called them in three places, none of them on a request's path: the
+  name the certificate of an origin, a CA or a download must carry (once per TLS connection agensio
+  opens), and the names and the issuer read from a certificate when it is loaded. Each is now behind
+  one function of `core/openssl_compat.hpp` that does what the old call did, on every OpenSSL from
+  3.0 to 4.1:
+  - the peer's name is set with the calls `SSL_set1_host` itself is made of (an IP literal is
+    expected among the certificate's addresses, any other name among its DNS names), which every
+    version has and none deprecates, so there is one code path and no version test;
+  - the common name is read the way OpenSSL names for it (the entry by its index, then its data),
+    cut where the old call's buffer cut it;
+  - the length of an ASN.1 string is `ASN1_STRING_get_length` from 4.1 on and `ASN1_STRING_length`
+    before, the one version test.
+  Nothing changes in what agensio does. The unit tests hold each function to fixed results on every
+  version and, on OpenSSL 3, to the old call case by case (long names, a NUL byte inside a name, no
+  common name, IPv4 and IPv6 literals).
+  The functions are ordinary ones in a file of their own, not inlined: a first form with them
+  inline did the same work per request (instructions counted with `perf stat`) but made five
+  functions larger and moved the TLS code of the request path, a fifth more L1 instruction-cache
+  misses on every TLS row and 4 to 8 % more cycles on HTTP/2 over TLS at ten streams. The form
+  committed shows neither.
+  Measured: the old calls against the new, 46 to 48 ns and 47 to 50 for a peer's DNS name, 33 to 35
+  and 34 to 36 for an address, 15 and 15 to 17 for a common name; `bench/ab.sh` against the commit before,
+  static, HTTP/2 and proxy rows, three rounds: 0.964 to 1.055, the TLS rows 0.987 to 1.009
+  (`bench/results/ab-20261113-143633.md`); the two rows above 1.03 (plain 1 KB, h2c at one stream)
+  run the same instructions per request on both sides
+  (`bench/results/perfstat-openssl-compat-20261113.md`).
+  Checked on Arch (OpenSSL 4.1.0): no deprecation warning from OpenSSL left, unit tests pass; on
+  OpenSSL 3.5: unit tests on the release, sanitizer and no-OpenSSL builds, the integration suite
+  (859), the install suite (27, an HTTPS download from an IP address) and the certificate suite
+  against Pebble (21, release and sanitizer builds).
 
 ## 0.1.0-alpha.144 (2026-11-13)
 

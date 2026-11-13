@@ -74,6 +74,7 @@
 #include "core/headers.hpp"
 #include "core/result.hpp"
 #include "core/host.hpp"
+#include "core/openssl_compat.hpp"
 #include "core/cpus.hpp"
 #include "core/router.hpp"
 #include "handlers/fastcgi.hpp"
@@ -5743,6 +5744,93 @@ static void test_json() {
 }
 
 #ifdef AGENSIO_HAS_TLS
+// core/openssl_compat.hpp: each helper does what the call it replaced did. The expected values
+// hold on every OpenSSL; where the old call still exists without a deprecation (before 4.0) the
+// helper is also held to it, case by case.
+static void test_openssl_compat() {
+    struct NameFree { void operator()(X509_NAME* n) const noexcept { X509_NAME_free(n); } };
+    using Name = std::unique_ptr<X509_NAME, NameFree>;
+    // Raw bytes as a UTF8String: no length table, so a long name and a NUL byte can be built.
+    const auto add = [](X509_NAME* n, int nid, std::string_view bytes) {
+        return X509_NAME_add_entry_by_NID(n, nid, V_ASN1_UTF8STRING, reinterpret_cast<const unsigned char*>(bytes.data()),
+                                          static_cast<int>(bytes.size()), -1, 0) == 1;
+    };
+    const std::string long_name(300, 'a');
+    const std::string_view with_nul("a.example\0evil.test", 19);
+    struct Case { std::vector<std::pair<int, std::string_view>> entries; std::string_view at255, at127; };
+    const std::string cut255 = long_name.substr(0, 255), cut127 = long_name.substr(0, 127);
+    const std::vector<Case> cases = {
+        {{}, "", ""},
+        {{{NID_organizationName, "Example"}}, "", ""},
+        {{{NID_commonName, "example.com"}}, "example.com", "example.com"},
+        {{{NID_organizationName, "Example"}, {NID_commonName, "first.example"}, {NID_commonName, "second.example"}}, "first.example", "first.example"},
+        {{{NID_commonName, long_name}}, cut255, cut127},
+        {{{NID_commonName, with_nul}}, "a.example", "a.example"},
+        {{{NID_commonName, std::string_view("\0x", 2)}}, "", ""},
+        {{{NID_commonName, ""}}, "", ""},
+    };
+    for (const auto& c : cases) {
+        Name name(X509_NAME_new());
+        CHECK(name);
+        for (const auto& [nid, bytes] : c.entries) CHECK(add(name.get(), nid, bytes));
+        CHECK_EQ(std::string(tls::first_common_name(name.get(), 255)), std::string(c.at255));
+        CHECK_EQ(std::string(tls::first_common_name(name.get(), 127)), std::string(c.at127));
+#if OPENSSL_VERSION_NUMBER < 0x40000000L
+        char big[256] = {}, small[128] = {};
+        X509_NAME_get_text_by_NID(name.get(), NID_commonName, big, sizeof big);
+        X509_NAME_get_text_by_NID(name.get(), NID_commonName, small, sizeof small);
+        CHECK_EQ(std::string(tls::first_common_name(name.get(), 255)), std::string(big));
+        CHECK_EQ(std::string(tls::first_common_name(name.get(), 127)), std::string(small));
+#endif
+    }
+    // An ASN.1 string's bytes are all of them, a NUL included (the subjectAltName entries are read this way).
+    {
+        Name name(X509_NAME_new());
+        CHECK(add(name.get(), NID_commonName, with_nul));
+        const ASN1_STRING* data = X509_NAME_ENTRY_get_data(X509_NAME_get_entry(name.get(), 0));
+        CHECK(data && tls::asn1_length(data) == 19 && tls::asn1_text(data) == with_nul);
+        Name empty(X509_NAME_new());
+        CHECK(add(empty.get(), NID_commonName, ""));
+        const ASN1_STRING* none = X509_NAME_ENTRY_get_data(X509_NAME_get_entry(empty.get(), 0));
+        CHECK(none && tls::asn1_length(none) == 0 && tls::asn1_text(none).empty());
+    }
+    // The peer's name: an IP literal is expected among the certificate's addresses, anything else among
+    // its DNS names, and a second call leaves nothing of the first.
+    struct CtxFree { void operator()(SSL_CTX* c) const noexcept { SSL_CTX_free(c); } };
+    struct SslFree { void operator()(SSL* s) const noexcept { SSL_free(s); } };
+    std::unique_ptr<SSL_CTX, CtxFree> ctx(SSL_CTX_new(TLS_client_method()));
+    CHECK(ctx);
+    const auto expected = [](SSL* ssl) { // "host|ip" as the verification will use them
+        X509_VERIFY_PARAM* param = SSL_get0_param(ssl);
+        const char* host = X509_VERIFY_PARAM_get0_host(param, 0);
+        char* ip = X509_VERIFY_PARAM_get1_ip_asc(param);
+        std::string out = std::string(host ? host : "") + (X509_VERIFY_PARAM_get0_host(param, 1) ? "+more" : "") + "|" + (ip ? ip : "");
+        OPENSSL_free(ip);
+        return out;
+    };
+    for (const char* host : {"example.com", "origin.internal", "192.0.2.7", "2001:db8::1", "localhost", "xn--bcher-kva.example", "1.2.3", "256.1.1.1"}) {
+        std::unique_ptr<SSL, SslFree> ssl(SSL_new(ctx.get()));
+        CHECK(ssl && expected(ssl.get()) == "|");
+        CHECK(tls::expect_peer_name(ssl.get(), host));
+        const std::string got = expected(ssl.get());
+        const bool is_ip = std::string_view(host) == "192.0.2.7" || std::string_view(host) == "2001:db8::1";
+        if (is_ip) CHECK(got.starts_with("|") && got.size() > 1);
+        else CHECK_EQ(got, std::string(host) + "|");
+#if OPENSSL_VERSION_NUMBER < 0x40000000L
+        std::unique_ptr<SSL, SslFree> old(SSL_new(ctx.get()));
+        CHECK(old && SSL_set1_host(old.get(), host) == 1);
+        CHECK_EQ(got, expected(old.get()));
+#endif
+    }
+    {
+        std::unique_ptr<SSL, SslFree> ssl(SSL_new(ctx.get()));
+        CHECK(tls::expect_peer_name(ssl.get(), "192.0.2.7") && expected(ssl.get()) == "|192.0.2.7");
+        CHECK(tls::expect_peer_name(ssl.get(), "example.com") && expected(ssl.get()) == "example.com|");
+        CHECK(tls::expect_peer_name(ssl.get(), "other.example") && expected(ssl.get()) == "other.example|");
+        CHECK(tls::expect_peer_name(ssl.get(), "192.0.2.8") && expected(ssl.get()) == "|192.0.2.8");
+    }
+}
+
 static void test_acme() {
     using namespace std::chrono;
     // base64url, RFC 4648 section 5 test vectors and no padding.
@@ -16388,6 +16476,7 @@ int main() {
     test_log_placement();
     test_install();
 #ifdef AGENSIO_HAS_TLS
+    test_openssl_compat();
     test_acme();
 #endif
     if (failures) {

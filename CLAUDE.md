@@ -162,6 +162,8 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   name/value views), `request.hpp`, `response.hpp` (status, prebuilt header block, extra
   fields, `Body`), `body.hpp` (`MemoryBody`, `FileBody`, `StreamBody` for later phases),
   `stream.hpp` (one request/response exchange), `worker_state.hpp`, `strings.hpp`,
+  `openssl_compat.hpp` (the three OpenSSL calls whose spelling differs between 3.0 and 4.1, each
+  behind one function held to the old call by the unit tests; nothing of it runs per request),
   `router.hpp/.cpp` (`Router`: site by Host, then `Router::location`: exact before
   prefix, longest prefix first, implicit `/` last; an exact `.php` location also takes its
   script's path-info form, `LocationConfig::script_exact`, alpha.109; `try_files` fallbacks

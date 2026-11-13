@@ -7,6 +7,7 @@
 #endif
 
 #include "core/cpus.hpp"
+#include "core/openssl_compat.hpp"
 #include "control/commands.hpp"
 #include "control/php.hpp"
 #include "control/peer.hpp"
@@ -434,17 +435,15 @@ static CertNames certificate_names(SSL_CTX* ctx) {
     CertNames names;
     X509* x = SSL_CTX_get0_certificate(ctx);
     if (!x) return names;
-    char cn[256] = {};
-    if (X509_NAME_get_text_by_NID(X509_get_subject_name(x), NID_commonName, cn, sizeof cn) > 0) names.add(cn);
+    if (const auto cn = tls::first_common_name(X509_get_subject_name(x), 255); !cn.empty()) names.add(cn);
     if (auto* sans = static_cast<GENERAL_NAMES*>(X509_get_ext_d2i(x, NID_subject_alt_name, nullptr, nullptr))) {
         for (int i = 0; i < sk_GENERAL_NAME_num(sans); ++i) {
             const GENERAL_NAME* g = sk_GENERAL_NAME_value(sans, i);
             if (g->type == GEN_DNS) {
-                names.add(std::string_view(reinterpret_cast<const char*>(ASN1_STRING_get0_data(g->d.dNSName)),
-                                           static_cast<std::size_t>(ASN1_STRING_length(g->d.dNSName))));
+                names.add(tls::asn1_text(g->d.dNSName));
             } else if (g->type == GEN_IPADD) {
                 const unsigned char* b = ASN1_STRING_get0_data(g->d.iPAddress);
-                const int len = ASN1_STRING_length(g->d.iPAddress);
+                const std::size_t len = tls::asn1_length(g->d.iPAddress);
                 if (len == 4) names.add(asio::ip::address_v4(std::array<unsigned char, 4>{b[0], b[1], b[2], b[3]}).to_string());
                 else if (len == 16) {
                     std::array<unsigned char, 16> v6{};

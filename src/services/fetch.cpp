@@ -12,6 +12,7 @@
 #include <asio/ssl.hpp>
 #endif
 
+#include "core/openssl_compat.hpp"
 #include "http1/chunked.hpp"
 
 namespace agensio::fetch {
@@ -183,7 +184,7 @@ bool hop(const std::string& url, const Options& options, const Chunk& chunk, Res
         ::setsockopt(stream.lowest_layer().native_handle(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
         ::setsockopt(stream.lowest_layer().native_handle(), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout);
         SSL_set_tlsext_host_name(stream.native_handle(), host.c_str());
-        SSL_set1_host(stream.native_handle(), host.c_str());
+        (void)tls::expect_peer_name(stream.native_handle(), host.c_str());
         asio::error_code ec;
         stream.handshake(asio::ssl::stream_base::client, ec);
         if (ec) {
