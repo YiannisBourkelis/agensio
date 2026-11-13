@@ -33,6 +33,11 @@ public:
     // Fills s.response with a canned error page (502, 503 with Retry-After, 504, 404).
     static void error(Stream& s, int status, std::string_view retry_after = {});
 
+    // What the error log says after "REASON for SCRIPT" when the pool's queue or the head limit
+    // refused a request: the keys that decided it, with their values, named as the administrator
+    // sets them (php.* on the site, fastcgi.* where the location has a table of its own).
+    static std::string limit_line(UpstreamFailure f, const UpstreamConfig& fastcgi);
+
     // The constant FCGI_PARAMS pairs of a location, encoded once at configuration load.
     static std::string prebuild_params(const SiteConfig& site, const LocationConfig& loc);
 

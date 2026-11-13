@@ -208,6 +208,18 @@ std::shared_ptr<FcgiRequest> FcgiHandler::start(Stream& s, const SiteConfig& sit
     return x->completed ? nullptr : x->req;
 }
 
+std::string FcgiHandler::limit_line(UpstreamFailure f, const UpstreamConfig& fastcgi) {
+    // Until 0.1.0-alpha.144: "1 in flight and 1 queued per worker; raise max_connections/queue_depth
+    // or pm.max_children", "waited queue_wait in the pool queue", "response head exceeds head_max":
+    // bare keys, where CGI's and a proxy's lines named theirs since alpha.143 (the alpha.143 report, N2).
+    std::string text = limit_text(f, fastcgi.options, fastcgi.own_table ? "fastcgi" : "php", "connections to php-fpm");
+    if (f == UpstreamFailure::pool_saturated)
+        text += "; more connections than php-fpm has children only move the wait there (the site's php.children, or pm.max_children in a "
+                "pool of your own)";
+    else if (f == UpstreamFailure::queue_timeout) text += "; php-fpm answers too slowly for the load";
+    return text;
+}
+
 void FcgiHandler::log_failure(const Exchange& x, const FcgiResult& res) {
     const FcgiAddress& a = x.loc->fastcgi.address;
     std::string msg = "fastcgi " + a.key + " " + to_string(res.failure) + " for " + x.script;
@@ -248,18 +260,12 @@ void FcgiHandler::log_failure(const Exchange& x, const FcgiResult& res) {
                        " bytes (child died mid-response)";
             break;
         case FcgiFailure::pool_saturated:
-            msg += ": " + std::to_string(x.loc->fastcgi.options.max_connections) + " in flight and " +
-                   std::to_string(x.loc->fastcgi.options.queue_depth) +
-                   " queued per worker; raise max_connections/queue_depth or pm.max_children";
-            break;
         case FcgiFailure::queue_timeout:
-            msg += ": waited queue_wait in the pool queue; php-fpm is too slow for the load";
+        case FcgiFailure::head_too_large:
+            msg += limit_line(res.failure, x.loc->fastcgi);
             break;
         case FcgiFailure::read_timeout:
             msg += ": no data for read_timeout; raise fastcgi.read_timeout or fix the slow script";
-            break;
-        case FcgiFailure::head_too_large:
-            msg += ": response head exceeds head_max (" + std::to_string(x.loc->fastcgi.options.head_max) + " bytes)";
             break;
         default:
             break;

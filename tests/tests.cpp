@@ -77,6 +77,7 @@
 #include "core/cpus.hpp"
 #include "core/router.hpp"
 #include "handlers/fastcgi.hpp"
+#include "server.hpp"
 #include "handlers/httparena.hpp"
 #include "handlers/static.hpp"
 #include "handlers/upstream_common.hpp"
@@ -5630,6 +5631,38 @@ static void test_proxy() {
                  UF::send_timeout, UF::read_timeout, UF::closed_early, UF::bad_response_head, UF::protocol_error, UF::tls_error})
         CHECK(counts_against_origin(f));
     for (UF f : {UF::pool_saturated, UF::queue_timeout, UF::spill_error, UF::head_too_large}) CHECK(!counts_against_origin(f));
+    // A FastCGI refusal names the key that decided it, as CGI's and a proxy's do since 0.1.0-alpha.143:
+    // php.* where the limits are the site's, fastcgi.* where the location has a table of its own.
+    // Until 0.1.0-alpha.144 the lines named bare keys or none (the alpha.143 report, N2).
+    {
+        const LocationConfig& site_php = Router::location(rsite, "/php/x");      // the site's php table
+        const LocationConfig& own_fcgi = Router::location(rsite, "/php-own/x");  // fastcgi = { queue_wait = 1.5 }
+        CHECK(!site_php.fastcgi.own_table && own_fcgi.fastcgi.own_table);
+        CHECK(FcgiHandler::limit_line(UF::pool_saturated, site_php.fastcgi) ==
+              ": the queue was full (php.queue_depth = 64) behind the connections to php-fpm busy on this worker (php.max_connections = 16)"
+              "; more connections than php-fpm has children only move the wait there (the site's php.children, or pm.max_children in a pool of your own)");
+        CHECK(FcgiHandler::limit_line(UF::queue_timeout, site_php.fastcgi) ==
+              ": waited php.queue_wait (5 s) behind the connections to php-fpm busy on this worker (php.max_connections = 16)"
+              "; php-fpm answers too slowly for the load");
+        CHECK(FcgiHandler::limit_line(UF::head_too_large, site_php.fastcgi) == ": the head is larger than php.head_max (65536 bytes)");
+        CHECK(FcgiHandler::limit_line(UF::queue_timeout, own_fcgi.fastcgi).starts_with(": waited fastcgi.queue_wait (1500 ms) behind the connections to php-fpm"));
+        CHECK(FcgiHandler::limit_line(UF::head_too_large, own_fcgi.fastcgi) == ": the head is larger than fastcgi.head_max (65536 bytes)");
+        CHECK(FcgiHandler::limit_line(UF::read_timeout, site_php.fastcgi).empty());
+    }
+    // The h3 startup line names each buffer the kernel capped, with its sysctl: the send buffer too
+    // since 0.1.0-alpha.144 (the alpha.143 report, N6: status's h3_datagrams_dropped points at
+    // net.core.wmem_max, and the line named the receive buffer alone). Linux reports twice the size.
+    {
+        const int asked = 4 << 20, capped = 2 * 212992;
+        CHECK(quic_buffers_note(2 * asked, 2 * asked, asked).empty());
+        CHECK(quic_buffers_note(capped, 2 * asked, asked) == ", receive buffer 208 KB (raise net.core.rmem_max for bursts of handshakes; 4 MB asked)");
+        CHECK(quic_buffers_note(2 * asked, capped, asked) ==
+              ", send buffer 208 KB (raise net.core.wmem_max for bursts of answers, status h3_datagrams_dropped; 4 MB asked)");
+        CHECK(quic_buffers_note(capped, capped, asked) ==
+              ", receive buffer 208 KB (raise net.core.rmem_max for bursts of handshakes; 4 MB asked)"
+              ", send buffer 208 KB (raise net.core.wmem_max for bursts of answers, status h3_datagrams_dropped; 4 MB asked)");
+        CHECK(quic_buffers_note(0, 0, asked).empty());
+    }
     // The proxy preset (D6): a site with `upstream` and no root; other locations coexist.
     write("preset.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\napp = \"proxy\"\nupstream = \"http://127.0.0.1:3000\"\nproxy = { read_timeout = 120 }\n"
                          "[[site.location]]\npath = \"/assets/\"\nalias = \"" + dir.string() + "/www\"\n");

@@ -747,6 +747,7 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         if (auto ft = t["fastcgi"].as_table()) {
             check_keys(*ft, {"php = {}"}, {}, where + ".fastcgi");
             parse_fcgi_table(*ft, base_dir, loc.fastcgi, where + ".fastcgi");
+            loc.fastcgi.own_table = true;
         }
         else if (t.contains("fastcgi")) fail(where + ": 'fastcgi' must be a table");
         if (!loc.fastcgi.configured)

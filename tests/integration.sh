@@ -3617,7 +3617,7 @@ if [ -n "$FPM_PID" ]; then
   wait $QPID
   check "php: pool of 1 with no queue: second request gets 503 at once" "200 503" "$(cat bench/tmp/q1.txt) $(awk '/^HTTP/{print $2}' bench/tmp/q2.txt)"
   check "php: 503 carries Retry-After" "yes" "$(grep -q '^Retry-After: ' bench/tmp/q2.txt && echo yes)"
-  check "php: pool_saturated reason logged" "yes" "$(grep -q 'pool_saturated' bench/tmp/error.log && echo yes)"
+  check "php: pool_saturated reason logged, naming php.queue_depth and php.max_connections (the alpha.143 report, N2: bare keys before)" "yes" "$(grep -q 'pool_saturated for .*slow.php: the queue was full (php.queue_depth = 0) behind the connections to php-fpm busy on this worker (php.max_connections = 1)' bench/tmp/error.log && echo yes)"
   curl -sS -o /dev/null http://127.0.0.1:8080/php/; sleep 1.2
   check "access log: upstream field for php" "yes" "$(grep -q '"target":"/php/".*"upstream":"ok"}$' bench/tmp/access.log && echo yes)"
   kill $FPM_PID; wait $FPM_PID 2>/dev/null; FPM_PID=""; sleep 0.3

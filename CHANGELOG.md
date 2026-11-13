@@ -43,6 +43,34 @@
   none. What happens on the wire is unchanged. 0.1.0-alpha.143's notes said every protocol wrote
   such a line; `docs/configuration.md` 8 now describes this case. Found by the test VPS's report
   on 0.1.0-alpha.143 (O3).
+- **Fix: HTTP/2's line for a cancelled stream says how long and why.** 0.1.0-alpha.143 said each
+  protocol writes `no progress for N s, the client took nothing of the answer` when it ends an
+  answer the client does not take. HTTP/1.1 and HTTP/3 did; HTTP/2 wrote `no progress, cancelled`,
+  for that case and for two others. It now writes, at level info, `http2 CLIENT stream N (SITE GET
+  /path): no progress for 15 s, the client took nothing of the answer (idle_timeout); cancelled`,
+  and for the other two `the request body did not come (body_timeout)` and `the server did not
+  answer (four times idle_timeout)`. What is cancelled and when is unchanged. Found by the test
+  VPS's report on 0.1.0-alpha.143 (N1).
+- **Fix: the error-log line of a PHP refusal names the key that decided it.** 0.1.0-alpha.143 did
+  this for CGI and proxy; PHP's three lines still read `1 in flight and 1 queued per worker; raise
+  max_connections/queue_depth or pm.max_children`, `waited queue_wait in the pool queue` and
+  `response head exceeds head_max (1024 bytes)`. They now read `pool_saturated for /srv/app/x.php:
+  the queue was full (php.queue_depth = 1) behind the connections to php-fpm busy on this worker
+  (php.max_connections = 1); more connections than php-fpm has children only move the wait there
+  (the site's php.children, or pm.max_children in a pool of your own)`, `queue_timeout ...: waited
+  php.queue_wait (5 s) behind ...; php-fpm answers too slowly for the load` and `head_too_large
+  ...: the head is larger than php.head_max (1024 bytes)`. A location with a `fastcgi = {}` table
+  of its own names `fastcgi.` keys, since that table is where they are set. Found by the test
+  VPS's report on 0.1.0-alpha.143 (N2).
+- **The HTTP/3 startup line names the send buffer too.** When the kernel grants a QUIC socket less
+  than the 4 MB asked, the line `h3 (QUIC) on udp ...` said so for the receive buffer alone
+  (`raise net.core.rmem_max`). The send buffer is capped the same way on an untuned host, and it
+  is the one status's `h3_datagrams_dropped` points at. The line now adds `send buffer 208 KB
+  (raise net.core.wmem_max for bursts of answers, status h3_datagrams_dropped; 4 MB asked)`.
+  Found by the test VPS's report on 0.1.0-alpha.143 (N6); `docs/configuration.md` 17.
+- **The reference's `idle_timeout` row describes the bound on an answer the client does not
+  take** (`config_reference`, `docs/keys.md`): HTTP/1.1 closes the connection, HTTP/2 and HTTP/3
+  cancel the stream. The row described idle connections only (the alpha.143 report, N5).
 
 ## 0.1.0-alpha.143 (2026-11-10)
 

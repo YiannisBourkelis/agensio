@@ -450,4 +450,9 @@ private:
     std::chrono::system_clock::time_point started_ = std::chrono::system_clock::now();
 };
 
+// What the h3 startup line says about its sockets' buffers when the kernel granted less than was
+// asked (`asked` bytes each way; `rcvbuf` and `sndbuf` as Linux reports them, twice the usable size;
+// 0: not known). Empty when neither was capped.
+std::string quic_buffers_note(int rcvbuf, int sndbuf, int asked);
+
 }  // namespace agensio

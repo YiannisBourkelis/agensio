@@ -368,6 +368,8 @@ public:
             int got = 0;
             socklen_t len = sizeof got;
             if (::getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &got, &len) == 0) rcvbuf_ = got;
+            len = sizeof got;
+            if (::getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &got, &len) == 0) sndbuf_ = got;
         }
         // Don't-fragment on both families (a [::] socket carries IPv4 peers as mapped
         // addresses): a datagram larger than the path's MTU fails at send or is dropped
@@ -452,6 +454,7 @@ public:
     // The receive buffer the kernel granted, as it reports it (Linux counts the doubled
     // value); below kSocketBufferAsked when net.core.rmem_max capped the request.
     int receive_buffer() const noexcept { return rcvbuf_; }
+    int send_buffer() const noexcept { return sndbuf_; }  // the same for net.core.wmem_max
     static constexpr int kSocketBufferAsked = 4 * 1024 * 1024;
     std::size_t connections() const noexcept { return conns_; }
 
@@ -748,6 +751,7 @@ private:
     asio::ip::udp::endpoint local_;
     bool gro_ = true;
     int rcvbuf_ = 0;
+    int sndbuf_ = 0;
     bool steering_ = false;
     std::size_t slots_ = 0, slot_ = 0;
     std::vector<unsigned char> rbuf_;

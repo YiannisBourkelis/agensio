@@ -100,6 +100,9 @@ On 0.1.0-alpha.142 each of these fails.
   cancelled with H3_REQUEST_CANCELLED within idle_timeout plus the 2 s check, an info line, the slot back.
 - h1-stalled-reader: an HTTP/1.1 client that stops reading: closed at the idle timeout, with an info
   line saying the client took nothing.
+- h2-stalled-reader: an HTTP/2 client that grants its stream no more credit: RST_STREAM CANCEL within
+  idle_timeout plus a check, with the same info line as the other two. Until 0.1.0-alpha.144 HTTP/2's
+  line said only "no progress, cancelled" (the alpha.143 report, N1).
 
 An HTTP/3 connection that ends idle with an answer unfinished (the alpha.143 report, O3): a download
 alone on its connection whose client grants no more credit and sends nothing more. Nothing moves
@@ -983,6 +986,45 @@ def row_h1_stalled_reader(srv):
     return None if status.startswith("HTTP/1.1 200") else f"the next request through the slot: {status}"
 
 
+def row_h2_stalled_reader(srv):
+    """An HTTP/2 client that takes the first 64 KB of an event stream and sends no WINDOW_UPDATE for
+    the stream: the server cancels it (RST_STREAM CANCEL) once nothing moved for the idle timeout
+    (3 s here), as before, and the info line says how long and why, in the words HTTP/1.1's and
+    HTTP/3's use. Until 0.1.0-alpha.144 it read "no progress, cancelled" (the alpha.143 report, N1)."""
+    c = H2(srv.ports["slots"])
+    reset, got, start = None, 0, time.monotonic()
+    try:
+        sid = c.conn.get_next_available_stream_id()
+        c.conn.send_headers(sid, [(":method", "GET"), (":scheme", "http"), (":authority", "localhost"), (":path", "/flood/30")], end_stream=True)
+        c.flush()
+        while reset is None and time.monotonic() < start + 12:
+            r, _, _ = select.select([c.sock], [], [], 0.5)
+            if not r:
+                continue
+            data = c.sock.recv(65536)
+            if not data:
+                break
+            for ev in c.conn.receive_data(data):
+                if isinstance(ev, h2.events.DataReceived) and ev.stream_id == sid:
+                    got += len(ev.data)  # never acknowledged: the stream's window stays used up
+                elif isinstance(ev, h2.events.StreamReset) and ev.stream_id == sid:
+                    reset = ev.error_code
+            c.flush()
+        took = time.monotonic() - start
+    finally:
+        c.sock.close()
+    if reset != 8:
+        return f"after {took:.1f} s and {got} bytes: reset {reset}, not cancelled though the client granted no credit"
+    print(f"  cancelled after {took:.1f} s, {got} bytes taken")
+    line = logged(srv, ["http2", "/flood/30", "no progress for", "the client took nothing of the answer (idle_timeout); cancelled"])
+    if line is None:
+        return "cancelled, but the info line is not the one the other protocols write: " + str(logged(srv, ["http2", "/flood/30"], seconds=0))
+    print("  " + line)
+    time.sleep(0.5)
+    status = quick(srv.ports["slots"])
+    return None if status.startswith("HTTP/1.1 200") else f"the next request through the slot: {status}"
+
+
 def row_h3_stalled_reader(srv):
     """A client that acknowledges what arrives (so the server's keep-alive PINGs keep the connection)
     but grants no more credit, on an event stream through the one-slot origin: the answer is cancelled
@@ -1170,6 +1212,7 @@ ROWS = {
     "h3-stalled-reader": row_h3_stalled_reader,
     "slow-reader-whole": row_slow_reader_whole,
     "h1-stalled-reader": row_h1_stalled_reader,
+    "h2-stalled-reader": row_h2_stalled_reader,
     "h3-idle-unfinished": row_h3_idle_unfinished,
 }
 

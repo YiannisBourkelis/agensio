@@ -899,10 +899,24 @@ static asio::ip::address quic_peer_address(const sockaddr_storage& from) {
 // The endpoints of one h3 listener: one per worker with reuse_port (the group's members in
 // worker order, steered by connection id), else one on worker 0. `start` posts their
 // reads at once (a listener a reload added); at startup start_h3 does it for all.
+// Linux reports twice the granted size; a cap below what was asked means the sysctl.
+std::string quic_buffers_note(int rcvbuf, int sndbuf, int asked) {
+    std::string note;
+    if (rcvbuf > 0 && rcvbuf < asked)
+        note += ", receive buffer " + std::to_string(rcvbuf / 2048) + " KB (raise net.core.rmem_max for bursts of handshakes; " +
+                std::to_string(asked >> 20) + " MB asked)";
+    // The send buffer too (0.1.0-alpha.144; the alpha.143 report, N6): a datagram it has no room for is
+    // dropped and sent again, which status counts (h3_datagrams_dropped) and this line did not name.
+    if (sndbuf > 0 && sndbuf < asked)
+        note += ", send buffer " + std::to_string(sndbuf / 2048) + " KB (raise net.core.wmem_max for bursts of answers, status "
+                "h3_datagrams_dropped; " + std::to_string(asked >> 20) + " MB asked)";
+    return note;
+}
+
 bool Server::open_h3_listener(const Listener& l, const Config& cfg, bool start, std::string& error, int* code) {
     const std::size_t count = reuse_port_ ? workers_.size() : 1;
     bool steering = true, gro = true;
-    [[maybe_unused]] int rcvbuf = 0;  // the smallest receive buffer the kernel granted (the note is Linux-only)
+    [[maybe_unused]] int rcvbuf = 0, sndbuf = 0;  // the smallest buffers the kernel granted (the note is Linux-only)
     using Endpoint = quic::Endpoint<h3::Http3Connection>;
     std::vector<std::unique_ptr<Endpoint>> opened;  // kept only once every worker's socket is bound
     for (std::size_t i = 0; i < count; ++i) {
@@ -931,6 +945,7 @@ bool Server::open_h3_listener(const Listener& l, const Config& cfg, bool start, 
         steering = steering && (!reuse_port_ || ep->steering());
         gro = gro && ep->gro();
         if (rcvbuf == 0 || ep->receive_buffer() < rcvbuf) rcvbuf = ep->receive_buffer();
+        if (sndbuf == 0 || ep->send_buffer() < sndbuf) sndbuf = ep->send_buffer();
         ep->retry = retry_mode(cfg);
         ep->dropped_total = &w.h3_dropped;
         // The ceiling counts TCP and QUIC together (hardening item 5): a new QUIC connection over it
@@ -958,10 +973,7 @@ bool Server::open_h3_listener(const Listener& l, const Config& cfg, bool start, 
     }
     if (!gro) note += ", without GRO";
 #ifdef __linux__
-    // Linux reports twice the granted size; a cap below what was asked means the sysctl.
-    if (rcvbuf > 0 && rcvbuf < quic::Endpoint<h3::Http3Connection>::kSocketBufferAsked)
-        note += ", receive buffer " + std::to_string(rcvbuf / 2048) +
-                " KB (raise net.core.rmem_max for bursts of handshakes; 4 MB asked)";
+    note += quic_buffers_note(rcvbuf, sndbuf, quic::Endpoint<h3::Http3Connection>::kSocketBufferAsked);
 #endif
     error_log_.info("h3 (QUIC) on udp " + l.address + note);
     if (!start) std::cout << "  h3 on udp " << l.address << note << "\n";

@@ -3790,8 +3790,10 @@ waiting for a restart (the alpha.112 report).
 
 The sockets ask the kernel for 4 MB receive and send buffers. Linux grants at most
 `net.core.rmem_max` and `net.core.wmem_max`, 208 KB on an untuned host, and the startup
-line (and the error log) then says so: `receive buffer 208 KB (raise net.core.rmem_max
-for bursts of handshakes; 4 MB asked)`. A burst of handshakes larger than the buffer
+line (and the error log) then says so, for each buffer that was capped: `receive buffer 208 KB
+(raise net.core.rmem_max for bursts of handshakes; 4 MB asked), send buffer 208 KB (raise
+net.core.wmem_max for bursts of answers, status h3_datagrams_dropped; 4 MB asked)` (the send
+buffer since 0.1.0-alpha.144). A burst of handshakes larger than the receive buffer
 loses Initials, which the clients retry after their probe timeout, one to three seconds
 later (256 connections opening at once do that on loopback), so a server that expects
 hundreds of connections to open together raises both limits as root and persists them:

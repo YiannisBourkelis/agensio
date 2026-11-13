@@ -1334,6 +1334,7 @@ private:
                 }
                 const auto age = now - s.since;
                 bool cut = false;
+                const char* why = "";  // for the info line: what made no progress
                 if (s.state == StreamState::half_closed_local && age >= idle_timeout_) {  // the body never finished
                     send_rst(s.id, ErrorCode::no_error, "response complete, request body never finished", &s);
                     close_stream(s);
@@ -1343,18 +1344,25 @@ private:
                 if (s.pending_handler && age >= body_timeout_) {  // a body that does not arrive
                     cut = true;
                     s.unsent_status = 408;
+                    why = "the request body did not come (body_timeout)";
                 }
                 // A response the client does not take. One waiting for its application's next bytes
                 // (a pull in flight) is the application's to bound, by its read_timeout, as HTTP/1
                 // does: the client's idle clock does not cut it.
-                else if (s.responded && !s.finished && !s.pulling && age >= idle_timeout_) cut = true;
-                else if (!s.responded && !s.ready && !s.upstream && !s.has_body && age >= idle_timeout_ * 4) {  // stuck
+                else if (s.responded && !s.finished && !s.pulling && age >= idle_timeout_) {
+                    cut = true;
+                    why = "the client took nothing of the answer (idle_timeout)";
+                } else if (!s.responded && !s.ready && !s.upstream && !s.has_body && age >= idle_timeout_ * 4) {  // stuck
                     cut = true;
                     s.unsent_status = 503;  // the server gave up on its own work, not the client
+                    why = "the server did not answer (four times idle_timeout)";
                 }
                 if (cut) {
+                    // How long and why, in the words HTTP/1.1's and HTTP/3's lines use: until
+                    // 0.1.0-alpha.144 "no progress, cancelled" for all three (the alpha.143 report, N1).
                     if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
-                        log->info("http2 " + remote_for(&s) + " " + stream_text(s) + ": no progress, cancelled");
+                        log->info("http2 " + remote_for(&s) + " " + stream_text(s) + ": no progress for " +
+                                  std::to_string(std::chrono::duration_cast<std::chrono::seconds>(age).count()) + " s, " + why + "; cancelled");
                     send_rst(s.id, ErrorCode::cancel, "");
                     count_reset();
                     close_stream(s);
