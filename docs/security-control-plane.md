@@ -202,6 +202,64 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-11-13, the release check of 0.1.0-alpha.144, before the tag, on 754d2a5b and the fix it led to (the
+alpha.143 report: `Retry-After` on a queue's 503, an oversized head and a lone origin out of passive
+health, the info line for an HTTP/3 connection that ends idle with an answer unfinished, four log and
+reference texts). The check found one fault, in the last of those commits: the unit tests of the build
+without OpenSSL did not link, `quic_buffers_note()` being defined inside the QUIC-only block of
+`server.cpp` while the test calls it in every build (the server binaries were not affected); moved out of
+the block, nothing else changed. On 754d2a5b, the release build: unit, integration (859, isolation, the
+cookbook, `h3-attacks.py` and `h2-streamed-bodies.py` inside it), reload (29), control (28), pools (26),
+auth (51, in `agensio-devbox:php` with its network) and Pebble (21) pass; the builds without libxcrypt,
+without libbrotli and without libzstd link and pass their unit tests; the sanitizer build (`build-asan`,
+GCC 14): unit, the integration suite (859) and Pebble (21) clean, no sanitizer report in the 617 files
+the runs wrote under `bench/tmp` nor in their logs. After the fix: the release build and the five others
+(without OpenSSL, libxcrypt, libbrotli, libzstd; the sanitizer build) rebuilt, their unit tests pass, the
+release build's integration suite again (859), and `h2-streamed-bodies.py` and `h3-attacks.py` under the
+sanitizer build, all rows, no report. `scripts/fuzz-all.sh -t 300` on the fixed code, every target
+(twenty-six, twenty-three at once, one process each, five minutes): 679.0 M runs, no finding. The A/B
+against alpha.143 in the devbox (`--network none`), on a machine that was not quiet (load average 4 to 9
+at the start of the runs: the editor's indexer on a full core, a VM, other containers): `bench/ab.sh
+v0.1.0-alpha.143 -3 -r 4` (`ab-20261113-031901.md`) 0.938 to 1.065, the h3 rows 0.938 to 1.006, `http
+/big.bin` at 1.065 from its first two rounds; `-2 -P -r 3` (`ab-20261113-032613.md`) 0.946 to 1.048, the
+h2 rows 0.946 to 1.035, the proxy rows 0.987 to 1.047, `https /`, `https /style.css` and `http /big.bin`
+at 1.046 to 1.048 where the first run had the two https rows at 0.973 and 0.977. `perf stat` on the four
+rows above 1.03, the two binaries alternated three times each (`perfstat-release-20261113-034000.md`):
+the same instructions a request on both sides for `http /big.bin` (3.35 to 3.40 M), `https /` (29.0 to
+29.1 k) and `https /style.css` (198.6 to 199.8 k); `proxy /json` 47.1 to 47.3 k against 47.2 to 47.6 k
+(0.3 to 1.0 % in each pair, the ranges overlapping) with about 50 more L1i misses, and no code a proxied
+request runs changed between the tags (the diff is in `UpstreamRequest::fail()` alone): layout, not work.
+Cycles a request were higher on either side by turns on every row.
+
+| target | runs | edges | result |
+|---|---|---|---|
+| fuzz_archive | 11.07 M | 645 | clean |
+| fuzz_auth_users | 21.93 M | 499 | clean |
+| fuzz_chunked | 125.10 M | 63 | clean |
+| fuzz_compressed_body | 0.78 M | 606 | clean |
+| fuzz_cron_lines | 10.95 M | 120 | clean |
+| fuzz_dotenv | 1.19 M | 2363 | clean |
+| fuzz_fcgi | 58.28 M | 96 | clean |
+| fuzz_fields | 4.67 M | 580 | clean |
+| fuzz_h2_bodies | 0.03 M | 9335 | clean |
+| fuzz_h2_conn | 0.64 M | 12151 | clean |
+| fuzz_hpack | 2.31 M | 529 | clean |
+| fuzz_hpack_roundtrip | 0.38 M | 466 | clean |
+| fuzz_http_head | 53.34 M | 152 | clean |
+| fuzz_json | 6.59 M | 554 | clean |
+| fuzz_log_line | 4.60 M | 774 | clean |
+| fuzz_parser | 41.82 M | 239 | clean |
+| fuzz_path | 7.98 M | 236 | clean |
+| fuzz_php_constraint | 11.99 M | 728 | clean |
+| fuzz_qpack | 7.32 M | 646 | clean |
+| fuzz_quic_conn | 0.41 M | 1832 | clean |
+| fuzz_quic_packet | 25.51 M | 217 | clean |
+| fuzz_redirect | 4.82 M | 1238 | clean |
+| fuzz_refuse | 3.10 M | 874 | clean |
+| fuzz_response_headers | 0.96 M | 3415 | clean |
+| fuzz_sql_scan | 5.61 M | 158 | clean |
+| fuzz_transport_params | 267.61 M | 211 | clean |
+
 2026-11-10, the release check of 0.1.0-alpha.143, before the tag, on 6e8bdb54 (HTTP/3's GSO burst limit,
 the alpha.142 report's F1 to F4, the dropped-datagram count in status, no resend of what the client has,
 a slow client no longer cut as its application's `read_timeout`, the file windows capped per connection).
