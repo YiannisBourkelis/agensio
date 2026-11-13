@@ -37,6 +37,29 @@
   `docs/design-http2.md` 6.4 and its threat table said this class was closed; they now say what
   holds.
 
+- **Fix: an IP address is never sent as SNI.** RFC 6066 section 3 permits host names only in the
+  name a TLS client asks for (the `server_name` extension), not literal IPv4 or IPv6 addresses.
+  agensio's TLS clients sent whatever they were given: `proxy.tls.server_name` written as an
+  address (`"127.0.0.1"`, `"::1"`, `"0:0:0:0:0:0:0:1"`), with verification on or off, and the
+  address of a CA or of a download reached by address (the test VPS's report on 0.1.0-alpha.145,
+  O1; the same in 0.1.0-alpha.144 and before). Without `server_name` no SNI was sent, as the
+  code's own comment said it should be. Now one function (`tls::send_server_name`,
+  `core/openssl_compat.hpp`) sends a host name and nothing for an address, told apart by the
+  same reading the certificate check uses, in all four clients: to an origin, to an ACME CA, for
+  a download, and health's request to agensio's own listener. What the certificate is checked
+  for does not change: an address is still looked for among the certificate's addresses.
+  An origin that chose its certificate by an address in SNI now gets none and answers with its
+  default certificate, as it does for a client that follows the RFC.
+  Tests: the unit test holds "sent as a name" to "checked as a name" for twelve spellings; the
+  test origin of the integration suite reports the SNI it received (`X-Seen-SNI`), and a row
+  asks for a host name, an IPv4 and an IPv6 address written as `server_name`, and none. The
+  reference row and `docs/configuration.md` 12 say it.
+  Checked: the integration suite (864), the install suite (27, an HTTPS download from an
+  address) and the certificate suite against Pebble (21, a CA reached by address); the static
+  and TLS rows of `bench/ab.sh` against the commit before, three rounds, 0.971 to 1.033
+  (`bench/results/ab-20261113-205515.md`): the name is set once per TLS connection agensio
+  opens, never per request.
+
 - **Docs: the roadmap held to the code, and a draft of version 1's scope.**
   - `docs/ROADMAP.md`: every checkbox read against the code of 0.1.0-alpha.145. Phases A to D are
     complete; six items that were built and still open are closed (parser hardening with the

@@ -32,6 +32,14 @@ std::string_view first_common_name(const X509_NAME* name, std::size_t limit) noe
 // its DNS names (what SSL_set1_host() did). Call before the handshake.
 bool expect_peer_name(SSL* ssl, const char* host) noexcept;
 
+// The name a client handshake asks for (the server_name extension, SNI): `host` when it is a
+// host name, and nothing when it is an IP literal, which RFC 6066 3 does not permit there. An
+// address is still what the certificate is checked for (expect_peer_name); what tells the two
+// apart is that function's own test. False only when a name could not be set. Until
+// 0.1.0-alpha.146 every client of agensio's (to an origin, a CA, a download, its own listener)
+// sent an address as it was given. Call before the handshake.
+bool send_server_name(SSL* ssl, const char* host) noexcept;
+
 } // namespace agensio::tls
 
 #endif // AGENSIO_HAS_TLS

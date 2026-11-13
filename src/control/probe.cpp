@@ -19,6 +19,8 @@
 #ifdef AGENSIO_HAS_TLS
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+
+#include "core/openssl_compat.hpp"
 #endif
 
 namespace agensio::control {
@@ -94,7 +96,7 @@ std::string fetch_head(const CanonicalProbe& p, int timeout_ms) {
     // Our own listener: nothing to verify, the name only chooses the site's certificate (SNI).
     SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
     SSL* ssl = ctx ? SSL_new(ctx) : nullptr;
-    if (ssl && SSL_set_tlsext_host_name(ssl, p.canonical.c_str()) == 1 && SSL_set_fd(ssl, fd) == 1 && SSL_connect(ssl) == 1 &&
+    if (ssl && tls::send_server_name(ssl, p.canonical.c_str()) && SSL_set_fd(ssl, fd) == 1 && SSL_connect(ssl) == 1 &&
         SSL_write(ssl, request.data(), static_cast<int>(request.size())) == static_cast<int>(request.size()))
         while (!done()) {
             const int n = SSL_read(ssl, buf, sizeof buf);

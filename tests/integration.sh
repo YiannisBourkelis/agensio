@@ -385,6 +385,16 @@ path = "/tlshost/"
 upstream = "https://127.0.0.1:9131/"
 proxy = {{ host = "upstream", tls = {{ verify = false }} }}
 
+[[site.location]]                       # a server_name written as an address is never sent as SNI (RFC 6066 3)
+path = "/tlsip/"
+upstream = "https://127.0.0.1:9131/"
+proxy = {{ tls = {{ verify = false, server_name = "127.0.0.1" }} }}
+
+[[site.location]]
+path = "/tlsip6/"
+upstream = "https://127.0.0.1:9131/"
+proxy = {{ tls = {{ verify = false, server_name = "0:0:0:0:0:0:0:1" }} }}
+
 [[site.location]]                       # D5: CGI scripts, a process per request
 path = "/cgi-bin/"
 alias = "{root}/tests/cgi"
@@ -3828,6 +3838,11 @@ except OSError:
   check "proxy: host = \"upstream\" over TLS sends the origin's address without the scheme; its absolute redirect is rewritten to the site" \
     "127.0.0.1:9131 http://127.0.0.1:8091/tlshost/landing" \
     "$(curl -sSi $P/tlshost/ | tr -d '\r' | sed -n 's/^[Xx]-[Ss]een-[Hh]ost: //p') $(curl -sSi $P/tlshost/go/x | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
+  # The name asked for in the handshake (the alpha.145 report, O1): a host name is sent as SNI, an
+  # address never, written as server_name in either family or left to the upstream's own.
+  seen_sni() { curl -sSi "$1" | tr -d '\r' | sed -n 's/^[Xx]-[Ss]een-[Ss][Nn][Ii]: //p'; }
+  check "proxy: server_name is the SNI the origin is asked for; an address written as server_name, or no server_name, sends none" \
+    "x.wild.test - - -" "$(seen_sni $P/tlsnamed/) $(seen_sni $P/tlsip/) $(seen_sni $P/tlsip6/) $(seen_sni $P/tlshost/)"
   check "proxy: https origin keeps its connection (one handshake for three requests)" "$IDX $IDX $IDX" "$(curl -sS $P/tls/ $P/tls/ $P/tls/ | (a=$(head -c $IDXLEN | sum); b=$(head -c $IDXLEN | sum); c=$(sum); echo "$a $b $c"))"
   # Groups (D4): one keep-alive client connection stays on one worker, whose rotation
   # alternates the members; the dead member of the failover group is tried, marked down

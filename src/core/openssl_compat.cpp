@@ -6,6 +6,7 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
+#include <openssl/x509v3.h>
 
 #include <algorithm>
 
@@ -46,6 +47,16 @@ bool expect_peer_name(SSL* ssl, const char* host) noexcept {
     (void)X509_VERIFY_PARAM_set1_host(param, nullptr, 0);
     (void)X509_VERIFY_PARAM_set1_ip(param, nullptr, 0);
     return X509_VERIFY_PARAM_set1_ip_asc(param, host) == 1 || X509_VERIFY_PARAM_set1_host(param, host, 0) == 1;
+}
+
+bool send_server_name(SSL* ssl, const char* host) noexcept {
+    // a2i_IPADDRESS is what X509_VERIFY_PARAM_set1_ip_asc reads an address with, so a host the
+    // certificate is checked for as an address is exactly a host that is not sent as a name.
+    if (ASN1_OCTET_STRING* address = a2i_IPADDRESS(host)) {
+        ASN1_OCTET_STRING_free(address);
+        return true;
+    }
+    return SSL_set_tlsext_host_name(ssl, host) == 1;
 }
 
 } // namespace agensio::tls

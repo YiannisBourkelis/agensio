@@ -72,11 +72,12 @@ public:
 
     // Client side (TLS to an origin): connect state, SNI and, when `verify`, the peer's
     // certificate checked against the context's store and its name against `server_name`, or,
-    // without one, against the origin's address `ip` (an IP literal: no SNI, RFC 6066 3).
+    // without one, against the origin's address `ip`. An IP literal is never sent as SNI
+    // (RFC 6066 3), whether it is the address or a `server_name` written as one.
     // Call before async_handshake.
     bool set_client(const std::string& server_name, bool verify, const std::string& ip) noexcept {
         SSL_set_connect_state(ssl_.get());
-        if (!server_name.empty() && SSL_set_tlsext_host_name(ssl_.get(), server_name.c_str()) != 1) return false;
+        if (!server_name.empty() && !tls::send_server_name(ssl_.get(), server_name.c_str())) return false;
         if (verify) {
             SSL_set_verify(ssl_.get(), SSL_VERIFY_PEER, nullptr);
             if (!server_name.empty()) {

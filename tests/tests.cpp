@@ -5829,6 +5829,22 @@ static void test_openssl_compat() {
         CHECK(tls::expect_peer_name(ssl.get(), "other.example") && expected(ssl.get()) == "other.example|");
         CHECK(tls::expect_peer_name(ssl.get(), "192.0.2.8") && expected(ssl.get()) == "|192.0.2.8");
     }
+    // The name asked for in the handshake (SNI): a host name is sent, an IP literal never
+    // (RFC 6066 3), in any spelling the certificate check takes for an address. Until
+    // 0.1.0-alpha.146 an address written as proxy.tls.server_name, or the address of a CA or a
+    // download, was sent as it was (the test VPS's report on 0.1.0-alpha.145, O1).
+    for (const char* host : {"example.com", "origin.internal", "192.0.2.7", "127.0.0.1", "2001:db8::1", "::1", "0:0:0:0:0:0:0:1",
+                             "localhost", "xn--bcher-kva.example", "127.0.0.1.nip.io", "1.2.3", "256.1.1.1"}) {
+        std::unique_ptr<SSL, SslFree> ssl(SSL_new(ctx.get()));
+        SSL_set_connect_state(ssl.get());
+        CHECK(tls::send_server_name(ssl.get(), host));
+        const char* sent = SSL_get_servername(ssl.get(), TLSEXT_NAMETYPE_host_name);
+        CHECK(tls::expect_peer_name(ssl.get(), host));
+        const bool as_address = expected(ssl.get()).starts_with("|");  // what the certificate is checked for
+        if (as_address) CHECK(sent == nullptr);
+        else CHECK(sent != nullptr && std::string_view(sent) == host);
+        if ((sent == nullptr) != as_address) std::printf("SNI for %s: %s, checked as %s\n", host, sent ? sent : "(none)", as_address ? "an address" : "a name");
+    }
 }
 
 static void test_acme() {

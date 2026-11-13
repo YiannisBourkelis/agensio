@@ -355,7 +355,7 @@ bool https_request(const AcmeConfig& cfg, const std::string& method, const std::
         const timeval timeout{30, 0};
         ::setsockopt(stream.lowest_layer().native_handle(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
         ::setsockopt(stream.lowest_layer().native_handle(), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout);
-        SSL_set_tlsext_host_name(stream.native_handle(), host.c_str());
+        (void)tls::send_server_name(stream.native_handle(), host.c_str());
         (void)tls::expect_peer_name(stream.native_handle(), host.c_str());
         stream.handshake(asio::ssl::stream_base::client);
 

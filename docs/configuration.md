@@ -2172,7 +2172,9 @@ active health checks until a real deployment asks for them.
 keep-alive included, so a handshake is paid once per pooled connection rather than per
 request. The certificate is verified against the system store by default;
 `proxy = { tls = { ca = "/etc/ssl/internal-ca.pem", server_name = "app.internal" } }`
-names a private CA and the name the certificate must carry (also sent as SNI). Without
+names a private CA and the name the certificate must carry (also sent as SNI; an IP address
+written as `server_name` is looked for among the certificate's addresses and, as RFC 6066
+section 3 requires, not sent as SNI). Without
 `server_name` the certificate must name the upstream's address itself (an IP address entry,
 `IP:10.0.0.11`), as nginx and Caddy check by default, and no SNI is sent; most certificates
 name hosts, not addresses, so set `server_name` to the name yours carries. `tls = { verify =

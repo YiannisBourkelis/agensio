@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """A small HTTPS origin for the reverse proxy's TLS checks in tests/integration.sh: every answer
-carries the Host it received (X-Seen-Host), and .../go/... answers with an absolute redirect to its
+carries the Host it received (X-Seen-Host) and the name its connection's handshake asked for
+(X-Seen-SNI, "-" when the client sent none), and .../go/... answers with an absolute redirect to its
 own address, the kind the proxy rewrites to the site: to <what came before /go/>/landing, as an
 application builds its redirects from the path it was asked.
 
@@ -26,6 +27,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             body = b"tls origin\n"
         self.send_header("X-Seen-Host", self.headers.get("Host", ""))
+        self.send_header("X-Seen-SNI", getattr(self.connection, "seen_sni", None) or "-")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -37,5 +39,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain(cert, key)
+
+
+def note_sni(sock, name, _context):
+    sock.seen_sni = name
+
+
+context.sni_callback = note_sni
 server.socket = context.wrap_socket(server.socket, server_side=True)
 server.serve_forever()
