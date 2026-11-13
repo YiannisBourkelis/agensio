@@ -210,6 +210,10 @@ public:
     // 10.1.2: the peer's acknowledgement restarts both idle timers, and middleboxes forget a UDP flow
     // after about 30 s). How long it waits is the source's to bound (an upstream's read_timeout).
     void keep_alive(bool on) noexcept { keep_alive_ = on; }
+    // The connection ended by its idle timeout (RFC 9000 10.1: silently, nothing on the wire), read in
+    // the application's on_closed(); and that timeout, the smaller of ours and the peer's.
+    bool ended_idle() const noexcept { return ended_idle_; }
+    Duration idle_period() const noexcept { return idle_; }
     // The application's own check (HTTP/3: answers the client takes nothing of), `wait` after the next
     // wake-up's time; nothing when one is armed already, so asking per answer costs one comparison.
     // It fires through app_.on_check(now), which asks again while it has something to watch.
@@ -469,6 +473,7 @@ public:
             (state_ == State::handshaking && now + std::chrono::microseconds(500) >= created_ + idle_)) {
             QUIC_TRACE("quic: idle timeout\n");
             state_ = State::closed;
+            ended_idle_ = true;
             leave_handshake();
             app_.on_closed(false, 0);
             return;
@@ -1789,6 +1794,7 @@ private:
     TimePoint created_, last_receive_;
     TimePoint last_ping_{};                          // the keep-alive's last PING
     bool keep_alive_ = false, keep_alive_due_ = false;  // keep_alive(); a PING to send
+    bool ended_idle_ = false;                        // closed by the idle timeout
     TimePoint app_check_ = TimePoint::max();         // check_after(): when app_.on_check runs
     Duration app_check_wait_{};                      // asked for, its time set at the next reschedule
     Duration idle_{};

@@ -100,6 +100,14 @@ On 0.1.0-alpha.142 each of these fails.
   cancelled with H3_REQUEST_CANCELLED within idle_timeout plus the 2 s check, an info line, the slot back.
 - h1-stalled-reader: an HTTP/1.1 client that stops reading: closed at the idle timeout, with an info
   line saying the client took nothing.
+
+An HTTP/3 connection that ends idle with an answer unfinished (the alpha.143 report, O3): a download
+alone on its connection whose client grants no more credit and sends nothing more. Nothing moves
+either way, so QUIC's idle timeout ends the connection, silently on the wire (RFC 9000 10.1; keeping
+it open while an answer is outstanding is the client's to do, RFC 9114 5.1), before the no-progress
+check reaches the stream.
+- h3-idle-unfinished: the connection ends idle, and an info line names the client and the request.
+  Until 0.1.0-alpha.144 the error log said nothing.
 Requires python3-h2 and openssl (aioquic for the h3 rows). Exit 1 on any failed row.
 """
 import argparse
@@ -491,6 +499,8 @@ class Server:
         # output still open, on a location that streams: the client has the answer at once, and the
         # exchange's end (the child's exit) comes after the client is gone.
         (root / "www").mkdir()
+        (root / "www" / "large.bin").write_bytes(b"x" * (3 << 20))  # more than a client's first credit (1 MB)
+        (root / "www" / "small.txt").write_text("small\n")
         (root / "cgi").mkdir()
         script = root / "cgi" / "linger.cgi"
         script.write_text("#!/bin/sh\nprintf 'Content-Type: text/plain\\r\\nContent-Length: 2\\r\\n\\r\\nok'\nsleep 1\n")
@@ -1002,6 +1012,43 @@ def row_h3_stalled_reader(srv):
     return None if status.startswith("HTTP/1.1 200") else f"the next request through the slot: {status}"
 
 
+def row_h3_idle_unfinished(srv):
+    """A 3 MB file over HTTP/3, alone on its connection, to a client that takes its first credit (1 MB)
+    and grants no more: the server has nothing it may send and the client sends nothing, so the
+    connection ends idle (3 s here), and an info line says which request was left unfinished. Until
+    0.1.0-alpha.144 nothing in the error log did (the alpha.143 report, O3). A connection whose answer
+    was whole ends idle beside it and leaves no line."""
+    whole = H3(srv.ports["h3-cgi"])  # left open, never pumped again: it ends idle on the server too
+    done = whole.get("/small.txt")
+    if done["status"] != 200 or not done["ended"]:
+        whole.close()
+        return "the small file: " + h3_text(done)
+    c = H3(srv.ports["h3-cgi"])
+    try:
+        c.quic._write_connection_limits = lambda *a, **k: None  # aioquic's MAX_DATA and MAX_STREAM_DATA
+        c.quic._write_stream_limits = lambda *a, **k: None
+        start = time.monotonic()
+        st, _ = c.request("/large.bin")
+        c.pump(8, lambda: st["reset"] is not None or st["ended"])
+        took = time.monotonic() - start
+        ended_idle = c.terminated is not None
+    finally:
+        c.close()
+        whole.sock.close()
+    if st["ended"] or st["reset"] is not None:
+        return f"after {took:.1f} s: {h3_text(st)}; the row wants a download that stays unfinished"
+    if not ended_idle:
+        return f"the connection did not end idle within {took:.1f} s (idle_timeout 3 s): {h3_text(st)}"
+    print(f"  the connection ended idle after {took:.1f} s, {len(st['body'])} bytes taken")
+    line = logged(srv, ["http3", "/large.bin", "answer unfinished"])
+    if line is None:
+        return "the connection ended idle with the download unfinished, and no line says so"
+    print("  " + line)
+    if (extra := logged(srv, ["http3", "/small.txt"], seconds=1)) is not None:
+        return "a connection that ended idle after a whole answer left a line: " + extra
+    return None
+
+
 def left_h3(srv, name, how):
     c = H3(srv.ports["h3-slots"])
     try:
@@ -1123,6 +1170,7 @@ ROWS = {
     "h3-stalled-reader": row_h3_stalled_reader,
     "slow-reader-whole": row_slow_reader_whole,
     "h1-stalled-reader": row_h1_stalled_reader,
+    "h3-idle-unfinished": row_h3_idle_unfinished,
 }
 
 

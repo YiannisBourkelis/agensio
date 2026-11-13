@@ -31,6 +31,18 @@
   looking for requests being skipped. Its failures also counted for a list naming the same
   address in another location, under that list's `max_fails`. A lone origin is not marked now;
   each failure keeps its own error-log line with the reason. `docs/configuration.md` 12.
+- **An HTTP/3 connection that ends idle with a download unfinished says so in the error log.** A
+  client that takes nothing of an answer is cancelled after `idle_timeout`, with an info line. One
+  case had none: an HTTP/3 answer alone on its connection, to a client that sends nothing more.
+  Nothing moves either way then, so the connection's idle timeout ends it first, silently, as QUIC
+  requires (RFC 9000 10.1; keeping the connection open while an answer is outstanding is the
+  client's to do, RFC 9114 5.1). The only trace was the access log's `200` with fewer bytes than
+  the file has. The error log now has, at level info, `http3 CLIENT (SITE GET /path): no packet
+  from the client for 15 s with the answer unfinished (idle_timeout); the connection ended idle`,
+  one line for each answer with bytes the server could not send; an answer sent whole leaves
+  none. What happens on the wire is unchanged. 0.1.0-alpha.143's notes said every protocol wrote
+  such a line; `docs/configuration.md` 8 now describes this case. Found by the test VPS's report
+  on 0.1.0-alpha.143 (O3).
 
 ## 0.1.0-alpha.143 (2026-11-10)
 

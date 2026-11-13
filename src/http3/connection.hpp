@@ -286,8 +286,26 @@ public:
         (void)code;
         if (closed_) return;
         closed_ = true;
+        // A connection that ended idle with an answer unfinished: no packet came for the idle timeout
+        // while bytes of the answer waited on the client (its credit, its acknowledgements), which the
+        // no-progress check, at most 2 s later, did not get to see. QUIC closes silently (RFC 9000
+        // 10.1) and keeping the connection is the client's to do (RFC 9114 5.1), so this line is all
+        // that tells a download cut short from one that was whole; HTTP/1.1 and a cancelled stream
+        // have theirs. Only an answer with bytes never sent: one sent whole whose last acknowledgement
+        // did not come may well have arrived. Until 0.1.0-alpha.144 the error log said nothing (the
+        // alpha.143 report, O3).
+        ErrorLog* idle_log = quic_.ended_idle() ? dispatcher_.error_log() : nullptr;
+        if (idle_log && !idle_log->enabled(LogLevel::info)) idle_log = nullptr;
         for (auto& sp : streams_.all()) {
             H3Stream& s = *sp;
+            if (idle_log && s.kind == H3Stream::Kind::request && !s.closed && s.responded && !s.finished && !s.q.reset_sent &&
+                !s.q.reset_due && s.q.next < s.q.total) {
+                const auto period = std::chrono::duration_cast<std::chrono::seconds>(quic_.idle_period());
+                idle_log->info(request_text(s) + ": no packet from the client for " + std::to_string(period.count()) +
+                               " s with the answer unfinished (" +
+                               (period.count() == static_cast<long long>(live_->idle_timeout_s) ? "idle_timeout" : "the client's idle timeout") +
+                               "); the connection ended idle");
+            }
             stop_streaming(s);
             if (s.upstream) {  // a read out on it is answered from the loop, and finds the connection closed
                 s.upstream->reader_gone();

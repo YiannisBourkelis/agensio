@@ -1667,7 +1667,14 @@ cancels an HTTP/2 stream (`RST_STREAM` `CANCEL`) or an HTTP/3 one (`H3_REQUEST_C
 every 2 s, since 0.1.0-alpha.143; before, nothing but the application's `read_timeout` did). Each
 writes an info line naming the client, `no progress for 15 s, the client took nothing of the answer`
 (HTTP/1.1's since 0.1.0-alpha.143), and the application's exchange ends at once, so its slot comes
-back.
+back. One case ends another way: an HTTP/3 answer alone on its connection, to a client that sends
+nothing more. Nothing moves in either direction then, so the connection's own idle timeout (the same
+`idle_timeout`) ends it first, up to 2 s before the check would cancel the stream: silently on the
+wire, as QUIC closes an idle connection (RFC 9000 10.1; keeping the connection while an answer is
+outstanding is the client's to do, RFC 9114 5.1). Its info line reads `no packet from the client
+for 15 s with the answer unfinished (idle_timeout); the connection ended idle` (since
+0.1.0-alpha.144; nothing before), written for an answer with bytes the server could not send, not
+for one sent whole.
 
 A query whose `since` reaches back past the first line of the current file reads on into the
 rotated files as the shipped logrotate configuration leaves them (`packaging/agensio.logrotate`:
