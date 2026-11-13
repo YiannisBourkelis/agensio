@@ -1667,7 +1667,12 @@ cancels an HTTP/2 stream (`RST_STREAM` `CANCEL`) or an HTTP/3 one (`H3_REQUEST_C
 every 2 s, since 0.1.0-alpha.143; before, nothing but the application's `read_timeout` did). Each
 writes an info line naming the client, `no progress for 15 s, the client took nothing of the answer`
 (HTTP/1.1's since 0.1.0-alpha.143), and the application's exchange ends at once, so its slot comes
-back. One case ends another way: an HTTP/3 answer alone on its connection, to a client that sends
+back. The number in the line is the time measured, not the setting: HTTP/1.1 ends the connection at
+`idle_timeout` to the second, HTTP/2 and HTTP/3 look at their streams every 2 s, so a stream is
+ended between `idle_timeout` and 2 s after it and the line of a 6 s timeout may say 6 or 7.
+What counts is what the client's side took, whatever it then does with it: an answer whose last
+byte the client's kernel has acknowledged is finished and in the access log, and a client that
+stops afterwards holds nothing of the server's. One case ends another way: an HTTP/3 answer alone on its connection, to a client that sends
 nothing more. Nothing moves in either direction then, so the connection's own idle timeout (the same
 `idle_timeout`) ends it first, up to 2 s before the check would cancel the stream: silently on the
 wire, as QUIC closes an idle connection (RFC 9000 10.1; keeping the connection while an answer is
@@ -2156,7 +2161,11 @@ next member: any request when nothing was sent yet (a refused connection), only 
 HEAD once bytes went out, so a POST is never delivered twice. Each member is a pool of its
 own with the location's limits; all members must share the URI part. Both events are in
 the error log: `marked down for 10 s after 3 failure(s)` and `is back`. A location with one
-origin marks nothing and logs neither: every request tries it. No weights and no
+origin marks nothing and logs neither: every request tries it. Health belongs to the origin's
+address, in each worker, not to the list: two lists naming the same address, in two locations or
+two sites, share its count, so a member one list marked down is skipped by the other for the same
+`fail_timeout`, and an answer from it to any location clears the count. The list whose request
+fails applies its own `max_fails` and `fail_timeout`. No weights and no
 active health checks until a real deployment asks for them.
 
 **TLS to the origin.** `upstream = "https://10.0.0.11:8443"` talks TLS to the origin,

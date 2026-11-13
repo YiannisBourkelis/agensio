@@ -57,6 +57,21 @@
   list run before every tag (`CLAUDE.md`). Run on the tag of 0.1.0-alpha.144 it fails with the
   release job's two errors; on this tree it passes.
 
+- **Docs: two answers to the 0.1.0-alpha.144 report** (`docs/configuration.md` 8 and 12).
+  - The number in `no progress for N s, the client took nothing of the answer` is the time
+    measured. HTTP/1.1 ends the connection at `idle_timeout` to the second; HTTP/2 and HTTP/3 look
+    at their streams every 2 s, so a 6 s timeout may log 6 or 7.
+  - Passive health of a list's member belongs to the origin's address in each worker, not to the
+    list: lists naming the same address share its count, and an answer from it to any location
+    clears it.
+  The report's finding that HTTP/2 never ends a stalled download while another stream waits for an
+  origin was the test client: with a second request pending on the connection, `curl --parallel
+  --limit-rate` took the whole 64 MB file in under a second, so the answer was finished (in the
+  access log, every byte acknowledged) before the client was stopped. A client that does stop
+  taking, on its flow-control window or on its socket, is ended beside a waiting stream as alone:
+  the stream cancelled after `idle_timeout`, the connection closed after four of them with `a write
+  not taken by the client`. Nothing changed in the code.
+
 ## 0.1.0-alpha.144 (2026-11-13)
 
 - **Fix: `Retry-After` on a queue's 503 is the location's `queue_wait`, for CGI too.** When a
