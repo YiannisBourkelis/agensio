@@ -640,11 +640,28 @@ curl -sN --max-time 20 https://dashboard.example.com/events/stream     # events 
 agensio -t --explain -c /etc/agensio/agensio.toml | grep -A4 '^path = "/events/"'   # handler = "proxy"
 ```
 
-**On a managed site.** These locations go into the site's root additions file (see
+**On a managed site.** The streamed paths are a field of the site and the timeout one of its
+settings; the rest of the site stays buffered:
+
+```sh
+agensio ctl site-update dashboard.example.com --stream-path /events/ --stream-path /exports/ --set proxy_read_timeout=300 --yes --reason "events and exports go out as they are made"
+agensio ctl site dashboard.example.com        # stream_paths, and the two locations from them with buffering false
+agensio ctl settings dashboard.example.com    # proxy_read_timeout: 300, source: site
+```
+
+`proxy_read_timeout` is the whole site's here, where the file above gave it to `/events/` alone.
+An application that streams everything takes `--set proxy_buffering=off` instead of a list of
+paths. `request_buffering = false` (the `/import/` location) has no field: that location goes into
+the site's root additions file (see
 [one path of a PHP site](#one-path-of-a-php-site-sent-to-another-service)).
 
-**Reference:** [Reverse proxy](../configuration.md#12-reverse-proxy) (options),
-[Customising a preset](../configuration.md#5-customising-a-preset) (the same on a PHP site).
+**MCP:** `site_update` with `stream_paths` `["/events/", "/exports/"]` and `settings`
+`{ "proxy_read_timeout": 300 }`; `site_show` lists the paths and the locations they became,
+`site_settings_list` the value in force.
+
+**Reference:** [Reverse proxy](../configuration.md#12-reverse-proxy) (options, and the managed
+site's settings), [Customising a preset](../configuration.md#5-customising-a-preset) (the same on
+a PHP site).
 
 ## A legacy CGI script
 

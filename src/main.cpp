@@ -93,6 +93,7 @@ void usage(std::ostream& out = std::cout) {
                  "                           site-task-output NAME [--offset N] [--length N] [--raw] (admin)\n"
                  "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
                  "                      site-update NAME --login-path /login ... (where the fail2ban jail counts attempts)\n"
+                 "                      site-update NAME --stream-path /events ... (answered as it arrives; a site that proxies)\n"
                  "                      site-update NAME --public-archive /data/world.sql.gz ... (a dump served on purpose)\n"
                  "                      site-update NAME --access-log-exclude /api/notices/ ... [--access-log-keep-days N]\n"
                  "                           (paths kept out of the logs, days the rotated lines stay; --no-access-log-exclude)\n"
@@ -634,6 +635,11 @@ int main(int argc, char** argv) {
                              "        --login-path PATH (site-create and site-update, repeatable): where the application posts\n"
                              "                    credentials, on top of the preset's known paths; the fail2ban jail counts attempts there;\n"
                              "                    given together they replace the site's list; --no-login-paths clears\n"
+                             "        --stream-path PATH (site-create and site-update, repeatable; a site that proxies): a path whose\n"
+                             "                    answers go to the client as they arrive (event streams, long polling), the rest of\n"
+                             "                    the site staying buffered; given together they replace the list; --no-stream-paths\n"
+                             "                    clears. --set proxy_buffering=off streams the whole site; --set proxy_read_timeout=300,\n"
+                             "                    proxy_tunnel_timeout=N and proxy_max_connections=N are the site's other proxy settings\n"
                              "        --public-archive PATH (site-create and site-update, repeatable): an archive or a database\n"
                              "                    dump the site serves on purpose, as served from its root (a directory ending in /\n"
                              "                    for all below it); health's archives_in_root accepts it; given together they\n"
@@ -974,6 +980,12 @@ int main(int argc, char** argv) {
                     list.push(v);
                     body.set("login_paths", list);
                 } else if (b == "--no-login-paths") body.set("login_paths", agensio::json::Value::array());
+                else if (b == "--stream-path") {  // a path answered as it arrives; given together they replace the list
+                    std::string v; value(v);
+                    agensio::json::Value list = body["stream_paths"].is_array() ? body["stream_paths"] : agensio::json::Value::array();
+                    list.push(v);
+                    body.set("stream_paths", list);
+                } else if (b == "--no-stream-paths") body.set("stream_paths", agensio::json::Value::array());
                 else if (b == "--public-archive") {  // served on purpose; given together they replace the list
                     std::string v; value(v);
                     agensio::json::Value list = body["public_archives"].is_array() ? body["public_archives"] : agensio::json::Value::array();

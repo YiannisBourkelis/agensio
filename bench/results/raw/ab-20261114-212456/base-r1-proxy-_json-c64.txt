@@ -1,0 +1,8 @@
+Running 5s test @ http://127.0.0.1:8093/json
+  4 threads and 64 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   302.60us   82.80us   5.73ms   93.89%
+    Req/Sec    53.52k     3.45k   73.86k    91.63%
+  1080892 requests in 5.10s, 185.55MB read
+Requests/sec: 211969.99
+Transfer/sec:     36.39MB

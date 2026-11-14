@@ -277,25 +277,16 @@ agensio ctl status | grep -o '"streams_[a-z_]*":[0-9]*'
 agensio ctl site-update live.example.com --compression on --compression-events on --yes --reason "compress the price stream"
 ```
 
-No field of `site-update` adds a location or turns buffering off, so the `/events` location goes into
-the site's root additions file, root's and writable by root alone; without it the events wait for the
-stream's end:
+The `/events` path is answered as it arrives through the site's `stream_paths` (a site that
+proxies); without it the events wait for the stream's end:
 
 ```sh
-cat > /etc/agensio/sites.d/live.example.com.root.toml <<'EOF'
-site = "live.example.com"
-
-[[location]]
-path = "/events"
-upstream = "http://127.0.0.1:3000"
-proxy = { buffering = false }
-EOF
-chmod 644 /etc/agensio/sites.d/live.example.com.root.toml
-agensio reload
-agensio ctl site live.example.com          # root_additions: the file and the location it added
+agensio ctl site-update live.example.com --stream-path /events --yes --reason "each event goes on as it is sent"
+agensio ctl site live.example.com          # stream_paths: /events, and the location from it with buffering false
 ```
 
-On a PHP site the stream is a script that calls `flush()` after each event, and its location runs it
+On a PHP site no field of `site-update` adds a location, so the stream's location goes into the
+site's root additions file, root's and writable by root alone. The stream is a script that calls `flush()` after each event, and its location runs it
 through the site's own pool (`handler = "fastcgi"` with no socket); a location has no `php` table,
 the key there is `fastcgi`:
 
@@ -323,8 +314,9 @@ on a hand-written site `php = { buffering = false }` streams all of the site's P
 one the stream stays buffered.
 
 Through MCP, `site_update` with `response_compression: {"enabled": true, "compress_event_streams": true}`,
-after the user confirmed what the stream carries; `site_show` names the root additions file, and the
-agent hands root this block, since no tool writes it.
+after the user confirmed what the stream carries, and on a site that proxies `stream_paths:
+["/events"]` in the same call. For a PHP script's stream `site_show` names the root additions file,
+and the agent hands root that block, since no tool writes it.
 
 **Reference:** [Response compression](../configuration.md#20-response-compression-response_compression).
 

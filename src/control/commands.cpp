@@ -1284,6 +1284,8 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
     const bool is_managed = read_managed(site_file(cfg, s.server_names.front()), managed);
     if (is_managed) ruled = rule_locations(managed);
     if (s.tls || s.hsts != SiteConfig::Hsts::unset) v.set("hsts", hsts_json(s, is_managed ? &managed : nullptr, now, tls));
+    // The paths answered as they arrive (a managed site that proxies), so a change to the list sees what it replaces.
+    if (is_managed && !managed.stream_paths.empty()) v.set("stream_paths", strings(managed.stream_paths));
     json::Value locs = json::Value::array();
     for (const auto& l : s.locations) {
         json::Value loc = json::Value::object().set("path", l.path);
@@ -1292,12 +1294,16 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
         if (!l.deny_suffixes.empty()) loc.set("refuses", strings(l.deny_suffixes));  // endings answered 404 here
         if (!l.allow_suffixes.empty()) loc.set("serves_only", strings(l.allow_suffixes));  // no other ending is
         if (!l.origin.empty()) loc.set("from", l.origin);
+        else if (is_managed && !l.exact && !l.suffix && l.kind == HandlerKind::proxy &&
+                 std::find(managed.stream_paths.begin(), managed.stream_paths.end(), l.path) != managed.stream_paths.end())
+            loc.set("from", "stream_paths");
         else
             for (const RuleLocation& rl : ruled)
                 if (rl.path == l.path && rl.exact == l.exact && rl.suffix == l.suffix) {
                     loc.set("from", "rules");
                     break;
                 }
+        if (l.kind == HandlerKind::proxy && !l.proxy.options.buffering) loc.set("buffering", false);  // answered as it arrives
         if (!l.alias.empty()) loc.set("alias", l.alias);
         else if (l.root != s.root) loc.set("root", l.root);
         if (l.kind == HandlerKind::proxy) loc.set("upstream", upstream_json(l.proxy));

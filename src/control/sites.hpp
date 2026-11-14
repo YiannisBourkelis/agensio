@@ -91,6 +91,12 @@ struct SiteSpec {
     // preset's known paths (2026-10-02): the rendered fail2ban jail counts attempts there;
     // nothing is served or refused by it. Plain paths (check_login_path), at most 16.
     std::vector<std::string> login_paths;
+    // Paths of a proxying site whose answers go to the client as they arrive (0.1.0-alpha.147): event
+    // streams, long polling, output written piece by piece. Each is rendered as a location of the
+    // managed file with the site's upstream and proxy = { buffering = false }; the rest of the site
+    // keeps buffering. Plain paths (check_access_path), never "/" (that is settings.proxy_buffering),
+    // at most 16.
+    std::vector<std::string> stream_paths;
     // Archives and dumps the site serves on purpose (2026-10-17): health's archives_in_root counts them
     // as accepted. Paths as served (check_public_archive), a directory ending in "/", at most 64.
     std::vector<std::string> public_archives;

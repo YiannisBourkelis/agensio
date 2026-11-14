@@ -6841,6 +6841,47 @@ static void test_control_sites() {
         (void)apply_request(body, cfg, s2, e2);
         CHECK(e2.empty() && s2.listen_tls == "[::]:8443" && s2.listen_plain.empty());
     }
+    // stream_paths and the proxy_* settings (0.1.0-alpha.147): for a site that proxies only; the paths
+    // plain, never "/", the list given whole.
+    {
+        SiteSpec s2;
+        s2.domain = "shop.test";
+        s2.app = "proxy";
+        s2.upstream = "http://127.0.0.1:3000";
+        std::string e2;
+        CHECK(json::parse(R"({"stream_paths":["/events","/api/chat/","/events"],"settings":{"proxy_read_timeout":"300"}})", body, e2));
+        (void)apply_request(body, cfg, s2, e2);
+        CHECK(e2.empty() && (s2.stream_paths == std::vector<std::string>{"/events", "/api/chat/"}) && s2.settings["proxy_read_timeout"].num() == 300);
+        for (const auto& [bad, why] : {std::pair<const char*, const char*>{R"({"stream_paths":["/"]})", "the whole site"}, {R"({"stream_paths":["events"]})", "must start with '/'"},
+                                       {R"({"stream_paths":"/events"})", "must be a list"}, {R"({"stream_paths":["/a?x=1"]})", "holds a control character"},
+                                       {R"({"stream_paths":[7]})", "string path"}}) {
+            SiteSpec s3 = s2;
+            std::string e3;
+            CHECK(json::parse(bad, body, e3));
+            (void)apply_request(body, cfg, s3, e3);
+            if (e3.find(why) == std::string::npos) std::printf("stream_paths %s: %s\n", bad, e3.c_str());
+            CHECK(e3.find(why) != std::string::npos && s3.stream_paths == s2.stream_paths);
+        }
+        for (const char* clear : {R"({"stream_paths":[]})", R"({"stream_paths":null})"}) {
+            SiteSpec s3 = s2;
+            std::string e3;
+            CHECK(json::parse(clear, body, e3));
+            (void)apply_request(body, cfg, s3, e3);
+            CHECK(e3.empty() && s3.stream_paths.empty());
+        }
+        SiteSpec php;
+        php.domain = "shop.test";
+        php.app = "php";
+        php.root = (dir / "www").string();
+        std::string e4;
+        CHECK(json::parse(R"({"stream_paths":["/events"]})", body, e4));
+        (void)apply_request(body, cfg, php, e4);
+        CHECK(e4.find("stream_paths is for a site that proxies") != std::string::npos);
+        e4.clear();
+        CHECK(json::parse(R"({"settings":{"proxy_buffering":"off"}})", body, e4));
+        (void)apply_request(body, cfg, php, e4);
+        CHECK(e4.find("settings.proxy_buffering is for a site that proxies") != std::string::npos);
+    }
     cfg.acme.enabled = true;
     CHECK(json::parse(R"({"https":"auto","root":")" + (dir / "www").string() + R"(","user":null})", body, err));
     needs = apply_request(body, cfg, spec, err);
@@ -7340,6 +7381,27 @@ static void test_control_sites() {
                     if (d.get("key") == "proxy_pool") listed = d.get("default") == "worker" && !d["needs_user"].boolean() && d["options"].items().size() == 2;
                 CHECK(listed);
             }
+            // The other proxy_* settings (0.1.0-alpha.147): buffering as on/off, two timeouts and the
+            // connections at once, each within a fixed range of its own, none needing a user.
+            {
+                json::Value g, o;
+                json::parse(R"({"proxy_buffering":"OFF","proxy_read_timeout":300,"proxy_tunnel_timeout":"0","proxy_max_connections":32})", g, e2);
+                CHECK(apply_settings(g, loaded, false, o).empty());
+                CHECK(o.get("proxy_buffering") == "off" && o["proxy_read_timeout"].num() == 300 && o["proxy_tunnel_timeout"].num() == 0 && o["proxy_max_connections"].num() == 32);
+                CHECK(refused(R"({"proxy_buffering":"false"})", false, "not one of on, off"));
+                CHECK(refused(R"({"proxy_read_timeout":0})", false, "below the minimum 1") && refused(R"({"proxy_read_timeout":3601})", false, "above the maximum 3600"));
+                CHECK(refused(R"({"proxy_tunnel_timeout":86401})", false, "above the maximum 86400") && refused(R"({"proxy_max_connections":0})", false, "below the minimum 1") &&
+                      refused(R"({"proxy_max_connections":5000})", false, "above the maximum 4096") && refused(R"({"proxy_read_timeout":"long"})", false, "whole number"));
+                int listed = 0;
+                const json::Value catalog = settings_catalog(loaded, nullptr);
+                for (const auto& d : catalog["settings"].items()) {
+                    if (d.get("key") == "proxy_buffering") listed += d.get("default") == "on" && !d["needs_user"].boolean();
+                    if (d.get("key") == "proxy_read_timeout") listed += d["default"].num() == 60 && d["maximum"].num() == 3600 && d.get("maximum_from") == "built in";
+                    if (d.get("key") == "proxy_tunnel_timeout") listed += d["default"].num() == 0 && d["minimum"].num() == 0;
+                    if (d.get("key") == "proxy_max_connections") listed += d["default"].num() == 256 && d.get("unit") == "count";
+                }
+                CHECK(listed == 4);
+            }
             // Pool keys need a site with its own user; max_body_size does not.
             CHECK(refused(R"({"memory_limit":"64M"})", false, "needs a PHP site with its own user"));
             json::Value o2, g2;
@@ -7409,6 +7471,61 @@ static void test_control_sites() {
                     }
                 }
                 std::filesystem::remove(dir / "sites.d" / "pool.toml");
+            }
+            // The proxy settings together and stream_paths: one proxy table on the site, a location per
+            // streamed path with the site's upstream and buffering off, which takes the site's other
+            // keys; the application's location shows as the site's settings, never a streamed path's.
+            {
+                SiteSpec app;
+                app.domain = "stream.test";
+                app.app = "proxy";
+                app.upstream = "http://127.0.0.1:9100";
+                app.https = "none";
+                app.listen_plain = "127.0.0.1:18099";
+                app.settings = json::Value::object().set("proxy_pool", "shared").set("proxy_read_timeout", 300.0).set("proxy_tunnel_timeout", 120.0).set("proxy_max_connections", 32.0);
+                app.stream_paths = {"/events", "/api/chat/"};
+                const std::string text = render_site(app, "x");
+                CHECK(text.find("proxy = { pool = \"shared\", read_timeout = 300, tunnel_timeout = 120, max_connections = 32 }") != std::string::npos);
+                CHECK(text.find("path = \"/events\"\nupstream = \"http://127.0.0.1:9100\"\nproxy = { buffering = false }") != std::string::npos);
+                CHECK(text.find("path = \"/api/chat/\"") != std::string::npos);
+                SiteSpec back;
+                CHECK(SiteSpec::from_json(app.to_json(), back) && back.stream_paths == app.stream_paths);
+                std::ofstream(dir / "sites.d" / "stream.toml") << text;
+                Config scfg;
+                bool ok_load = true;
+                try { scfg = load_config(dir / "agensio.toml"); } catch (const std::exception& ex) { ok_load = false; std::printf("stream: %s\n", ex.what()); }
+                CHECK(ok_load);
+                const SiteConfig* ss = nullptr;
+                for (const auto& st : scfg.sites) if (!st.server_names.empty() && st.server_names.front() == "stream.test") ss = &st;
+                CHECK(ss != nullptr);
+                if (ss) {
+                    const LocationConfig& page = Router::location(*ss, "/page");
+                    const LocationConfig& events = Router::location(*ss, "/events/7");
+                    const LocationConfig& chat = Router::location(*ss, "/api/chat/room");
+                    CHECK(page.proxy.options.buffering && !events.proxy.options.buffering && !chat.proxy.options.buffering);
+                    CHECK(Router::location(*ss, "/api/other").proxy.options.buffering);
+                    for (const LocationConfig* l : {&page, &events, &chat})
+                        CHECK(l->proxy.options.shared_pool && l->proxy.options.read_timeout.count() == 300000 && l->proxy.options.max_connections == 32 &&
+                              l->proxy.tunnel_timeout_s == 120);
+                    const json::Value eff = effective_settings(*ss, scfg);
+                    CHECK(eff["proxy_buffering"].get("value") == "on" && eff["proxy_buffering"].get("source") == "default");
+                    CHECK(eff["proxy_read_timeout"]["value"].num() == 300 && eff["proxy_read_timeout"].get("source") == "site" &&
+                          eff["proxy_max_connections"]["value"].num() == 32 && eff["proxy_tunnel_timeout"]["value"].num() == 120);
+                }
+                // The whole site streaming: the setting, no location.
+                app.stream_paths.clear();
+                app.settings = json::Value::object().set("proxy_buffering", "off");
+                const std::string all = render_site(app, "x");
+                CHECK(all.find("proxy = { buffering = false }   # settings.proxy_*") != std::string::npos && all.find("stream_paths") == std::string::npos);
+                std::ofstream(dir / "sites.d" / "stream.toml") << all;
+                try { scfg = load_config(dir / "agensio.toml"); } catch (const std::exception& ex) { ok_load = false; std::printf("stream all: %s\n", ex.what()); }
+                CHECK(ok_load);
+                for (const auto& st : scfg.sites)
+                    if (!st.server_names.empty() && st.server_names.front() == "stream.test") {
+                        CHECK(!Router::location(st, "/x").proxy.options.buffering);
+                        CHECK(effective_settings(st, scfg)["proxy_buffering"].get("value") == "off");
+                    }
+                std::filesystem::remove(dir / "sites.d" / "stream.toml");
             }
             std::filesystem::rename(dir / "sites.d" / "shop.test.toml.keep", dir / "sites.d" / "shop.test.toml");
             // [control] site_limits from the file, and a site-level max_body_size.

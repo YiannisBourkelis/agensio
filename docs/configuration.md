@@ -2321,6 +2321,28 @@ On a managed site it is the setting `proxy_pool`
 (`agensio ctl site-update NAME --set proxy_pool=shared`). PHP and CGI are not shared, and a
 server with one worker has nobody to share with: there the key changes nothing.
 
+**On a managed site** (0.1.0-alpha.147) how the site talks to its application is set through
+the control plane, with no root additions file. The settings (`agensio ctl site-update NAME --set
+KEY=VALUE`, `site_update` with `settings`; `agensio ctl settings NAME` shows the values in force):
+
+| setting | the key it writes | range | for |
+|---|---|---|---|
+| `proxy_read_timeout` | `read_timeout` | 1 to 3600 s (60) | a report or export slower than a minute, which ends in a 504 |
+| `proxy_max_connections` | `max_connections` | 1 to 4096 (256) | an application server with few workers |
+| `proxy_tunnel_timeout` | `tunnel_timeout` | 0 to 86400 s (0, none) | closing WebSockets silent in both directions |
+| `proxy_pool` | `pool` | `worker`, `shared` | above |
+| `proxy_buffering` | `buffering` | `on`, `off` | `off` for an application that is all streams |
+
+and the site field `stream_paths` (`--stream-path PATH`, repeatable; `--no-stream-paths`): the
+paths whose answers go to the client as they arrive (event streams, long polling, a chat's tokens,
+a large generated download), each written as a location with the site's upstream and `buffering =
+false`, which takes the site's other proxy keys. A path covers what lies below it; `/` is refused
+(that is `proxy_buffering`); at most 16. Everything else stays buffered. Both are for sites that
+proxy (`app = "proxy"`, `rails`, `redmine`, `django`, `wagtail`, `node`); a PHP script that
+streams still gets its location in the root additions file. The other keys of the table above
+(the headers sent on, the origin's TLS policy, hidden fields) stay root's: they change what the
+application trusts.
+
 The pool is per worker, so an origin sees at most workers x `max_connections` connections
 and workers x `max_idle` idle ones (with `pool = "shared"` and little traffic, `max_idle` in the
 store), none of them idle for longer than `idle_timeout`

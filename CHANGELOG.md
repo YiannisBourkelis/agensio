@@ -60,6 +60,26 @@
   more per busy TLS connection; it costs 2.3 % on small static HTTPS answers, so it was measured
   and left out.
 
+- **A site that proxies sets how it talks to its application through the control plane.** Until
+  now only `proxy_pool` was a setting; a slow report's timeout or an event stream's path meant a
+  root-owned file. New, for sites with `app = "proxy"`, `rails`, `redmine`, `django`, `wagtail` or
+  `node` (`docs/configuration.md` 12):
+  - the settings `proxy_read_timeout` (1 to 3600 s; a report slower than a minute is a 504),
+    `proxy_max_connections` (1 to 4096; an application server with few workers),
+    `proxy_tunnel_timeout` (0 to 86400 s; silent WebSockets) and `proxy_buffering` (`on`, `off`;
+    off for an application that is all streams), each written as the key of the site's `proxy`
+    table: `agensio ctl site-update NAME --set proxy_read_timeout=300`, `site_update` with
+    `settings`, listed with their ranges by `agensio ctl settings` and `site_settings_list`;
+  - the site field `stream_paths`: the paths whose answers go to the client as they arrive
+    (event streams, long polling, a chat's tokens), each written as a location with the site's
+    upstream and `buffering = false` while the rest of the site stays buffered:
+    `agensio ctl site-update NAME --stream-path /events` (repeatable; `--no-stream-paths`),
+    `site_update` with `stream_paths`. At most 16, `/` refused (that is `proxy_buffering`);
+    `site_show` lists them and marks their locations.
+  None of these can run code, move data or widen access, so none waits for an approval code. What
+  changes what the application trusts (the headers sent on, the origin's TLS policy, hidden
+  fields) stays in root's file, and so does a PHP script that streams.
+
 - **Against Pingora after these two.** The comparison again (`bench/pingora/README.md`, its last
   section; `pingora-20261114-134129.md` in the default mode, `pingora-20261114-135729.md` with both
   proxies streaming): agensio spends 1.3 to 2.1 times less CPU per request on every row in its

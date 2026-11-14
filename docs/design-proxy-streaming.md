@@ -203,6 +203,12 @@ flat), the streaming rows of `bench/pingora/run.sh -X 'buffering = false'`, one 
    changed; see the answer given to the owner the same day: worth doing only for hosts with
    thousands of sites, and then as a type without sites, so the compiler lists every reader.
 
+**Through the control plane** (0.1.0-alpha.147, agreed the same day): a managed site that proxies
+sets how it talks to its application without the root additions file: the settings
+`proxy_buffering`, `proxy_read_timeout`, `proxy_tunnel_timeout` and `proxy_max_connections` beside
+`proxy_pool`, and the site field `stream_paths`, the paths answered as they arrive
+(`docs/configuration.md` 12, `docs/examples/proxy.md`).
+
 ## 9. Pingora's path, from its source
 
 Read from the crates of Pingora 0.9.1 as the comparison builds them (`bench/tmp/pingora/cargo`),

@@ -439,6 +439,14 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   every size in every framing over each protocol), `test_upstream_answer_paths` (a scripted origin in
   the unit tests). Rule learned: a memory or path change is judged on the static HTTPS rows, pinned and
   alternated; the proxied rows swing 10 % and hid a 2.3 % cost.
+  Through the control plane (alpha.147): a managed site that proxies has the settings `proxy_pool`,
+  `proxy_buffering`, `proxy_read_timeout`, `proxy_tunnel_timeout`, `proxy_max_connections`
+  (`control/settings.cpp`, fixed ranges, no ceiling of root's; `proxy_settings_keys` in `sites.cpp`
+  renders them as one `proxy` table) and the field `stream_paths` (`SiteSpec::stream_paths`: a
+  location per path with the site's upstream and `buffering = false`, which takes the site's other
+  proxy keys; not under `rules`, which only ever narrow a site; `/` refused; `site_show` marks the
+  locations `from: stream_paths`); `--stream-path`, `--set proxy_*`. PHP sites are refused: a
+  front-controller route has no location to give, and a script's location stays in root additions.
   CGI (D5, `src/upstream/cgi_client.*`, `src/handlers/cgi.*`): the
   exchange's connect step forks the script with a socketpair as stdin/stdout, so the
   shared exchange code does the rest; processes capped and reaped per worker pool.

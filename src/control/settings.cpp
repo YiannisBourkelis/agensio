@@ -18,6 +18,11 @@ const std::vector<SettingDef>& setting_defs() {
         {"max_requests", "int", "count", "pm.max_requests: a child is recycled after this many requests (0 = never).", "agensio reload and a php-fpm reload", "", {}, true},
         {"proxy_pool", "enum", "", "Whose the idle connections to the site's application or origin are, for a site that proxies (proxy.pool in the site file). worker (default): each worker keeps its own, the cheapest for an origin with steady traffic. shared: connections to an origin a worker asks seldom wait in one store for all workers, so the workers together hold a few where each held its own; an origin asked often keeps its connections in the worker at no cost. For an application server that gives each connection a thread or a process, and for an https:// origin (a connection shared is a TLS handshake saved). server_status shows what the store does (upstream_pool).",
          "agensio reload", "", {"worker", "shared"}, false},
+        {"proxy_buffering", "enum", "", "How a proxying site hands on its application's answers (proxy.buffering in the site file). on (default): each answer is collected first, so a slow client never holds an application worker, and a failure is a clean 502. off: every answer goes to the client as it arrives, for an application that is all event streams or long polling; for single paths use stream_paths instead and leave this on.",
+         "agensio reload", "", {"on", "off"}, false},
+        {"proxy_read_timeout", "int", "seconds", "How long a proxying site waits for the application's next bytes before answering 504 (proxy.read_timeout); raise it for reports and exports that take longer than a minute.", "agensio reload", "", {}, false},
+        {"proxy_tunnel_timeout", "int", "seconds", "How long a WebSocket (an upgraded connection) of a proxying site may stay silent in both directions before it is closed (proxy.tunnel_timeout); 0 = no limit.", "agensio reload", "", {}, false},
+        {"proxy_max_connections", "int", "count", "How many requests of a proxying site are with its application at once, per worker (proxy.max_connections); further ones wait in the queue. Lower it for an application server with few workers.", "agensio reload", "", {}, false},
     };
     return defs;
 }
@@ -35,6 +40,7 @@ namespace {
 struct Bounds {
     std::size_t min = 0, max = 0;  // sizes in bytes, counts as numbers
     std::size_t built_in = 0;      // the value a site gets without setting it
+    bool fixed = false;            // the maximum is built in, not a ceiling of [control] site_limits
 };
 
 Bounds bounds_of(const SettingDef& d, const Config& cfg) {
@@ -46,6 +52,11 @@ Bounds bounds_of(const SettingDef& d, const Config& cfg) {
     if (k == "max_input_time") return {1, lim.max_input_time, PhpPool{}.max_input_time};
     if (k == "children") return {1, lim.children, PhpPool{}.children};
     if (k == "max_requests") return {0, lim.max_requests, PhpPool{}.max_requests};
+    // The proxy keys: the file's own ranges narrowed to what a site needs; no ceiling of root's, since
+    // none of them widens what the site may do.
+    if (k == "proxy_read_timeout") return {1, 3600, 60, true};
+    if (k == "proxy_tunnel_timeout") return {0, 86400, 0, true};
+    if (k == "proxy_max_connections") return {1, 4096, 256, true};
     return {};
 }
 
@@ -108,6 +119,7 @@ std::string apply_settings(const json::Value& given, const Config& cfg, bool has
         const bool ok = std::string_view(def->type) == "size" ? parse_size_value(m.second, n) : parse_number(m.second, n);
         if (!ok) return "settings." + m.first + ": not a " + (std::string_view(def->type) == "size" ? "size (e.g. \"200MB\", \"512M\")" : "whole number");
         if (n < b.min) return "settings." + m.first + ": " + value_text(*def, n) + " is below the minimum " + value_text(*def, b.min);
+        if (n > b.max && b.fixed) return "settings." + m.first + ": " + value_text(*def, n) + " is above the maximum " + value_text(*def, b.max);
         if (n > b.max) return "settings." + m.first + ": " + value_text(*def, n) + " is above the ceiling " + value_text(*def, b.max) + " set by [control] site_limits (root raises it in the configuration file)";
         if (std::string_view(def->type) == "size") out.set(m.first, size_text(n));
         else out.set(m.first, static_cast<double>(n));
@@ -122,11 +134,20 @@ json::Value effective_settings(const SiteConfig& site, const Config& cfg) {
         out.set(key, json::Value::object().set("value", std::move(value)).set("source", source));
     };
     put("max_body_size", size_text(body_limit_of(site, cfg)), site.max_body_size ? "site" : "server");
+    // A site that proxies: the options of its application's location ("/", the preset's; else its
+    // first proxy location), not of a path it streams (stream_paths).
+    const LocationConfig* app = nullptr;
     for (const auto& loc : site.locations)
-        if (loc.kind == HandlerKind::proxy) {  // a site that proxies: whose its idle origin connections are
-            put("proxy_pool", loc.proxy.options.shared_pool ? "shared" : "worker", loc.proxy.options.shared_pool ? "site" : "default");
-            break;
-        }
+        if (loc.kind == HandlerKind::proxy && (!app || loc.path == "/")) app = &loc;
+    if (app) {
+        const UpstreamOptions& o = app->proxy.options;
+        put("proxy_pool", o.shared_pool ? "shared" : "worker", o.shared_pool ? "site" : "default");
+        put("proxy_buffering", o.buffering ? "on" : "off", o.buffering ? "default" : "site");
+        const auto read_s = static_cast<double>(o.read_timeout.count() / 1000);
+        put("proxy_read_timeout", read_s, read_s != 60 ? "site" : "default");
+        put("proxy_tunnel_timeout", static_cast<double>(app->proxy.tunnel_timeout_s), app->proxy.tunnel_timeout_s != 0 ? "site" : "default");
+        put("proxy_max_connections", static_cast<double>(o.max_connections), o.max_connections != 256 ? "site" : "default");
+    }
     if (!site.pool.generated) return out;  // the pool keys exist only with a generated pool
     const PhpPool& p = site.pool;
     put("memory_limit", size_text(parse_size(p.memory_limit)), p.memory_limit != defaults.memory_limit ? "site" : "default");
@@ -154,7 +175,7 @@ json::Value settings_catalog(const Config& cfg, const SiteConfig* site) {
                 .set("default_from", std::string_view(d.key) == "max_body_size" ? "[server] max_body_size" : "built in")
                 .set("minimum", size ? json::Value(size_text(b.min)) : json::Value(static_cast<double>(b.min)))
                 .set("maximum", size ? json::Value(size_text(b.max)) : json::Value(static_cast<double>(b.max)))
-                .set("maximum_from", "[control] site_limits");
+                .set("maximum_from", b.fixed ? "built in" : "[control] site_limits");
             if (size) v.set("spellings", "\"200MB\", \"512M\", \"1GB\" or bytes");
         }
         v.set("applies", d.applies).set("derives", d.derives).set("needs_user", d.pool);

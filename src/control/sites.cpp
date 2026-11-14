@@ -101,6 +101,7 @@ json::Value SiteSpec::to_json() const {
     if (!response_headers_offer_declined.empty()) v.set("response_headers_offer_declined", strings(response_headers_offer_declined));
     if (response_compression.is_object() && !response_compression.members().empty()) v.set("response_compression", response_compression);
     if (!login_paths.empty()) v.set("login_paths", strings(login_paths));
+    if (!stream_paths.empty()) v.set("stream_paths", strings(stream_paths));
     if (!public_archives.empty()) v.set("public_archives", strings(public_archives));
     if (!mime_types.empty()) v.set("mime_types", mime_types_json(mime_types));
     if (!access_log.empty()) v.set("access_log", access_log);
@@ -162,6 +163,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.response_headers_offer_declined = string_list(v["response_headers_offer_declined"]);
     if (v["response_compression"].is_object()) out.response_compression = v["response_compression"];
     out.login_paths = string_list(v["login_paths"]);
+    out.stream_paths = string_list(v["stream_paths"]);
     out.public_archives = string_list(v["public_archives"]);
     if (v["mime_types"].type() == json::Value::Type::object) (void)load_mime_types(v["mime_types"], out.mime_types, true);  // the TOML below is judged by the load
     if (out.settings["children"].type() == json::Value::Type::number) out.php_children = static_cast<int>(out.settings["children"].num());
@@ -769,7 +771,7 @@ const std::vector<std::string_view>& site_request_fields() {
     static const std::vector<std::string_view> fields = {
         "domain", "aliases", "canonical", "https", "redirect_http", "hsts", "encoded_slashes", "app", "root", "served_dir", "env_file", "upstream", "project", "entry", "user",
         "no_user", "group", "php_socket", "php_children", "php_version", "settings", "rules", "redirects", "response_headers",
-        "response_headers_baseline", "response_headers_offer_declined", "response_compression", "login_paths", "public_archives", "mime_types", "trusted_proxies",
+        "response_headers_baseline", "response_headers_offer_declined", "response_compression", "login_paths", "stream_paths", "public_archives", "mime_types", "trusted_proxies",
         "access_log_exclude_paths", "access_log_keep_days", "listen_plain", "listen_tls", "confirm", "reason", "dry_run", "cut_requests", "ignore_requirements"};
     return fields;
 }
@@ -1076,10 +1078,12 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             error = bad;
             return needs;
         }
-        if (normalised.is_object() && !normalised["proxy_pool"].is_null() && !proxy_app(spec.app)) {
-            error = "settings.proxy_pool is for a site that proxies to an application (app proxy, rails, redmine, django, wagtail or node): this site has no upstream of its own";
-            return needs;
-        }
+        if (normalised.is_object() && !proxy_app(spec.app))
+            for (const auto& m : normalised.members())
+                if (m.first.starts_with("proxy_")) {
+                    error = "settings." + m.first + " is for a site that proxies to an application (app proxy, rails, redmine, django, wagtail or node): this site has no upstream of its own";
+                    return needs;
+                }
         if (!spec.settings.is_object()) spec.settings = json::Value::object();
         for (const auto& m : normalised.members()) spec.settings.set(m.first, m.second);
         if (!spec.settings["children"].is_null()) spec.php_children = static_cast<int>(spec.settings["children"].num());
@@ -1236,6 +1240,41 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             if (std::find(lp.begin(), lp.end(), std::string(p.str())) == lp.end()) lp.emplace_back(p.str());
         }
         spec.login_paths = lp;
+    }
+    // The paths answered as they arrive (0.1.0-alpha.147): given whole, each a plain path, at most 16,
+    // [] or null clears them. On a site that proxies only: its upstream is what the locations name.
+    if (given(body, "stream_paths") && body["stream_paths"].is_null()) spec.stream_paths.clear();
+    else if (has_key(body, "stream_paths")) {
+        if (!body["stream_paths"].is_array()) {
+            error = "stream_paths must be a list of URL paths: [\"/events\", \"/api/chat/\"] ([] clears them)";
+            return needs;
+        }
+        if (body["stream_paths"].items().size() > 16) {
+            error = "stream_paths: at most 16 paths";
+            return needs;
+        }
+        std::vector<std::string> sp;
+        for (const auto& p : body["stream_paths"].items()) {
+            if (!p.is_string()) {
+                error = "stream_paths: each entry is a string path (\"/events\")";
+                return needs;
+            }
+            const std::string path(p.str());
+            if (const std::string why = check_access_path(path); !why.empty()) {
+                error = "stream_paths: " + why;
+                return needs;
+            }
+            if (path == "/") {
+                error = "stream_paths: \"/\" is the whole site; for an application that streams everything set settings.proxy_buffering to off";
+                return needs;
+            }
+            if (std::find(sp.begin(), sp.end(), path) == sp.end()) sp.push_back(path);
+        }
+        spec.stream_paths = sp;
+    }
+    if (!spec.stream_paths.empty() && !proxy_app(spec.app)) {
+        error = "stream_paths is for a site that proxies to an application (app proxy, rails, redmine, django, wagtail or node); a PHP script that streams gets its location in the site's root additions file (site_show names it; docs/examples/compression.md). stream_paths: [] clears the list";
+        return needs;
     }
     // The archives and dumps served on purpose (2026-10-17): given whole, each a path as served
     // (check_public_archive), at most 64, [] or null clears them (null answered ok and kept the list
@@ -1526,6 +1565,24 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     return needs;
 }
 
+// The proxy_* settings as keys of the site's proxy table: only what was set, each under the file's
+// own name.
+static std::string proxy_settings_keys(const SiteSpec& spec) {
+    std::string keys;
+    if (!spec.settings.is_object()) return keys;
+    auto add = [&](const std::string& text) { keys += (keys.empty() ? "" : ", ") + text; };
+    auto number = [&](const char* setting, const char* key) {
+        if (spec.settings[setting].type() == json::Value::Type::number)
+            add(std::string(key) + " = " + std::to_string(static_cast<long long>(spec.settings[setting].num())));
+    };
+    if (spec.settings.get("proxy_pool") == "shared") add("pool = \"shared\"");
+    if (spec.settings.get("proxy_buffering") == "off") add("buffering = false");
+    number("proxy_read_timeout", "read_timeout");
+    number("proxy_tunnel_timeout", "tunnel_timeout");
+    number("proxy_max_connections", "max_connections");
+    return keys;
+}
+
 std::string render_site(const SiteSpec& spec, std::string_view stamp) {
     std::string out;
     out += std::string(kManagedMarker) + spec.to_json().dump() + "\n";
@@ -1538,8 +1595,8 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
     auto site_body = [&](std::string& s) {
         if (proxy_app(spec.app)) {
             s += "app = " + toml_string(spec.app) + "\nupstream = " + toml_string(spec.upstream) + "\n";
-            if (spec.settings.is_object() && spec.settings.get("proxy_pool") == "shared")
-                s += "proxy = { pool = \"shared\" }   # settings.proxy_pool: idle connections to the application shared by the workers\n";
+            if (const std::string keys = proxy_settings_keys(spec); !keys.empty())
+                s += "proxy = { " + keys + " }   # settings.proxy_*: how the site talks to its application\n";
             if (!spec.root.empty()) s += "root = " + toml_string(spec.root) + "\n";
             if (python_app(spec.app) && !spec.project.empty()) s += "project = " + toml_string(spec.project) + "\n";
             if (node_app(spec.app) && !spec.entry.empty()) s += "entry = " + toml_string(spec.entry) + "\n";
@@ -1721,6 +1778,12 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         out += "   # this site's own; every other field from the main file's [response_compression] (docs/configuration.md 20)\n";
     }
     rules_locations(out);
+    // The paths answered as they arrive (stream_paths): a location each, with the site's upstream and
+    // buffering off; the site's own proxy table gives the location its other keys.
+    if (proxy_app(spec.app))
+        for (const auto& p : spec.stream_paths)
+            out += "\n[[site.location]]   # stream_paths: answered as it arrives\npath = " + toml_string(p) + "\nupstream = " + toml_string(spec.upstream) +
+                   "\nproxy = { buffering = false }\n";
     // Path redirects as the site file's own tables; their keys are the reference's (load_redirect_rules
     // refused any other), their values strings or numbers.
     for (const auto& r : spec.redirects.items()) {

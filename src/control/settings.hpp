@@ -1,6 +1,7 @@
 // Per-site settings through the control plane (F10): an allowlist of named, typed
 // resource limits, each moving within a ceiling the root-owned configuration sets
-// ([control] site_limits). One table drives what site-create/site-update accept, what the
+// ([control] site_limits), and, for a site that proxies, how it talks to its application
+// (proxy_*: the pool, buffering, two timeouts, the connections at once; fixed ranges). One table drives what site-create/site-update accept, what the
 // catalogue advertises (`settings`, the MCP tool site_settings_list) and the MCP schema,
 // so the three cannot drift. Nothing here can widen a site's authority: no ini map, no
 // open_basedir, no path; those stay in the file, root's.
