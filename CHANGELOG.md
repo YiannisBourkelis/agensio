@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.0-alpha.147 (unreleased)
+
+- **Bench: agensio against Pingora as a reverse proxy.** `bench/pingora/` holds a proxy program
+  built on Pingora 0.9.1, Cloudflare's Rust framework, written as Pingora's own examples are, and
+  `run.sh`, which puts it and agensio in front of the benchmark upstream through six groups: plain
+  HTTP/1.1, HTTPS, HTTP/2, a fixed mix of requests, 2,000 origins chosen by Host, and memory with
+  10,000 idle client connections. Both forward the same fields, write no access log, and run
+  alone on their cores. The README there has the method, what is equal and what is not, and the
+  results of 2026-11-14 (`bench/results/pingora-20261114-002148.md`, three rounds; an unpinned
+  cross-check in `pingora-20261114-004439.md`):
+  - CPU per request: agensio spends 1.2 to 2.1 times less on every row (small JSON 7.75 against
+    12.88 us, HTTPS 8.98 against 15.37, the request mix 16.5 against 24.4).
+  - Idle client connections: 14.0 against 35.9 KB each plain, 71 against 116 KB over TLS.
+  - Pingora uses less memory under load with large bodies (the mix: 37.5 against 60 MB), and with
+    2,000 origins and four workers it opens a third of the connections to origins and holds 49 MB
+    against agensio's 335: its one shared pool against agensio's pool per worker.
+  The benchmark upstream takes `-a ADDRESS` (`-a 0.0.0.0` answers on all of 127.0.0.0/8, so one
+  process stands for thousands of origins). No server code changed.
+
 ## 0.1.0-alpha.146 (2026-11-14)
 
 - **Security fix: the pseudo-headers of an HTTP/2 or HTTP/3 request are held to HTTP/1's rules.**

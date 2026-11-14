@@ -21,7 +21,9 @@
 //   /host-redirect  302 to http://<the Host it was sent>/json (https:// with ?https): an application
 //                   building its absolute redirects from Host (a proxy's rewrite of the name it gave)
 //   /stats          {"connections":N,"requests":M} accepted so far: proves pool reuse
-// Build: target agensio_upstream. Run: agensio_upstream [-p 9100] [-w 1] [-b 102400].
+// Build: target agensio_upstream. Run: agensio_upstream [-p 9100] [-w 1] [-b 102400] [-a 127.0.0.1].
+// -a 0.0.0.0 answers on every address of 127.0.0.0/8, so one process stands for thousands of
+// origins, each its own address (bench/pingora/run.sh, the many-origins rows).
 #include <asio.hpp>
 
 #include <atomic>
@@ -401,13 +403,15 @@ int main(int argc, char** argv) {
     unsigned short port = 9100;
     unsigned workers = 1;
     std::size_t big = 100 * 1024;
+    std::string address = "127.0.0.1";
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::string_view a = argv[i];
         if (a == "-p") port = static_cast<unsigned short>(std::atoi(argv[i + 1]));
         else if (a == "-w") workers = static_cast<unsigned>(std::atoi(argv[i + 1]));
         else if (a == "-b") big = static_cast<std::size_t>(std::atol(argv[i + 1]));
+        else if (a == "-a") address = argv[i + 1];
         else {
-            std::fprintf(stderr, "usage: agensio_upstream [-p port] [-w workers] [-b big-body-bytes]\n");
+            std::fprintf(stderr, "usage: agensio_upstream [-p port] [-w workers] [-b big-body-bytes] [-a address]\n");
             return 2;
         }
     }
@@ -461,10 +465,10 @@ int main(int argc, char** argv) {
 #endif
     std::vector<std::thread> threads;
     for (unsigned w = 0; w < workers; ++w) {
-        threads.emplace_back([port] {
+        threads.emplace_back([port, address] {
             asio::io_context ctx(1);
             asio::ip::tcp::acceptor acc(ctx);
-            const asio::ip::tcp::endpoint ep(asio::ip::make_address("127.0.0.1"), port);
+            const asio::ip::tcp::endpoint ep(asio::ip::make_address(address), port);
             acc.open(ep.protocol());
             acc.set_option(asio::socket_base::reuse_address(true));
 #ifdef SO_REUSEPORT
@@ -477,7 +481,7 @@ int main(int argc, char** argv) {
             ctx.run();
         });
     }
-    std::printf("upstream on 127.0.0.1:%u, %u worker(s), /big is %zu bytes\n", port, workers, g_big.size());
+    std::printf("upstream on %s:%u, %u worker(s), /big is %zu bytes\n", address.c_str(), port, workers, g_big.size());
     std::fflush(stdout);
     for (auto& t : threads) t.join();
     return 0;

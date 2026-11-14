@@ -1,0 +1,6 @@
+2026/11/14 00:34:41 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
+2026/11/14 00:34:41 [warn] the record of the site files served could not be written (cannot write /var/lib/agensio/.server/served.tmp): at the next start a conflict between site files is decided by load order, not by what is served now
+agensio 0.1.0-alpha.146 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:8093 (h1)  sites: *
+  listening on https://127.0.0.1:8493 (h2, h1)  sites: *
+agensio stopped

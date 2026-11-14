@@ -1,0 +1,96 @@
+proxy	/json, 64 conns	1	direct	1	1468241.40	28.00us	770.00us	2.63	-	-	5.5	-
+proxy	/big 100 KB, 64 conns	1	direct	1	295456.72	131.00us	3.92ms	11.91	-	-	5.6	-
+proxy	/json, 64 conns	1	agensio	1	121863.78	550.00us	793.00us	8.19	1	0.00	18.4	-
+proxy	/json, 16 conns	1	agensio	1	135749.41	111.00us	183.00us	7.36	1	0.00	17.2	-
+proxy	/big 100 KB, 64 conns	1	agensio	1	33011.21	1.88ms	2.83ms	30.32	1	0.00	26.8	-
+proxy	/slow 20 ms, 256 conns	1	agensio	1	12583.85	20.04ms	22.85ms	9.26	193	1.53	27.2	-
+proxy	/json, 64 conns	1	pingora	1	78114.18	790.00us	1.11ms	12.76	1	0.00	20.1	-
+proxy	/json, 16 conns	1	pingora	1	71158.55	236.00us	292.00us	14.04	1	0.00	20.1	-
+proxy	/big 100 KB, 64 conns	1	pingora	1	21551.89	2.93ms	3.99ms	46.40	1	0.00	20.1	-
+proxy	/slow 20 ms, 256 conns	1	pingora	1	12516.04	20.04ms	25.11ms	17.76	225	1.79	28.7	-
+tls	/json, 64 conns	1	agensio	1	125993.13	498.00us	676.00us	7.94	1	0.00	22.1	-
+tls	/big 100 KB, 64 conns	1	agensio	1	19957.51	3.16ms	4.54ms	50.10	1	0.01	32.2	-
+tls	/json, 64 conns	1	pingora	1	68302.96	0.90ms	1.27ms	14.63	1	0.00	21.3	-
+tls	/big 100 KB, 64 conns	1	pingora	1	17878.12	3.49ms	4.76ms	55.88	1	0.01	21.9	-
+h2	/json, 64 conns x 1	1	agensio	1	112493.46	558us (mean)	6.55ms (max)	8.88	5	0.00	22.8	-
+h2	/json, 64 conns x 10	1	agensio	1	127382.99	5.02ms (mean)	9.95ms (max)	7.86	257	0.24	32.4	-
+h2	/big 100 KB, 64 conns x 10	1	agensio	1	16065.82	38.84ms (mean)	55.05ms (max)	62.18	234	1.47	79.6	-
+h2	/json, 64 conns x 1	1	pingora	1	61059.58	1.04ms (mean)	9.96ms (max)	16.38	2	0.00	24.0	-
+h2	/json, 64 conns x 10	1	pingora	1	83536.59	7.47ms (mean)	183.95ms (max)	11.97	282	0.32	31.9	-
+h2	/big 100 KB, 64 conns x 10	1	pingora	1	11889.59	52.70ms (mean)	201.91ms (max)	84.04	127	1.02	64.0	-
+mixed	mixed traffic, 256 conns	1	agensio	1	57841.35	4.00ms	14.63ms	17.15	193	0.33	60.0	-
+mixed	mixed traffic, 256 conns	1	pingora	1	40246.46	5.85ms	16.59ms	24.65	183	0.45	37.5	-
+mixed	mixed traffic, 256 conns	4	agensio	1	239122.66	682.00us	10.71ms	16.60	193	0.08	64.0	-
+mixed	mixed traffic, 256 conns	4	pingora	1	138935.28	1.47ms	11.71ms	27.80	193	0.14	45.9	-
+origins	2000 origins, cold	1	agensio	1	97878.06	2.62ms	38.54ms	9.85	5375	5.44	149.0	-
+origins	2000 origins, warm	1	agensio	1	112043.71	2.30ms	3.11ms	8.91	507	0.45	157.2	-
+origins	2000 origins, cold	1	pingora	1	54207.46	4.59ms	25.61ms	18.06	4856	8.87	41.2	-
+origins	2000 origins, warm	1	pingora	1	53513.63	4.75ms	6.77ms	18.69	426	0.79	56.1	-
+origins	2000 origins, cold	4	agensio	1	367316.39	647.00us	37.95ms	10.05	16626	4.48	335.0	-
+origins	2000 origins, warm	4	agensio	1	348346.60	668.00us	4.77ms	9.96	533	0.15	343.5	-
+origins	2000 origins, cold	4	pingora	1	186614.18	1.32ms	15.46ms	20.12	5904	3.13	48.8	-
+origins	2000 origins, warm	4	pingora	1	192079.46	1.30ms	2.99ms	19.98	286	0.15	64.7	-
+proxy	/json, 64 conns	1	direct	2	1312916.47	26.00us	3.53ms	2.70	-	-	289.5	-
+proxy	/big 100 KB, 64 conns	1	direct	2	308276.45	155.00us	3.22ms	12.34	-	-	289.5	-
+proxy	/json, 64 conns	1	agensio	2	139348.74	441.00us	660.00us	7.17	1	0.00	18.7	-
+proxy	/json, 16 conns	1	agensio	2	139227.71	110.00us	173.00us	7.18	1	0.00	17.4	-
+proxy	/big 100 KB, 64 conns	1	agensio	2	33260.99	1.90ms	2.64ms	30.06	1	0.00	27.3	-
+proxy	/slow 20 ms, 256 conns	1	agensio	2	12565.16	20.05ms	24.13ms	9.28	193	1.53	27.4	-
+proxy	/json, 64 conns	1	pingora	2	76078.94	803.00us	1.17ms	13.13	1	0.00	19.9	-
+proxy	/json, 16 conns	1	pingora	2	70930.62	235.00us	290.00us	14.09	1	0.00	19.9	-
+proxy	/big 100 KB, 64 conns	1	pingora	2	21768.13	2.90ms	3.59ms	45.94	1	0.00	19.9	-
+proxy	/slow 20 ms, 256 conns	1	pingora	2	12588.97	20.04ms	23.57ms	16.62	237	1.88	28.5	-
+tls	/json, 64 conns	1	agensio	2	103190.96	618.00us	823.00us	9.69	1	0.00	22.1	-
+tls	/big 100 KB, 64 conns	1	agensio	2	20864.70	3.02ms	4.10ms	47.93	1	0.00	32.6	-
+tls	/json, 64 conns	1	pingora	2	66914.22	0.93ms	1.30ms	14.96	1	0.00	21.2	-
+tls	/big 100 KB, 64 conns	1	pingora	2	18633.21	3.38ms	4.36ms	53.67	1	0.01	22.1	-
+h2	/json, 64 conns x 1	1	agensio	2	97740.26	652us (mean)	5.29ms (max)	10.23	2	0.00	22.7	-
+h2	/json, 64 conns x 10	1	agensio	2	110475.09	5.78ms (mean)	11.59ms (max)	9.05	235	0.22	32.2	-
+h2	/big 100 KB, 64 conns x 10	1	agensio	2	16418.51	38.13ms (mean)	53.16ms (max)	60.86	237	1.39	89.2	-
+h2	/json, 64 conns x 1	1	pingora	2	66938.35	952us (mean)	8.06ms (max)	14.93	1	0.00	23.9	-
+h2	/json, 64 conns x 10	1	pingora	2	86273.50	7.19ms (mean)	172.26ms (max)	11.54	316	0.38	32.6	-
+h2	/big 100 KB, 64 conns x 10	1	pingora	2	12174.52	51.48ms (mean)	182.60ms (max)	82.08	98	0.80	47.0	-
+mixed	mixed traffic, 256 conns	1	agensio	2	63097.75	3.65ms	13.92ms	15.77	139	0.22	59.3	-
+mixed	mixed traffic, 256 conns	1	pingora	2	39817.72	5.95ms	16.36ms	24.97	167	0.42	37.6	-
+mixed	mixed traffic, 256 conns	4	agensio	2	239512.49	640.00us	10.72ms	16.16	193	0.08	64.3	-
+mixed	mixed traffic, 256 conns	4	pingora	2	140074.31	1.46ms	11.71ms	27.55	193	0.14	41.1	-
+origins	2000 origins, cold	1	agensio	2	105960.10	2.36ms	70.28ms	9.25	5374	5.02	148.9	-
+origins	2000 origins, warm	1	agensio	2	107906.31	2.37ms	3.44ms	9.26	463	0.42	156.4	-
+origins	2000 origins, cold	1	pingora	2	51438.91	4.83ms	29.78ms	19.02	4849	9.34	41.2	-
+origins	2000 origins, warm	1	pingora	2	52049.33	4.88ms	6.90ms	19.19	451	0.86	56.3	-
+origins	2000 origins, cold	4	agensio	2	330317.02	647.00us	22.34ms	9.92	16546	4.96	333.6	-
+origins	2000 origins, warm	4	agensio	2	354449.03	657.00us	4.79ms	9.85	613	0.17	343.3	-
+origins	2000 origins, cold	4	pingora	2	187989.28	1.31ms	23.71ms	19.75	5907	3.11	51.2	-
+origins	2000 origins, warm	4	pingora	2	191338.45	1.30ms	3.23ms	19.84	297	0.15	65.7	-
+proxy	/json, 64 conns	1	direct	3	1460986.93	30.00us	1.14ms	2.61	-	-	290.0	-
+proxy	/big 100 KB, 64 conns	1	direct	3	333172.87	117.00us	2.10ms	11.57	-	-	290.0	-
+proxy	/json, 64 conns	1	agensio	3	126747.41	501.00us	708.00us	7.89	1	0.00	18.5	-
+proxy	/json, 16 conns	1	agensio	3	143921.61	110.00us	151.00us	6.94	1	0.00	17.2	-
+proxy	/big 100 KB, 64 conns	1	agensio	3	32942.30	1.90ms	2.71ms	30.36	1	0.00	27.2	-
+proxy	/slow 20 ms, 256 conns	1	agensio	3	12552.64	20.05ms	24.35ms	9.22	193	1.53	27.3	-
+proxy	/json, 64 conns	1	pingora	3	78360.09	793.00us	1.11ms	12.75	1	0.00	20.2	-
+proxy	/json, 16 conns	1	pingora	3	80467.89	207.00us	256.00us	12.43	1	0.00	20.2	-
+proxy	/big 100 KB, 64 conns	1	pingora	3	21295.99	2.96ms	4.02ms	46.96	1	0.00	20.2	-
+proxy	/slow 20 ms, 256 conns	1	pingora	3	12530.00	20.04ms	23.59ms	16.99	233	1.85	28.8	-
+tls	/json, 64 conns	1	agensio	3	107538.52	615.00us	805.00us	9.31	1	0.00	22.4	-
+tls	/big 100 KB, 64 conns	1	agensio	3	21033.66	3.00ms	4.01ms	47.54	1	0.00	32.5	-
+tls	/json, 64 conns	1	pingora	3	60506.23	1.02ms	1.47ms	16.53	2	0.00	21.4	-
+tls	/big 100 KB, 64 conns	1	pingora	3	16982.96	3.71ms	5.34ms	58.83	1	0.01	22.2	-
+h2	/json, 64 conns x 1	1	agensio	3	111424.31	571us (mean)	4.75ms (max)	8.96	18	0.02	22.5	-
+h2	/json, 64 conns x 10	1	agensio	3	131463.84	4.71ms (mean)	11.77ms (max)	7.60	182	0.13	32.2	-
+h2	/big 100 KB, 64 conns x 10	1	agensio	3	16393.45	38.16ms (mean)	51.87ms (max)	60.99	236	1.39	65.5	-
+h2	/json, 64 conns x 1	1	pingora	3	65438.84	974us (mean)	7.87ms (max)	15.28	3	0.00	23.9	-
+h2	/json, 64 conns x 10	1	pingora	3	83377.20	7.48ms (mean)	149.90ms (max)	11.99	232	0.26	31.6	-
+h2	/big 100 KB, 64 conns x 10	1	pingora	3	12028.48	52.23ms (mean)	196.58ms (max)	83.05	173	1.40	56.3	-
+mixed	mixed traffic, 256 conns	1	agensio	3	59785.59	3.81ms	14.22ms	16.68	168	0.28	58.9	-
+mixed	mixed traffic, 256 conns	1	pingora	3	42459.27	5.44ms	15.99ms	23.46	172	0.40	37.7	-
+mixed	mixed traffic, 256 conns	4	agensio	3	246738.88	619.00us	10.67ms	16.00	193	0.08	64.0	-
+mixed	mixed traffic, 256 conns	4	pingora	3	136829.85	1.49ms	11.85ms	27.90	194	0.14	41.3	-
+origins	2000 origins, cold	1	agensio	3	103543.18	2.42ms	43.80ms	9.49	5315	5.08	148.1	-
+origins	2000 origins, warm	1	agensio	3	105674.05	2.40ms	3.64ms	9.45	485	0.45	156.1	-
+origins	2000 origins, cold	1	pingora	3	51064.87	4.83ms	25.46ms	19.22	4837	9.38	40.9	-
+origins	2000 origins, warm	1	pingora	3	50888.13	4.92ms	7.52ms	19.61	427	0.83	56.0	-
+origins	2000 origins, cold	4	agensio	3	306745.98	671.00us	30.95ms	10.03	16438	5.31	331.8	-
+origins	2000 origins, warm	4	agensio	3	354926.28	655.00us	4.81ms	9.92	577	0.16	341.2	-
+origins	2000 origins, cold	4	pingora	3	189533.08	1.30ms	24.63ms	19.87	5917	3.09	50.6	-
+origins	2000 origins, warm	4	pingora	3	192289.24	1.30ms	2.87ms	19.86	292	0.15	64.3	-

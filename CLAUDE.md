@@ -1253,6 +1253,23 @@ applications key their login limits and logs on it. WebSocket-shaped echo throug
 of CPU per 1 KB message crossing the proxy twice, parity; the Python load generator
 bounds the rate at about 137k msg/s.
 
+Against Pingora (2026-11-14, `bench/pingora/`, `bench/results/pingora-20261114-002148.md`, README there):
+Cloudflare's Rust proxy framework, 0.9.1, as a proxy program written like its own examples
+(`bench/pingora/proxy`, built by `bench/pingora/build.sh` in a Rust container), both in front of the
+benchmark upstream, the same forwarded fields, the proxy pinned alone on its cores (so the absolute
+values are above the unpinned harnesses': the same row is 5.0 us unpinned and 7.0 to 7.8 pinned, every
+wake-up crossing cores). agensio spends 1.2 to 2.1 times less CPU per request on every row (small JSON
+7.75 against 12.88 us, HTTPS 8.98 against 15.37, HTTP/2 at ten streams 8.17 against 11.83, a request
+mix over HTTPS 16.5 against 24.4, the 100 KB body over TLS the closest at 48.5 against 56.1) and holds
+less per idle client connection (14.0 against 35.9 KB plain, 71 against 116 KB over TLS). Pingora wins
+two things. Memory under load with large bodies (the mix: 60 against 37.5 MB; agensio buffers an
+origin's answer by default, the likely cause, not measured apart). And many origins with several
+workers: 2,000 origins by Host, four workers, agensio opens 2.8 times the connections (a pool per
+worker against Pingora's one shared pool) and holds 335 MB against 49, about 17 KB per kept origin
+connection, which is the row Pingora was built for. Seen there and not acted on: an idle TLS client
+connection costs agensio 71 KB against 14 KB plain (OpenSSL's buffers), and a kept origin connection
+17 KB.
+
 HTTP/2 (G0, 2026-09-23, `bench/results/ab-20260923-171228.md`, `h2-20260923-164706.md`
 for nginx and Caddy, `h2-20260923-171144.md` for agensio's final rows; one worker, h2load
 4 threads): the HTTP/1 rows of the A/B moved 0.98 to 1.04 (noise), so HTTP/1 pays nothing.

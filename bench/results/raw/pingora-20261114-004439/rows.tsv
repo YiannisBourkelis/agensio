@@ -1,0 +1,16 @@
+proxy	/json, 64 conns	1	direct	1	1368816.92	35.00us	1.18ms	2.78	-	-	5.5	-
+proxy	/big 100 KB, 64 conns	1	direct	1	347568.45	117.00us	0.99ms	10.76	-	-	5.6	-
+proxy	/json, 64 conns	1	agensio	1	192269.37	316.00us	487.00us	5.20	1	0.00	18.4	-
+proxy	/json, 16 conns	1	agensio	1	192537.82	78.00us	140.00us	5.19	1	0.00	17.1	-
+proxy	/big 100 KB, 64 conns	1	agensio	1	50186.32	1.20ms	2.15ms	19.91	1	0.00	26.8	-
+proxy	/slow 20 ms, 256 conns	1	agensio	1	12625.98	20.03ms	21.31ms	7.81	193	1.52	27.2	-
+proxy	/json, 64 conns	1	pingora	1	89475.71	690.00us	1.10ms	11.17	1	0.00	19.9	-
+proxy	/json, 16 conns	1	pingora	1	93813.13	176.00us	233.00us	10.66	1	0.00	19.9	-
+proxy	/big 100 KB, 64 conns	1	pingora	1	27794.39	2.30ms	3.31ms	35.98	1	0.00	19.9	-
+proxy	/slow 20 ms, 256 conns	1	pingora	1	12600.77	20.04ms	21.99ms	16.67	193	1.52	28.3	-
+tls	/json, 64 conns	1	agensio	1	162350.26	375.00us	612.00us	6.15	1	0.00	23.2	-
+tls	/big 100 KB, 64 conns	1	agensio	1	28521.10	2.16ms	3.48ms	35.06	1	0.00	32.3	-
+tls	/json, 64 conns	1	pingora	1	79421.87	774.00us	1.14ms	12.59	1	0.00	21.2	-
+tls	/big 100 KB, 64 conns	1	pingora	1	26604.82	2.29ms	3.71ms	37.55	1	0.00	22.0	-
+mixed	mixed traffic, 256 conns	1	agensio	1	79256.68	2.77ms	13.11ms	12.57	141	0.18	59.8	-
+mixed	mixed traffic, 256 conns	1	pingora	1	46861.63	4.79ms	15.70ms	21.21	177	0.38	37.5	-
