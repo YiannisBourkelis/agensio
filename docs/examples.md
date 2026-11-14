@@ -100,6 +100,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [An IoT platform with device telemetry (ThingsBoard)](examples/proxy.md#an-iot-platform-with-device-telemetry-thingsboard): many small device posts, the per-worker pool and queue.
 - [One path of a PHP site sent to another service](examples/proxy.md#one-path-of-a-php-site-sent-to-another-service): an `/api/` location with the prefix replaced, `final`, the root additions file.
 - [Two application servers with passive health](examples/proxy.md#two-application-servers-with-passive-health): an upstream list, `max_fails`, restarts one at a time.
+- [Fewer connections to the application: a pool shared by the workers](examples/proxy.md#fewer-connections-to-the-application-a-pool-shared-by-the-workers): `proxy.pool = "shared"`, when it helps and what it does not change.
 - [An origin over HTTPS](examples/proxy.md#an-origin-over-https): `proxy.tls` with `ca` and `server_name`, and why the name matters.
 - [Choose the headers the origin and the client see](examples/proxy.md#choose-the-headers-the-origin-and-the-client-see): `host`, `headers`, `hide`, `forwarded`, merged per location.
 - [Stream server-sent events and long downloads](examples/proxy.md#stream-server-sent-events-and-long-downloads): `buffering = false`, `request_buffering = false`, `handler = "proxy"`.

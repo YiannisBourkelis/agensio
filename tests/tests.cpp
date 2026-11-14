@@ -7326,6 +7326,18 @@ static void test_control_sites() {
             // execution or the end of the sandbox are refused by name, as unknown.
             for (const char* key : {"sendmail_path", "auto_prepend_file", "extension", "zend_extension", "disable_functions", "open_basedir", "extra", "error_log", "session.save_path", "php_admin_value[x]"})
                 CHECK(refused((std::string("{\"") + key + "\":\"/bin/sh\"}").c_str(), true, "unknown setting"));
+            // proxy_pool (docs/design-upstream-pool.md): an enum of its own, no user needed, worker by default.
+            {
+                json::Value g, o;
+                json::parse(R"({"proxy_pool":"Shared"})", g, e2);
+                CHECK(apply_settings(g, loaded, false, o).empty() && o.get("proxy_pool") == "shared");
+                CHECK(refused(R"({"proxy_pool":"global"})", false, "not one of worker, shared"));
+                bool listed = false;
+                const json::Value catalog = settings_catalog(loaded, nullptr);  // kept: the loop reads into it
+                for (const auto& d : catalog["settings"].items())
+                    if (d.get("key") == "proxy_pool") listed = d.get("default") == "worker" && !d["needs_user"].boolean() && d["options"].items().size() == 2;
+                CHECK(listed);
+            }
             // Pool keys need a site with its own user; max_body_size does not.
             CHECK(refused(R"({"memory_limit":"64M"})", false, "needs a PHP site with its own user"));
             json::Value o2, g2;
@@ -7365,6 +7377,37 @@ static void test_control_sites() {
                 }
             }
             std::filesystem::remove(dir / "sites.d" / "tuned.toml");
+            // settings.proxy_pool on a proxying site: rendered as the site's proxy table, loaded as the
+            // option on its location, shown as the site's own value; without it, the default.
+            {
+                SiteSpec app;
+                app.domain = "pool.test";
+                app.app = "proxy";
+                app.upstream = "http://127.0.0.1:9100";
+                app.https = "none";
+                app.listen_plain = "127.0.0.1:18099";
+                const std::string plain = render_site(app, "x");
+                CHECK(plain.find("pool = ") == std::string::npos);
+                app.settings = json::Value::object().set("proxy_pool", "shared");
+                const std::string shared = render_site(app, "x");
+                CHECK(shared.find("proxy = { pool = \"shared\" }") != std::string::npos);
+                for (const auto& [text, want] : {std::pair<const std::string&, bool>{plain, false}, {shared, true}}) {
+                    std::ofstream(dir / "sites.d" / "pool.toml") << text;
+                    Config pcfg;
+                    bool ok_load = true;
+                    try { pcfg = load_config(dir / "agensio.toml"); } catch (const std::exception& ex) { ok_load = false; std::printf("pool: %s\n", ex.what()); }
+                    CHECK(ok_load);
+                    const SiteConfig* ps = nullptr;
+                    for (const auto& st : pcfg.sites) if (!st.server_names.empty() && st.server_names.front() == "pool.test") ps = &st;
+                    CHECK(ps != nullptr);
+                    if (ps) {
+                        CHECK(Router::location(*ps, "/").proxy.options.shared_pool == want);
+                        const json::Value eff = effective_settings(*ps, pcfg);
+                        CHECK(eff["proxy_pool"].get("value") == (want ? "shared" : "worker") && eff["proxy_pool"].get("source") == (want ? "site" : "default"));
+                    }
+                }
+                std::filesystem::remove(dir / "sites.d" / "pool.toml");
+            }
             std::filesystem::rename(dir / "sites.d" / "shop.test.toml.keep", dir / "sites.d" / "shop.test.toml");
             // [control] site_limits from the file, and a site-level max_body_size.
             std::ofstream(dir / "lim.toml") << "[control]\nsite_limits = { max_body_size = \"64MB\", children = 4 }\n[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\nmax_body_size = \"3MB\"\n";

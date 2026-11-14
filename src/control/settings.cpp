@@ -16,6 +16,8 @@ const std::vector<SettingDef>& setting_defs() {
         {"children", "int", "count", "pm.max_children: how many PHP requests run at once for this site.", "agensio reload and a php-fpm reload", "the FastCGI connection budget per worker", {}, true},
         {"pm", "enum", "", "php-fpm process manager. ondemand (default): a child starts on the first request and exits after 60 s idle, so a quiet site keeps no PHP process resident; dynamic: half the children stay on standby; static: every child stays resident (15 to 25 MB of private memory each), predictable latency, what a benchmark uses. health names each static or dynamic pool with what it keeps.", "agensio reload and a php-fpm reload", "", {"static", "dynamic", "ondemand"}, true},
         {"max_requests", "int", "count", "pm.max_requests: a child is recycled after this many requests (0 = never).", "agensio reload and a php-fpm reload", "", {}, true},
+        {"proxy_pool", "enum", "", "Whose the idle connections to the site's application or origin are, for a site that proxies (proxy.pool in the site file). worker (default): each worker keeps its own, the cheapest for an origin with steady traffic. shared: connections to an origin a worker asks seldom wait in one store for all workers, so the workers together hold a few where each held its own; an origin asked often keeps its connections in the worker at no cost. For an application server that gives each connection a thread or a process, and for an https:// origin (a connection shared is a TLS handshake saved). server_status shows what the store does (upstream_pool).",
+         "agensio reload", "", {"worker", "shared"}, false},
     };
     return defs;
 }
@@ -120,6 +122,11 @@ json::Value effective_settings(const SiteConfig& site, const Config& cfg) {
         out.set(key, json::Value::object().set("value", std::move(value)).set("source", source));
     };
     put("max_body_size", size_text(body_limit_of(site, cfg)), site.max_body_size ? "site" : "server");
+    for (const auto& loc : site.locations)
+        if (loc.kind == HandlerKind::proxy) {  // a site that proxies: whose its idle origin connections are
+            put("proxy_pool", loc.proxy.options.shared_pool ? "shared" : "worker", loc.proxy.options.shared_pool ? "site" : "default");
+            break;
+        }
     if (!site.pool.generated) return out;  // the pool keys exist only with a generated pool
     const PhpPool& p = site.pool;
     put("memory_limit", size_text(parse_size(p.memory_limit)), p.memory_limit != defaults.memory_limit ? "site" : "default");
@@ -139,7 +146,7 @@ json::Value settings_catalog(const Config& cfg, const SiteConfig* site) {
         if (std::string_view(d.type) == "enum") {
             json::Value opts = json::Value::array();
             for (const char* o : d.options) opts.push(o);
-            v.set("options", opts).set("default", PhpPool{}.pm);
+            v.set("options", opts).set("default", std::string_view(d.key) == "pm" ? PhpPool{}.pm : std::string(d.options.front()));
         } else {
             const Bounds b = bounds_of(d, cfg);
             const bool size = std::string_view(d.type) == "size";

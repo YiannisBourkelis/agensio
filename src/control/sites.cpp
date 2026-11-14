@@ -1076,6 +1076,10 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             error = bad;
             return needs;
         }
+        if (normalised.is_object() && !normalised["proxy_pool"].is_null() && !proxy_app(spec.app)) {
+            error = "settings.proxy_pool is for a site that proxies to an application (app proxy, rails, redmine, django, wagtail or node): this site has no upstream of its own";
+            return needs;
+        }
         if (!spec.settings.is_object()) spec.settings = json::Value::object();
         for (const auto& m : normalised.members()) spec.settings.set(m.first, m.second);
         if (!spec.settings["children"].is_null()) spec.php_children = static_cast<int>(spec.settings["children"].num());
@@ -1534,6 +1538,8 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
     auto site_body = [&](std::string& s) {
         if (proxy_app(spec.app)) {
             s += "app = " + toml_string(spec.app) + "\nupstream = " + toml_string(spec.upstream) + "\n";
+            if (spec.settings.is_object() && spec.settings.get("proxy_pool") == "shared")
+                s += "proxy = { pool = \"shared\" }   # settings.proxy_pool: idle connections to the application shared by the workers\n";
             if (!spec.root.empty()) s += "root = " + toml_string(spec.root) + "\n";
             if (python_app(spec.app) && !spec.project.empty()) s += "project = " + toml_string(spec.project) + "\n";
             if (node_app(spec.app) && !spec.entry.empty()) s += "entry = " + toml_string(spec.entry) + "\n";

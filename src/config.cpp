@@ -499,6 +499,14 @@ void parse_proxy_policy(const toml::table& t, const fs::path& base_dir, Upstream
         if (mode != "rewrite" && mode != "pass") fail(where + ".redirects must be \"rewrite\" or \"pass\"");
         out.rewrite_redirects = mode == "rewrite";
     }
+    // Whose the idle connections to the origin are (docs/design-upstream-pool.md): each worker's
+    // own, or the workers' together.
+    if (auto v = t["pool"].value<std::string>()) {
+        if (*v != "worker" && *v != "shared") fail(where + ".pool must be \"worker\" or \"shared\"");
+        out.options.shared_pool = *v == "shared";
+    } else if (t.contains("pool")) {
+        fail(where + ".pool must be \"worker\" or \"shared\"");
+    }
     if (auto tt = t["tls"].as_table()) {
         check_keys(*tt, {"proxy tls = {}"}, {}, where + ".tls");
         out.tls.verify = (*tt)["verify"].value_or(out.tls.verify);
@@ -4740,10 +4748,11 @@ std::optional<SiteConflict> first_site_conflict(const Config& cfg) {
                 }
                 const FcgiOptions& f = *it->second.opts;
                 if (o.max_connections != f.max_connections || o.queue_depth != f.queue_depth || o.queue_wait != f.queue_wait ||
-                    o.priority_reserve != f.priority_reserve || o.max_idle != f.max_idle || o.keep_conn != f.keep_conn || o.idle_timeout != f.idle_timeout)
+                    o.priority_reserve != f.priority_reserve || o.max_idle != f.max_idle || o.keep_conn != f.keep_conn || o.idle_timeout != f.idle_timeout ||
+                    o.shared_pool != f.shared_pool)
                     return SiteConflict{it->second.site, si,
                                         where + ": pool limits (max_connections, queue_depth, queue_wait, priority_reserve, "
-                                                "max_idle, idle_timeout, keep_conn) for upstream " +
+                                                "max_idle, idle_timeout, keep_conn, pool) for upstream " +
                                             key + " differ from " + it->second.where +
                                             "; the pool is per upstream, set them once (site-level php = {...} or proxy = {...})"};
             }

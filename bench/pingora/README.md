@@ -165,6 +165,41 @@ OpenSSL's read and write buffers. They are now given back when the connection go
 | HTTP/1.1 over TLS | 71.4 KB each | 44.6 KB each | 115.4 KB each |
 | HTTP/2 over TLS | 82.2 KB each | 66.0 KB each | 111.4 KB each |
 
+## With the shared pool (0.1.0-alpha.147, `run.sh -S`)
+
+The many-origins rows led to `proxy = { pool = "shared" }` (`docs/design-upstream-pool.md`): an
+idle connection to an origin a worker asks seldom belongs to no worker, so the workers share it
+as Pingora's threads do; an origin asked often keeps its connections in the worker. The whole
+comparison again with it on every agensio site, three rounds, no row with an error:
+[pingora-20261114-043030.md](../results/pingora-20261114-043030.md).
+
+| 2,000 origins, four workers | agensio, pool per worker | agensio, shared pool | Pingora |
+|---|---|---|---|
+| connections opened, first 10 s | 16,512 | 6,145 | 5,828 |
+| connections opened, next 10 s | 486 | 216 | 315 |
+| CPU per request | 10.2 us | 9.9 us | 20.3 us |
+| requests per second | 317,000 | 348,600 | 162,000 |
+| resident memory, first 10 s | 79 MB | 74.5 MB | 53.5 MB |
+| resident memory, next 10 s | 79 MB | 74.9 MB | 69.4 MB |
+
+- agensio now opens within 5 % of Pingora's connections from a cold start and fewer once warm,
+  and still spends half the CPU per request. Sharing costs nothing measurable on this row.
+- With one worker there is nobody to share with and agensio does not use the store: that row is
+  as before (5,308 against 4,792 connections, 10.2 against 20.2 us).
+- A busy single origin pays nothing: the same row alternated between the two settings gave
+  7.57 us with the pool per worker and 7.40 us shared, on a row that swings from 6.9 to 8.4 by
+  itself; the store was touched 45 times in 800,000 requests.
+- The memory left on this row is agensio's 54 MB for 2,002 configured sites.
+
+How the rule was found: `pingora-20261114-032818.md` (agensio alone, pool per worker),
+`pingora-20261114-033213.md` (shared, an origin called busy after one short gap: 9,585
+connections) and `pingora-20261114-033804.md` (shared, busy by the average gap: 6,190).
+
+Every other row of the comparison is where it was: agensio 1.1 to 2.1 times less CPU per
+request, 14 against 37 KB per idle plain connection, 45 against 115 KB over TLS. Pingora still
+uses less memory under load with large bodies (the request mix: 40 against 60 MB), where agensio
+buffers an origin's answer by default.
+
 ## What this does and does not show
 
 It shows what each costs per request and per connection on one machine over loopback, with a

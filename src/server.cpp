@@ -1371,6 +1371,27 @@ json::Value Server::status() {
             .set("streams_over_budget", static_cast<double>(sc.over_budget));
         v.set("compression", std::move(c));
     }
+    // The store of idle origin connections the workers share (proxy.pool = "shared"): per origin
+    // what it holds and what it did since the start. Empty while no site uses it.
+    {
+        // An https origin's pool key carries its TLS policy after a '|': the origin is what is before it,
+        // and two policies for one origin are shown as one.
+        std::map<std::string, SharedPool::Stats> by_origin;
+        for (const auto& [key, st] : shared_pool_.stats()) {
+            SharedPool::Stats& o = by_origin[key.substr(0, key.find('|'))];
+            o.idle += st.idle;
+            o.given += st.given;
+            o.taken += st.taken;
+            o.expired += st.expired;
+            o.dead += st.dead;
+        }
+        json::Value origins = json::Value::array();
+        for (const auto& [origin, st] : by_origin)
+            origins.push(json::Value::object().set("origin", origin).set("idle", static_cast<double>(st.idle))
+                             .set("given", static_cast<double>(st.given)).set("taken", static_cast<double>(st.taken))
+                             .set("expired", static_cast<double>(st.expired)).set("dead", static_cast<double>(st.dead)));
+        v.set("upstream_pool", json::Value::object().set("shared", std::move(origins)));
+    }
     // The file cache as it stands: what a reload kept or started over shows here (12b).
     v.set("cache", json::Value::object()
                        .set("entries", static_cast<double>(cache_.entry_count()))
@@ -1526,6 +1547,11 @@ void Server::build_workers() {
     if (n == 0) n = 1;
     for (unsigned i = 0; i < n; ++i)
         workers_.push_back(std::make_unique<Worker>(i));
+    // The store of idle origin connections is for workers to share: with one worker a connection
+    // handed to it could only come back to the same worker, at the price of the move (measured:
+    // 11.6 against 10.1 us on the many-origins row), so pool = "shared" then means "worker".
+    if (workers_.size() > 1)
+        for (auto& w : workers_) w->upstream_pool.set_shared(&shared_pool_);
     for (auto& w : workers_) apply_server_header(w->state, cfg_.server_header);
 
     reuse_port_ = false;

@@ -191,6 +191,10 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   stream, response buffered with temp-file spill or streamed with a high-water mark; a connection's
   16 KB read buffer is the pool's, lent for an exchange and back among the worker's spares when it ends,
   so a kept connection holds none, alpha.147),
+  `shared_pool` (`SharedPool`, alpha.147, `docs/design-upstream-pool.md`: idle origin connections that
+  belong to no worker, bare descriptors with their TLS session, one entry per pool key under its own
+  mutex with a count readable without it; the server's one, `Server::shared_pool_`, not used with one
+  worker),
   `fcgi.hpp` (FastCGI record and params codec, CGI head parser; fuzzed), `fcgi_client`
   (`FcgiRequest`, the FastCGI encoding/decoding), `http_head.hpp` (response head parser;
   fuzzed), `http_client` (`HttpRequest`: HTTP/1.1 framing both ways, keep-alive rules).
@@ -401,7 +405,17 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   (`X509_VERIFY_PARAM_set1_ip_asc`, alpha.61); `server_name` is one host name or one address, anything
   else refused at load (`check_peer_name` over `valid_host_name` in `core/host.hpp`, alpha.146: a final dot
   never verified, a `*.` pattern was sent as SNI), and an address is never sent as SNI
-  (`tls::send_server_name`, RFC 6066 3). CGI (D5, `src/upstream/cgi_client.*`, `src/handlers/cgi.*`): the
+  (`tls::send_server_name`, RFC 6066 3). `pool = "shared"` (alpha.147, `docs/design-upstream-pool.md`, the setting `proxy_pool`
+  on a managed site): `UpstreamPool` keeps an origin's idle connections in the worker while its requests
+  there come less than `kDenseGap` (1 ms) apart on average (over about eight, one gap counting for at
+  most sixteen thresholds), the path of `"worker"`; otherwise `release` hands the connection to
+  `SharedPool` (`donate`: shed, out of the loop, the TLS session detached) and `grant` takes one from
+  there (`adopt`: one load when the entry is empty, the check of a long-idle one, `assign`), and the tick
+  hands on what sat in a worker for a tick and sweeps the store; `max_idle` and `idle_timeout` bound the
+  store, limits and health stay per worker, locations of one origin must agree; status
+  `upstream_pool.shared`; `tests/shared-pool.sh`. Rule learned: decide density by the average gap; by
+  the last gap alone one random pair in twenty-three pinned a connection to a worker for a tick.
+  CGI (D5, `src/upstream/cgi_client.*`, `src/handlers/cgi.*`): the
   exchange's connect step forks the script with a socketpair as stdin/stdout, so the
   shared exchange code does the rest; processes capped and reaped per worker pool.
 - **Presets** (C3): `app = "laravel" | "drupal" | "wordpress" | "grav" | "php" | "static"` (and the
@@ -1282,6 +1296,10 @@ its 16 KB read buffer, since alpha.147 the worker's and lent per exchange (`Upst
 (`pingora-20261114-010744.md`; 54 MB of it the 2,002 sites) with CPU and the proxy A/B flat
 (`ab-20261114-011109.md`, and `ab-20261114-011629.md`: twelve samples a side of the two proxy rows, 1.002
 and 1.013, after three rounds had read the 100 KB row at 1.063; that row swings 18 to 20 us on one binary).
+The connections opened are `proxy = { pool = "shared" }`'s (alpha.147, the upstream paragraph above):
+6,145 against Pingora's 5,828 in the first ten seconds and 216 against 315 in the next, at 9.9 us
+(`pingora-20261114-043030.md`, the whole comparison with it on). Left to Pingora: memory under load
+with large bodies, and on that row agensio's 54 MB for 2,002 configured sites.
 
 HTTP/2 (G0, 2026-09-23, `bench/results/ab-20260923-171228.md`, `h2-20260923-164706.md`
 for nginx and Caddy, `h2-20260923-171144.md` for agensio's final rows; one worker, h2load

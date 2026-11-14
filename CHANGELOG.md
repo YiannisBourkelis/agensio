@@ -19,6 +19,46 @@
   The benchmark upstream takes `-a ADDRESS` (`-a 0.0.0.0` answers on all of 127.0.0.0/8, so one
   process stands for thousands of origins). No server code changed.
 
+- **`proxy = { pool = "shared" }`: connections to an origin shared by the workers.** Every worker
+  keeps its own idle connections to an origin, which costs nothing per request and is why a
+  proxied request is cheap, but it means the connections an origin holds grow with the worker
+  count: in the Pingora comparison four workers opened 16,512 connections to 2,000 origins where
+  Pingora's one pool opened 5,828. With the new key a worker decides per origin from its own
+  traffic (`docs/design-upstream-pool.md`):
+  - an origin it asks often (its requests less than a millisecond apart on average) keeps its
+    connections in the worker, the path of `pool = "worker"`: no lock, no system call;
+  - an origin it asks seldom has its idle connection held in one store for the server
+    (`SharedPool`), as a bare descriptor out of every event loop, where the next worker that
+    needs one takes it. For an `https://` origin the TLS session moves with it, so a connection
+    taken is a handshake not made.
+  The store holds at most `max_idle` per origin and closes a connection after `idle_timeout`;
+  one that sat for more than a tick is checked before a request is written to it, as a worker's
+  own is. The limits (`max_connections`, the queue) and passive health stay per worker; PHP and
+  CGI are not shared; a server with one worker does not use the store. `"worker"` stays the
+  default. Locations reaching one origin must agree on the key.
+  - On a managed site: the setting `proxy_pool` (`site_update` with `settings`,
+    `agensio ctl site-update NAME --set proxy_pool=shared`).
+  - `server_status` has `upstream_pool.shared`: per origin the connections idle in the store and
+    how many were given to it, taken from it, expired there and found closed by the origin.
+  - Measured (`bench/pingora/run.sh -S`, `bench/results/pingora-20261114-043030.md`, three
+    rounds): 2,000 origins, four workers, connections opened in the first ten seconds 16,512
+    before, 6,145 now (Pingora 5,828); in the next ten 486, 216 (Pingora 315); CPU per request
+    10.2 and 9.9 us (Pingora 20.3). A busy single origin costs the same with either value
+    (7.57 and 7.40 us alternated on one row). The first rule called an origin busy after one
+    short gap and reached only 9,585; the average does it.
+  - A move between two workers' loops was measured at 341 ns before anything was built, which
+    is why the store is a second level and not the pool.
+  Tests: the TLS stream hands its session to a second event loop and serves from there; the
+  store's unit tests, with four threads at once; `tests/shared-pool.sh`, run by the integration
+  suite with a server of its own and four workers: one origin connection for forty requests
+  where the default opens one per worker, a busy origin staying on its worker, an https origin
+  that serves one connection at a time answering all four, expiry, a reload, an origin restart,
+  no descriptor leaked, every socket non-blocking, one worker. Checked: unit tests, also
+  under the address and thread sanitizers and in the build without OpenSSL; `tests/shared-pool.sh`
+  against the normal, the address-sanitizer and the thread-sanitizer server (13 rows each, no
+  report); the integration suite (868); the cookbook's recipes (569); `bench/ab.sh -P` of the
+  default against the commit before, six rounds: static rows 0.959 to 1.036, proxy rows 0.980,
+  0.983 and 1.012 (`bench/results/ab-20261114-031846.md`).
 - **An idle TLS connection gives back its buffers.** A client connection idle for two seconds
   already shed its own buffers; over TLS it kept three more: agensio's 17 KB staging buffer and
   OpenSSL's read and write buffers, 51 KB of heap together. They are now freed at the same idle

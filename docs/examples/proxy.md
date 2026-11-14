@@ -437,6 +437,55 @@ them), and `site-unit` renders a unit for the first member only.
 
 **Reference:** [Reverse proxy](../configuration.md#12-reverse-proxy) (groups).
 
+## Fewer connections to the application: a pool shared by the workers
+
+**When:** the server has many workers and the application behind it pays for every open
+connection (a thread or a process each), or agensio proxies to many origins, or the origin is
+reached over HTTPS and every new connection costs a handshake.
+
+```toml
+# /etc/agensio/sites.d/app.example.com.toml
+[[site]]
+server_name = ["app.example.com"]
+tls = { cert = "/etc/ssl/app.example.com/fullchain.pem", key = "/etc/ssl/app.example.com/privkey.pem" }
+app = "proxy"
+upstream = "http://127.0.0.1:3000"
+proxy = { pool = "shared" }      # idle connections to the application belong to all workers
+```
+
+**What it does.** By default each worker keeps its own idle connections to the application, so
+a server with twelve workers can hold twelve idle connections where one would do. With
+`pool = "shared"` an idle connection to an application a worker asks seldom waits in one store
+for the whole server, and the next worker that needs one takes it. An application under steady
+load (a worker asking it about a thousand times a second or more) keeps its connections in the
+worker, as without the key, so the busy case costs nothing. `max_idle` and `idle_timeout` bound
+the store; `max_connections` and the queue stay per worker.
+
+Easy to get wrong: it does not lower what the application sees under load, when every worker
+has requests in flight at once; that is `max_connections`, per worker. And it is for proxied
+applications: PHP's connections are not shared.
+
+**Check it.**
+
+```sh
+agensio -t -c /etc/agensio/agensio.toml
+agensio ctl status | python3 -c 'import json,sys; print(json.load(sys.stdin)["upstream_pool"])'
+# {"shared": [{"origin": "127.0.0.1:3000", "idle": 1, "given": 412, "taken": 409, "expired": 2, "dead": 0}]}
+ss -Htn state established '( dport = :3000 )' | wc -l      # the connections the application holds
+```
+
+**On a managed site.** It is one of the site's settings:
+
+```sh
+agensio ctl site-update app.example.com --set proxy_pool=shared --yes --reason "fewer idle connections to the application"
+agensio ctl settings app.example.com      # proxy_pool: shared, source: site
+```
+
+**MCP:** `site_update` with `settings` `{ "proxy_pool": "shared" }`; `site_settings_list` shows
+the value in force and `server_status` what the store does.
+
+**Reference:** [Reverse proxy](../configuration.md#12-reverse-proxy) (shared connections).
+
 ## An origin over HTTPS
 
 **When:** the application only speaks HTTPS (an appliance, a container image built that way),

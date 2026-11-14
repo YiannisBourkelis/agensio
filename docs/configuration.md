@@ -2291,13 +2291,39 @@ the kernel retransmitted, about fifteen minutes, holding both connections.
 | `request_buffering` | `true` | collect the request body before connecting; `false` streams it as it arrives |
 | `connect_timeout`, `send_timeout`, `read_timeout` | 5, 30, 60 s | 504 when exceeded; `read_timeout` is between two reads from the origin, while agensio waits for its bytes (not while a client that reads slower holds a streamed answer back, section 8); on a tunnel `send_timeout` bounds each write to either side |
 | `keep_conn`, `max_idle`, `idle_timeout` | `true`, 64, 30 s | keep-alive to the origin; idle connections kept per worker; how long one may stay idle before agensio closes it (0 = until the origin does) |
+| `pool` | `"worker"` | whose the idle connections are: each worker's own, or `"shared"` by all workers (below) |
 | `max_connections`, `queue_depth`, `queue_wait` | 256, 1024, 5 s | per worker: in flight, waiting, and the longest wait before a 503 with `Retry-After` (the `queue_wait` in whole seconds, rounded up) |
 | `head_max` | 64 KB | an origin head larger than this is a 502 |
 | `max_fails`, `fail_timeout` | 3, 10 s | consecutive failures that mark a group member down, and for how long |
 | `tls` | verify on, system store | `{ verify, server_name, ca }` for `https://` origins |
 
+**Shared connections: `pool = "shared"`** (0.1.0-alpha.147, `docs/design-upstream-pool.md`). By
+default every worker keeps its own idle connections to an origin, which costs nothing per request
+and is right for an origin with steady traffic. It also means the connections an origin holds grow
+with the worker count. With `proxy = { pool = "shared" }` a worker decides per origin from its own
+traffic:
+
+- an origin it asks often (its requests less than a millisecond apart on average, about a
+  thousand a second or more) keeps its connections in the worker, exactly as with `"worker"`;
+- an origin it asks seldom has its idle connection kept in one store for the whole server, where
+  the next worker that needs one takes it. The workers together then hold a few connections to
+  the origin where each held its own, at the price of about a third of a microsecond for a
+  request that moves a connection.
+
+Use it for many origins, for an application server that gives every connection a thread or a
+process, and for `https://` origins, where a connection taken from the store is a TLS handshake
+not made. The store holds at most `max_idle` idle connections per origin and closes one after
+`idle_timeout`; the limits and the passive health of a group stay per worker. Locations that reach
+the same origin must agree on it, as on the other pool keys. `server_status` shows what the store
+does: `upstream_pool.shared`, per origin the connections `idle` there now and, since the start,
+`given` to it, `taken` from it, `expired` there and found `dead` (closed by the origin) when taken.
+On a managed site it is the setting `proxy_pool`
+(`agensio ctl site-update NAME --set proxy_pool=shared`). PHP and CGI are not shared, and a
+server with one worker has nobody to share with: there the key changes nothing.
+
 The pool is per worker, so an origin sees at most workers x `max_connections` connections
-and workers x `max_idle` idle ones, none of them idle for longer than `idle_timeout`
+and workers x `max_idle` idle ones (with `pool = "shared"` and little traffic, `max_idle` in the
+store), none of them idle for longer than `idle_timeout`
 (the pool's 250 ms tick closes them, so an origin with a shorter keep-alive timeout, Node's
 5 s, should get `idle_timeout` below it). Before a kept connection that has been idle for longer
 than a pool tick (250 ms) is reused it is peeked once without blocking: a peer that closed it (php-fpm reloaded, an origin's idle timeout)

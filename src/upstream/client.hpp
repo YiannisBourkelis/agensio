@@ -41,6 +41,7 @@
 #include "file.hpp"
 #include "tls_stream.hpp"
 #include "upstream/options.hpp"
+#include "upstream/shared_pool.hpp"
 
 namespace agensio {
 
@@ -71,6 +72,7 @@ struct UpstreamConnection {
     template <class Buffers, class Handler>
     void async_write(const Buffers& b, Handler&& h) { asio::async_write(socket, b, std::forward<Handler>(h)); }
 #endif
+    int family = 0;        // AF_INET, AF_INET6 or AF_UNIX of a connected socket: what another event loop needs to adopt it
     std::vector<char> in;  // bytes read from the upstream, not yet consumed
     std::size_t in_len = 0;
     bool reused = false;   // came from the idle list (retry candidate on reset)
@@ -89,6 +91,17 @@ class UpstreamPool {
 public:
     explicit UpstreamPool(asio::io_context& ctx) : ctx_(ctx), tick_(ctx) { spares_.reserve(kSpareBuffers); }
     asio::io_context& context() noexcept { return ctx_; }
+
+    // The store of idle connections that belong to no worker (docs/design-upstream-pool.md), the
+    // server's one; nullptr: none, every upstream is this worker's own whatever its options say.
+    // An upstream with options.shared_pool uses it by the rule of kDenseGap: while this worker's
+    // requests to it come less than that apart on average, the origin is dense here and its idle
+    // connections stay in this worker (no lock, no system call, the path of pool = "worker");
+    // otherwise it is sparse and a connection goes to the store when its exchange ends and is
+    // taken from there for the next. A worker's own idle connection of such an upstream that sat
+    // for a tick goes there too (the origin was dense and went quiet).
+    void set_shared(SharedPool* store) noexcept { shared_ = store; }
+    static constexpr std::chrono::microseconds kDenseGap{1000};
 
     // Deadlines: an exchange records the time its current phase may take; one timer per
     // pool (this worker) ticks every kTick and fails whoever is overdue. No timer per
@@ -150,12 +163,23 @@ private:
         std::deque<Waiter> queue;
         std::size_t active = 0;
         std::chrono::milliseconds idle_timeout{0};  // of the options that released the last connection; 0 = keep
+        // pool = "shared": the store's entry of this origin (found once), when this worker last
+        // asked for a connection to it, and whether that made it dense here.
+        SharedPool::Entry* store = nullptr;
+        std::chrono::steady_clock::time_point last_grant{};
+        std::chrono::nanoseconds gap{kDenseGap * 16};  // between its requests here, averaged; starts sparse
+        bool dense = false;
+        std::size_t max_idle = 0;  // of the options that released the last connection
     };
     // Closes kept connections idle for longer than their upstream's idle_timeout; true when any remain.
     bool sweep_idle(std::chrono::steady_clock::time_point now);
     void arm_tick();
     static std::size_t limit_for(const UpstreamOptions& opts, bool priority) noexcept;
-    void grant(Upstream& u, Waiter w);
+    void grant(const std::string& key, const UpstreamOptions& opts, Upstream& u, Waiter w);
+    // A connection taken from the store into this worker's loop, nullptr when it holds none alive.
+    std::unique_ptr<UpstreamConnection> adopt(Upstream& u, std::chrono::steady_clock::time_point now);
+    // `conn` out of this worker's loop and into the store; false (and `conn` closed) when it cannot go.
+    bool donate(Upstream& u, std::unique_ptr<UpstreamConnection> conn, std::size_t max_idle, std::chrono::milliseconds idle_timeout);
 
     void tick();
 
@@ -168,6 +192,8 @@ private:
 
     asio::io_context& ctx_;
     std::unordered_map<std::string, Upstream> upstreams_;
+    SharedPool* shared_ = nullptr;
+    bool gave_ = false;  // this worker handed a connection to the store: its tick helps sweep it
     std::vector<std::vector<char>> spares_;  // read buffers no connection holds, each kReadBuffer bytes
     std::unordered_map<std::string, Health> health_;
     std::unordered_map<const void*, unsigned> rotation_;  // round-robin position per group

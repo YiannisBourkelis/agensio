@@ -323,6 +323,7 @@ section of `docs/configuration.md` that explains the key.
 | `send_timeout` | seconds | 30 | Sending to the origin; on a WebSocket or other tunnel, the longest one write to either side may wait before the tunnel is closed (a quiet tunnel has none waiting). | reload | site file | 12 |
 | `max_connections` | int | 256 | Connections to the origin per worker. | reload | site file | 12 |
 | `max_idle` | int | 64 | Kept idle connections per worker. | reload | site file | 12 |
+| `pool` | enum: worker \| shared | worker | Whose the idle connections to the origin are. worker: each worker keeps its own, the cheapest for an origin with steady traffic. shared: a connection to an origin a worker asks seldom (less than about a thousand times a second) waits in one store for all workers, so the workers together hold a few connections to it where each held its own; an origin asked often keeps its connections in the worker at no cost. For many origins, origins that give each connection a thread or a process, and https:// origins (a connection shared is a TLS handshake saved). server_status shows what the store does (upstream_pool). | reload | site file | 12 |
 | `idle_timeout` | seconds | 30 | Kept connection closed after this long idle (0 = until the origin closes it). | reload | site file | 12 |
 | `queue_depth` | int | 1024 | Requests waiting per worker; 503 beyond. | reload | site file | 12 |
 | `queue_wait` | seconds | 5 | Longest wait in the queue; 503 beyond, whose Retry-After is this value in whole seconds, rounded up. | reload | site file | 12 |

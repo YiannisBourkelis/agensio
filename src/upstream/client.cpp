@@ -242,7 +242,7 @@ void UpstreamPool::acquire(const std::string& key, const UpstreamOptions& opts, 
                            std::shared_ptr<UpstreamRequest> req) {
     Upstream& u = upstreams_[key];
     if (u.active < limit_for(opts, priority)) {
-        grant(u, Waiter{std::move(req), priority});
+        grant(key, opts, u, Waiter{std::move(req), priority});
         return;
     }
     if (u.queue.size() >= opts.queue_depth) {
@@ -260,21 +260,37 @@ void UpstreamPool::acquire(const std::string& key, const UpstreamOptions& opts, 
 // live on 2026-09-20 right after a settings change had reloaded php-fpm. Only a
 // connection idle for longer than a pool tick is peeked: one reused at once cannot have
 // met a reload, and the syscall would cost 5 % on the proxy benchmark (A/B 2026-09-20).
-static bool idle_alive(UpstreamConnection& c) noexcept {
+static bool fd_alive(int fd) noexcept {
 #ifdef _WIN32
-    (void)c;
+    (void)fd;
     return true;
 #else
     char byte;
-    const ssize_t n = ::recv(static_cast<int>(c.sock().native_handle()), &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+    const ssize_t n = ::recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
     return n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
 #endif
 }
+static bool idle_alive(UpstreamConnection& c) noexcept { return fd_alive(static_cast<int>(c.sock().native_handle())); }
 
-void UpstreamPool::grant(Upstream& u, Waiter w) {
+void UpstreamPool::grant(const std::string& key, const UpstreamOptions& opts, Upstream& u, Waiter w) {
     ++u.active;
     std::unique_ptr<UpstreamConnection> c;
-    const auto now = u.idle.empty() ? std::chrono::steady_clock::time_point{} : std::chrono::steady_clock::now();
+    const bool shared = opts.shared_pool && shared_ != nullptr;
+    const auto now = (u.idle.empty() && !shared) ? std::chrono::steady_clock::time_point{} : std::chrono::steady_clock::now();
+    if (shared) {
+        if (!u.store) u.store = &shared_->entry(key);
+        // Dense: this worker's requests to the origin come less than kDenseGap apart on average.
+        // An average over the last eight or so, not the last gap alone: of requests arriving at
+        // random 23 ms apart one in twenty-three follows its predecessor within a millisecond,
+        // and each such pair kept a connection in this worker for a tick, out of the others'
+        // reach (measured: 9,585 connections to 2,000 origins where one pool needs 5,300).
+        // One gap counts for at most sixteen thresholds: a pause makes the origin sparse at once,
+        // and about twenty requests in a row make it dense again.
+        const auto gap = std::min<std::chrono::nanoseconds>(now - u.last_grant, kDenseGap * 16);
+        u.gap += (gap - u.gap) / 8;
+        u.dense = u.gap < kDenseGap;
+        u.last_grant = now;
+    }
     while (!u.idle.empty()) {
         c = std::move(u.idle.back());
         u.idle.pop_back();
@@ -284,21 +300,79 @@ void UpstreamPool::grant(Upstream& u, Waiter w) {
         }
         c.reset();  // dead: closed with the object, the next idle one is tried
     }
+    if (!c && shared && u.store->idle() != 0) c = adopt(u, now);  // an empty entry costs this one load
     if (!c) c = fresh();
     w.req->on_slot(std::move(c));
+}
+
+std::unique_ptr<UpstreamConnection> UpstreamPool::adopt(Upstream& u, std::chrono::steady_clock::time_point now) {
+    SharedPool::Idle got;
+    while (shared_->take(*u.store, got, now)) {
+        // One that sat for more than a tick is checked before a request is written to it, as a
+        // worker's own is: the origin may have closed it.
+        if (now - got.released_at > kTick && !fd_alive(got.fd)) {
+            u.store->note_dead();
+            SharedPool::close(got);
+            continue;
+        }
+        auto c = fresh();
+        asio::error_code ec;
+        c->socket.assign(asio::generic::stream_protocol(got.family, got.family == AF_UNIX ? 0 : IPPROTO_TCP), got.fd, ec);
+        if (ec) {
+            SharedPool::close(got);
+            continue;
+        }
+        c->family = got.family;
+#ifdef AGENSIO_HAS_TLS
+        if (got.tls) c->tls = std::make_unique<BasicTlsStream<UpstreamConnection::Socket>>(std::move(c->socket), static_cast<SSL*>(got.tls));
+#endif
+        c->reused = true;  // a retry candidate if the origin closed it meanwhile, as any kept connection
+        c->released_at = got.released_at;
+        return c;
+    }
+    return nullptr;
+}
+
+bool UpstreamPool::donate(Upstream& u, std::unique_ptr<UpstreamConnection> conn, std::size_t max_idle, std::chrono::milliseconds idle_timeout) {
+    SharedPool::Idle out;
+    out.family = conn->family;
+    out.released_at = conn->released_at;
+    asio::error_code ec;
+#ifdef AGENSIO_HAS_TLS
+    if (conn->tls) {
+        if (!conn->tls->shed()) return false;  // bytes of a record wait: not a connection to keep
+        out.fd = conn->tls->lowest_layer().release(ec);
+        if (ec) return false;
+        out.tls = conn->tls->detach();
+    } else
+#endif
+    {
+        out.fd = conn->socket.release(ec);
+        if (ec) return false;
+    }
+    shared_->give(*u.store, out, max_idle, idle_timeout);
+    gave_ = true;
+    return true;
 }
 
 void UpstreamPool::release(const std::string& key, const UpstreamOptions& opts, std::unique_ptr<UpstreamConnection> conn) {
     Upstream& u = upstreams_[key];
     if (u.active > 0) --u.active;
     if (conn) take_buffer(*conn);  // kept or not, its read buffer goes back to the worker
-    if (conn && conn->sock().is_open() && u.idle.size() < opts.max_idle) {
+    const bool shared = opts.shared_pool && shared_ != nullptr && conn && conn->family != 0;
+    if (shared && !u.store) u.store = &shared_->entry(key);
+    if (conn && conn->sock().is_open() && shared && !u.dense) {
+        // An origin this worker asks seldom: its connection belongs to no worker while idle.
+        conn->released_at = std::chrono::steady_clock::now();
+        if (donate(u, std::move(conn), opts.max_idle, opts.idle_timeout)) arm_tick();  // the ticks sweep the store
+    } else if (conn && conn->sock().is_open() && u.idle.size() < opts.max_idle) {
         conn->reused = false;
         conn->in_len = 0;
         conn->released_at = std::chrono::steady_clock::now();
         u.idle.push_back(std::move(conn));
         u.idle_timeout = opts.idle_timeout;
-        if (opts.idle_timeout.count() > 0) arm_tick();  // the tick closes it when its time is up
+        u.max_idle = shared ? opts.max_idle : 0;  // non-zero marks an upstream whose idle ones the tick hands on
+        if (opts.idle_timeout.count() > 0 || shared) arm_tick();  // the tick closes it, or hands it to the store
     }
     // Next in line: a priority waiter first, else the oldest one the limit allows.
     for (auto it = u.queue.begin(); it != u.queue.end(); ++it) {
@@ -306,13 +380,13 @@ void UpstreamPool::release(const std::string& key, const UpstreamOptions& opts, 
         if (u.active >= limit_for(opts, true)) return;
         Waiter w = std::move(*it);
         u.queue.erase(it);
-        grant(u, std::move(w));
+        grant(key, opts, u, std::move(w));
         return;
     }
     if (!u.queue.empty() && u.active < limit_for(opts, false)) {
         Waiter w = std::move(u.queue.front());
         u.queue.pop_front();
-        grant(u, std::move(w));
+        grant(key, opts, u, std::move(w));
     }
 }
 
@@ -371,7 +445,22 @@ bool UpstreamPool::sweep_idle(std::chrono::steady_clock::time_point now) {
             while (n < u.idle.size() && now - u.idle[n]->released_at > u.idle_timeout) ++n;
             if (n) u.idle.erase(u.idle.begin(), u.idle.begin() + static_cast<std::ptrdiff_t>(n));  // closed with the objects
         }
-        any = any || (!u.idle.empty() && u.idle_timeout.count() > 0);
+        // pool = "shared": what sat here for a tick goes to the store (the origin was dense on this
+        // worker and went quiet), oldest first so the store keeps their order.
+        if (u.max_idle != 0 && u.store && shared_) {
+            std::size_t n = 0;
+            while (n < u.idle.size() && now - u.idle[n]->released_at > kTick) ++n;
+            for (std::size_t i = 0; i < n; ++i) donate(u, std::move(u.idle[i]), u.max_idle, u.idle_timeout);
+            if (n) u.idle.erase(u.idle.begin(), u.idle.begin() + static_cast<std::ptrdiff_t>(n));
+        }
+        any = any || (!u.idle.empty() && (u.idle_timeout.count() > 0 || u.max_idle != 0));
+    }
+    // The store's expired connections are closed by whichever worker's tick comes first each second;
+    // a worker that gave to it keeps ticking until it is empty, so a quiet store empties.
+    if (shared_ && gave_) {
+        if (shared_->sweep_due(now)) shared_->sweep(now);
+        if (shared_->idle_total() != 0) any = true;
+        else gave_ = false;
     }
     return any;
 }
@@ -684,6 +773,7 @@ void UpstreamRequest::connect() {
 #ifdef ASIO_HAS_LOCAL_SOCKETS
         asio::local::stream_protocol::endpoint ep(address_.path);
         conn_->sock().open(asio::generic::stream_protocol(ep.protocol()), ec);
+        conn_->family = AF_UNIX;
         if (!ec) conn_->sock().async_connect(ep, immediate(pool_.context(), on_connect));
 #else
         ec = asio::error::operation_not_supported;
@@ -691,6 +781,7 @@ void UpstreamRequest::connect() {
     } else {
         asio::ip::tcp::endpoint ep(asio::ip::make_address(address_.host), address_.port);
         conn_->sock().open(asio::generic::stream_protocol(ep.protocol()), ec);
+        conn_->family = ep.protocol().family();
         if (!ec) {
             // Our writes must not wait for the upstream's ACK (a streamed request body is
             // many small writes); nginx sets this on upstream connections too.

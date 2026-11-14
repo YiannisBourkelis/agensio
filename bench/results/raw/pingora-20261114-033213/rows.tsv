@@ -1,0 +1,20 @@
+proxy	/json, 64 conns	1	direct	1	1405011.42	35.00us	2.72ms	2.67	-	-	5.5	-
+proxy	/big 100 KB, 64 conns	1	direct	1	270982.50	164.00us	4.07ms	13.03	-	-	5.7	-
+proxy	/json, 64 conns	1	agensio	1	131109.56	461.00us	713.00us	7.62	1	0.00	18.7	-
+proxy	/json, 16 conns	1	agensio	1	134265.27	113.00us	173.00us	7.44	1	0.00	17.5	-
+proxy	/big 100 KB, 64 conns	1	agensio	1	31626.68	1.99ms	2.73ms	31.59	1	0.00	27.1	-
+proxy	/slow 20 ms, 256 conns	1	agensio	1	12537.50	20.04ms	24.00ms	11.19	193	1.53	27.5	-
+origins	2000 origins, cold	1	agensio	1	81756.54	3.09ms	45.16ms	11.77	5156	6.24	68.5	-
+origins	2000 origins, warm	1	agensio	1	85058.28	3.06ms	3.91ms	11.75	515	0.60	68.7	-
+origins	2000 origins, cold	4	agensio	1	333239.69	652.00us	24.35ms	10.18	9585	2.85	74.9	-
+origins	2000 origins, warm	4	agensio	1	362925.14	670.00us	4.81ms	10.08	671	0.18	75.2	-
+proxy	/json, 64 conns	1	direct	2	1454737.15	30.00us	3.00ms	2.63	-	-	174.9	-
+proxy	/big 100 KB, 64 conns	1	direct	2	337826.13	111.00us	1.60ms	11.42	-	-	174.9	-
+proxy	/json, 64 conns	1	agensio	2	142674.01	444.00us	783.00us	7.00	1	0.00	18.7	-
+proxy	/json, 16 conns	1	agensio	2	125044.25	131.00us	297.00us	7.95	1	0.00	17.4	-
+proxy	/big 100 KB, 64 conns	1	agensio	2	31460.44	1.99ms	2.85ms	31.79	1	0.00	26.8	-
+proxy	/slow 20 ms, 256 conns	1	agensio	2	12564.18	20.04ms	24.26ms	12.22	193	1.53	27.5	-
+origins	2000 origins, cold	1	agensio	2	89930.44	2.81ms	59.22ms	10.89	5279	5.81	68.3	-
+origins	2000 origins, warm	1	agensio	2	93377.62	2.78ms	3.60ms	10.70	479	0.51	68.1	-
+origins	2000 origins, cold	4	agensio	2	337906.93	680.00us	16.48ms	10.28	9569	2.80	74.9	-
+origins	2000 origins, warm	4	agensio	2	369518.97	673.00us	4.74ms	10.13	700	0.19	75.5	-

@@ -417,6 +417,9 @@ private:
     std::string uploads_dir_;
     void arm_trash_expiry();
     void arm_log_expiry();
+    // Idle connections to origins that belong to no worker (proxy.pool = "shared",
+    // docs/design-upstream-pool.md). Declared before the workers, whose pools point at it.
+    SharedPool shared_pool_;
     std::vector<std::unique_ptr<Worker>> workers_;
     // Timers on worker 0's context. Declared after workers_, so they are destroyed first: a timer
     // destroyed after its context's timer service reads freed memory (2026-10-09, the sanitizer
