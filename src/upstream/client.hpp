@@ -357,6 +357,11 @@ protected:
         (void)n;
         return false;
     }
+    // 4.3, buffering: a body of `remaining` more bytes (its Content-Length less what came with the
+    // head) gets its place in result_.body at once and is read straight into it, when it fits
+    // buffer_max. The derived class calls it with its connection's buffer consumed; the reads are
+    // counted through raw_body_took().
+    void body_into_place(std::uint64_t remaining);
 
     UpstreamOptions options_;
     std::unique_ptr<UpstreamConnection> conn_;
@@ -376,6 +381,7 @@ private:
     void read_more();
     bool whole_as_declared() const noexcept;  // the collected body is what the head's Content-Length says (4.1)
     void read_direct(std::size_t left);       // into the waiting pull's buffer (4.2)
+    void read_into_place();                   // into result_.body (4.3)
     void on_data(std::size_t n);
     bool try_retry(std::error_code ec);
     void arm(std::chrono::milliseconds d);
@@ -425,6 +431,7 @@ private:
     bool reading_ = false;
     bool in_data_ = false;  // inside on_data(): defers read_more() from re-entrant pulls
     bool direct_ = false;   // the read in flight goes into the waiter's buffer (4.2)
+    std::size_t place_left_ = 0;  // bytes of a buffered body still to read into result_.body (4.3)
     struct Waiter {
         char* buf = nullptr;
         std::size_t len = 0;

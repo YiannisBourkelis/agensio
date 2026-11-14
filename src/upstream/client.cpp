@@ -1,5 +1,7 @@
 #include "upstream/client.hpp"
 
+#include "core/strings.hpp"
+
 #include "config.hpp"
 
 #include <algorithm>
@@ -943,6 +945,10 @@ void UpstreamRequest::read_more() {
         deadline_ = std::chrono::steady_clock::time_point::max();
         return;
     }
+    if (place_left_ != 0) {
+        read_into_place();
+        return;
+    }
     if (waiter_.handler && head_delivered_ && !options_.buffering && pending_pos_ == pending_.size() && conn_->in_len == 0 &&
         spill_read_ >= spilled_) {
         // A pull waits and nothing is held for it: a body whose bytes need no decoding is read straight
@@ -1016,6 +1022,39 @@ void UpstreamRequest::read_direct(std::size_t left) {
         else self->read_more();
     };
     conn_->async_read_some(asio::buffer(waiter_.buf, std::min(waiter_.len, left)), immediate(pool_.context(), on_read));
+}
+
+// A buffered body of known length (4.3): its string sized once from Content-Length, the origin read
+// straight into it. Until 0.1.0-alpha.147 every read went through the connection's buffer and was
+// appended to a string that grew by doubling: each byte copied once more, some twice.
+void UpstreamRequest::body_into_place(std::uint64_t remaining) {
+    if (!options_.buffering || remaining == 0 || result_.spill.is_open() || conn_->in_len != 0 ||
+        remaining > options_.buffer_max || result_.body.size() > options_.buffer_max - remaining)
+        return;
+    place_left_ = static_cast<std::size_t>(remaining);
+    grow_for_overwrite(result_.body, result_.body.size() + place_left_);
+}
+
+void UpstreamRequest::read_into_place() {
+    reading_ = true;
+    arm(options_.read_timeout);
+    quick_ack();
+    auto self = shared_from_this();
+    auto on_read = [self](const asio::error_code& ec, std::size_t n) {
+        self->reading_ = false;
+        if (self->phase_ != Phase::receiving) return;
+        if (ec) {
+            self->fail(UpstreamFailure::closed_early, ec);
+            return;
+        }
+        self->place_left_ -= n;
+        self->result_.body_size += n;
+        const bool last = self->raw_body_took(n);
+        if (last || self->place_left_ == 0) self->finish();
+        else self->read_more();
+    };
+    conn_->async_read_some(asio::buffer(result_.body.data() + (result_.body.size() - place_left_), place_left_),
+                           immediate(pool_.context(), on_read));
 }
 
 // A reused connection that the upstream had closed (php-fpm reload, an origin's idle
@@ -1276,6 +1315,10 @@ void UpstreamRequest::fail(UpstreamFailure why, std::error_code ec) {
     if (was == Phase::queued) pool_.dequeue(address_.pool_key(), this);
     else release_connection(false);
     result_.error = ec;
+    if (place_left_ != 0) {  // a body half read into its place: the bytes never read are not part of it
+        result_.body.resize(result_.body.size() - place_left_);
+        place_left_ = 0;
+    }
     if (!head_delivered_) {
         result_.failure = why;
         deliver_head();  // the handler sees result_.failure

@@ -17406,6 +17406,36 @@ static void test_upstream_answer_paths() {
         while (std::chrono::steady_clock::now() < until) ctx.run_one_for(std::chrono::milliseconds(20));  // the origin's late bytes
         CHECK(pool.idle_connections() == 0 && origin.open() == 0);
     }
+    // 4.3: a buffered body of known length is read into its place: the string sized once from
+    // Content-Length (no doubling as it grows), the origin read straight into it.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        for (const std::size_t size : {std::size_t{1}, std::size_t{15}, std::size_t{16384}, std::size_t{16385}, std::size_t{100000}, std::size_t{700000}}) {
+            const std::string body = body_of(size);
+            ScriptedOrigin one(ctx, {{head_of(size), 0}, {body, 15}});
+            const auto grp = origin_at(one.port());
+            const ExchangeOutcome a = run_exchange(ctx, pool, grp, buffered);
+            CHECK(a.delivered && !a.streamed && a.failure == UpstreamFailure::none && a.body == body);
+            CHECK(a.body_capacity < size + 64);
+            const ExchangeOutcome again = run_exchange(ctx, pool, grp, buffered);  // the connection is whole
+            CHECK(again.body == body && one.accepted() == 1);
+            ScriptedOrigin three(ctx, {{head_of(size) + body.substr(0, size / 3), 0}, {body.substr(size / 3, size / 3), 10}, {body.substr(size / 3 * 2), 10}});
+            const ExchangeOutcome b = run_exchange(ctx, pool, origin_at(three.port()), buffered);
+            CHECK(b.delivered && !b.streamed && b.body == body && b.body_capacity < size + 64);
+        }
+        // Past buffer_max the body goes to its temp file as before, nothing sized from the header.
+        UpstreamOptions small = buffered;
+        small.buffer_max = 50000;
+        const std::string body = body_of(120000);
+        ScriptedOrigin big(ctx, {{head_of(body.size()), 0}, {body, 15}});
+        const ExchangeOutcome s = run_exchange(ctx, pool, origin_at(big.port()), small);
+        CHECK(s.delivered && s.spilled && s.body == body);
+        // An origin that closes short of the length it declared: the failure, as before.
+        ScriptedOrigin cut(ctx, {{head_of(body.size()), 0}, {body.substr(0, 30000), 15}}, true);
+        const ExchangeOutcome c = run_exchange(ctx, pool, origin_at(cut.port()), buffered);
+        CHECK(c.delivered && c.failure == UpstreamFailure::closed_early);
+    }
     // Buffered answers are what they were.
     {
         asio::io_context ctx;

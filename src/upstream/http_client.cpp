@@ -127,7 +127,10 @@ bool HttpRequest::decode() {
             }
             continue;  // body bytes may already be in the buffer
         }
-        if (in.empty()) return true;
+        if (in.empty()) {
+            if (framing_ == Framing::length) body_into_place(remaining_);  // buffering: read where it stays
+            return true;
+        }
         switch (framing_) {
             case Framing::length: {
                 const std::size_t take = static_cast<std::size_t>(std::min<std::uint64_t>(remaining_, in.size()));
@@ -138,6 +141,7 @@ bool HttpRequest::decode() {
                     finish();
                     return false;
                 }
+                body_into_place(remaining_);  // buffering: the rest is read where it stays
                 return true;
             }
             case Framing::chunked: {

@@ -17,6 +17,22 @@ constexpr std::string_view slice(std::string_view s, std::size_t pos,
     return std::string_view(s.data() + pos, std::min(len, s.size() - pos));
 }
 
+// Grows `s` to `n` bytes without filling the new ones (what was there stays): for a buffer about
+// to be read into. C++23's resize_and_overwrite where the library has it under this standard, the
+// library's own spelling of it otherwise, and a plain resize (a fill) as the last resort.
+inline void grow_for_overwrite(std::string& s, std::size_t n) {
+    if (n <= s.size()) return;
+#if defined(__cpp_lib_string_resize_and_overwrite)
+    s.resize_and_overwrite(n, [](char*, std::size_t m) noexcept { return m; });
+#elif defined(__GLIBCXX__) && defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 12
+    s.__resize_and_overwrite(n, [](char*, std::size_t m) noexcept { return m; });
+#elif defined(_LIBCPP_VERSION)
+    s.__resize_default_init(n);
+#else
+    s.resize(n);
+#endif
+}
+
 // The length of the well-formed UTF-8 sequence that starts at s[i] (1 for ASCII), or 0 when
 // the byte there begins none (RFC 3629: no overlong form, no surrogate, nothing above
 // U+10FFFF, no stray continuation byte). What the access log and logs_query use to keep a
