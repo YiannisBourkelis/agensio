@@ -26,10 +26,11 @@
   two writes, and a larger body was read 16 KB at a time and copied twice. Three changes, none of
   which alters what a client receives (`docs/design-proxy-streaming.md`):
   - A streamed answer's head waits for the end of the read that brought it. An answer that arrived
-    whole, with the `Content-Length` its body has, goes to the client in one write, as a buffered
-    one does. Anything else goes as before: a chunked answer stays chunked, a script's own
-    `Content-Length` is still enforced, an answer that breaks within that read is still a body cut
-    short.
+    whole goes to the client in one write, as a buffered one does. With a `Content-Length` nothing
+    else differs. Without one (a chunked answer, a script's output) the client now gets the length
+    agensio counted where it got the answer chunked: what a buffering location has always done
+    with the same answer. A script's own `Content-Length` that is not its body's is still
+    enforced, and an answer that breaks within that read is still a body cut short.
   - A streamed body that needs no decoding (one with a length, or one that ends with the
     connection) is read straight into the buffer the client side sends from, as much as that side
     asked for: no pass through the connection's buffer and the pending queue. A client slower than

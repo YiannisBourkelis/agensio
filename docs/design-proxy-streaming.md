@@ -94,25 +94,32 @@ The pullers are the HTTP/1 writer (its 64 KB piece), the HTTP/2 writer (the stre
 In streaming mode the head is no longer delivered inside `feed_head`. The read that brought the
 head is decoded to its end first, its body bytes collected in `result_.body`. Then:
 
-- the exchange finished within that read and its body is of the length the head declares (a small
-  answer with a `Content-Length`): it is delivered as a buffered result is, once, with its body,
-  and the client side sends head and body in one write, the buffered path's;
+- the exchange finished within that read: the answer is delivered as a buffered result is, once,
+  with its body, and the client side sends head and body in one write, the buffered path's;
 - otherwise the head is delivered as before, as a streamed answer, and the body bytes of that read
   become the first of `pending_`.
 
 At most one read's bytes (16 KB) are held, which the streaming path holds today as well.
 
-Nothing the client sees changes, and that is why the rule is this narrow. An answer without a
-`Content-Length` that arrived whole (a chunked one, a script's output) stays a streamed answer and
-reaches the client chunked, as before; so does a script's answer whose `Content-Length` is not its
-body's (the client side holds it to the declared length: surplus cut, a short body ending the
-connection); so does an answer that breaks within the read that brought its head (the head goes
-on, the body is cut). The integration suite pinned each of these and failed on a first version
-that took every whole answer the buffered way. One thing does differ: on a site that compresses, a
-small answer delivered whole is compressed whole, with its length, where it was compressed as a
-stream.
+What the client sees:
 
-Decision 8.2 asks whether a whole answer without a length should go out with one.
+- **An answer with a `Content-Length`**: the same bytes and the same framing, in one write.
+- **An answer without one** (a chunked answer, a script's output) that arrived whole: its length
+  is counted and sent, where it went out chunked. This is what a buffering location has always
+  done with the same answer, so the two modes now agree; the payload is the same, and an HTTP/1.0
+  client, which got such a body delimited by the connection's close, gets a length and keeps its
+  connection. Decided by the owner 2026-11-14 (8.2), after a first, stricter step that left such
+  answers chunked.
+- **A script's answer whose `Content-Length` is not its body's**, and a HEAD's: these stay
+  streamed answers, so the client side holds them to the declared length as before (surplus cut,
+  a short body ending the connection).
+- **An answer that breaks within the read that brought its head**: the head goes on first and the
+  body is cut, as before.
+- On a site that compresses, a small answer delivered whole is compressed whole, with its length,
+  where it was compressed as a stream.
+
+The integration suite pins the wrong-length and the chunked cases; a first version that took
+every whole answer the buffered way failed the first.
 
 ### 4.2 A larger body is read into the buffer it is sent from
 
@@ -182,16 +189,19 @@ flat), the streaming rows of `bench/pingora/run.sh -X 'buffering = false'`, one 
    application server with few workers from slow clients. With 4.2 a streamed answer up to the
    read-ahead (256 KB) frees its origin as early as a buffered one, so the difference left is an
    answer above that to a slow client. Until decided, `buffering = true` stays the default.
-2. **Whether a whole answer without a length goes out with one.** A chunked answer, or a PHP
-   script's output on a streaming location, that arrived whole with its head could take the one-write
-   path too and reach the client with a `Content-Length` in place of chunked framing. It would give
-   PHP's streamed answers what 4.1 gives proxied ones. It changes what the client sees (valid either
-   way), so it is not done.
-3. **How far a streamed answer is read ahead.** 256 KB per answer today. Over HTTP/2 with many
-   streams at once this is what agensio holds and Pingora does not (section 10): a smaller bound
-   holds less and ties the origin to the client sooner. A key, if wanted.
-4. **`SSL_MODE_RELEASE_BUFFERS` as a key.** 30 KB less per busy TLS connection for 2.3 % more
-   CPU on small HTTPS answers (section 11). Off, and no key, unless asked for.
+2. **Whether a whole answer without a length goes out with one.** Decided 2026-11-14: yes (4.1).
+   A chunked answer, or a PHP script's output on a streaming location, that arrived whole with its
+   head takes the one-write path and reaches the client with a `Content-Length`, as from a
+   buffering location.
+3. **How far a streamed answer is read ahead.** Decided 2026-11-14: 256 KB stays, no key. Over
+   HTTP/2 with many streams at once this is what agensio holds and Pingora does not (section 10);
+   a smaller bound would tie the origin to a slow client sooner.
+4. **`SSL_MODE_RELEASE_BUFFERS` as a key.** Decided 2026-11-14: off, no key. 30 KB less per busy
+   TLS connection for 2.3 % more CPU on small HTTPS answers (section 11); for a host with very
+   many continuously busy TLS connections, if one appears.
+5. **The boot copy of the configuration** (section 10's finding: 9 KB a site held twice). Not
+   changed; see the answer given to the owner the same day: worth doing only for hosts with
+   thousands of sites, and then as a type without sites, so the compiler lists every reader.
 
 ## 9. Pingora's path, from its source
 

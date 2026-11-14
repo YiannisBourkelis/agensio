@@ -17287,18 +17287,19 @@ static void test_upstream_answer_paths() {
         const ExchangeOutcome again = run_exchange(ctx, pool, grp, streaming);
         CHECK(!again.streamed && again.body == body && origin.accepted() == 1 && origin.requests() == 2);
     }
-    // Only a body of the length its head declares goes that way. A chunked answer whole in one read
-    // stays a streamed one (the client gets it chunked, as before), its bytes the first a pull gets;
-    // so does an answer without a body (a 204, a HEAD's, whose length is not its body's).
+    // An answer without a length that arrived whole goes the same way, decoded (a chunked one, a 204):
+    // the client gets it with the length counted, as from a buffering location. One that declares a
+    // length its body does not have stays a streamed answer, so the client side holds it to what was
+    // declared: a HEAD's answer here, a script's wrong Content-Length in the integration suite.
     {
         asio::io_context ctx;
         UpstreamPool pool(ctx);
         ScriptedOrigin origin(ctx, {{"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", 0}});
         const ExchangeOutcome o = run_exchange(ctx, pool, origin_at(origin.port()), streaming);
-        CHECK(o.delivered && o.streamed && !o.read_error && o.body == "hello world");
+        CHECK(o.delivered && !o.streamed && o.pulls == 0 && o.body == "hello world");
         ScriptedOrigin empty(ctx, {{"HTTP/1.1 204 No Content\r\n\r\n", 0}});
         const ExchangeOutcome e = run_exchange(ctx, pool, origin_at(empty.port()), streaming);
-        CHECK(e.delivered && e.streamed && e.status == 204 && e.body.empty());
+        CHECK(e.delivered && !e.streamed && e.status == 204 && e.body.empty());
         ScriptedOrigin headed(ctx, {{head_of(5000), 0}});
         ExchangeRun head_run;
         head_run.head_request = true;

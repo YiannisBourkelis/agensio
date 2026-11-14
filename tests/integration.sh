@@ -3750,7 +3750,7 @@ if [ -n "$UP_PID" ]; then
   check "proxy: status and length of a 100 KB body" "200 102399" "$(curl -sS -o /dev/null -w '%{http_code} %{size_download}' $P/big)"
   check "proxy: chunked upstream body re-framed with Content-Length" "Content-Length: 32" "$(curl -sSi $P/chunked | tr -d '\r' | grep '^Content-Length')"
   check "proxy: chunked body content" '{"ok":true,"service":"upstream"}' "$(curl -sS $P/chunked)"
-  check "proxy: streaming location passes a chunked body through as chunked" "Transfer-Encoding: chunked" "$(curl -sSi $P/stream/chunked | tr -d '\r' | grep -i '^Transfer-Encoding')"
+  check "proxy: streaming location, a chunked answer that arrived whole goes out with the length counted, as from a buffering one" "Content-Length: 32" "$(curl -sSi $P/stream/chunked | tr -d '\r' | grep -iE '^(Transfer-Encoding|Content-Length)')"
   check "proxy: streaming body content" '{"ok":true,"service":"upstream"}' "$(curl -sS $P/stream/chunked)"
   check "proxy: streamed 100 KB body" "102399" "$(curl -sS $P/stream/big | wc -c | tr -d ' ')"
   check "proxy: upstream Connection: close answered, client kept" "200 1 200 0" "$(curl -sS -o /dev/null -o /dev/null -w '%{http_code} %{num_connects} ' $P/close $P/json | sed 's/ $//')"

@@ -424,10 +424,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   the last gap alone one random pair in twenty-three pinned a connection to a worker for a tick.
   An origin's answer on its way (alpha.147, `docs/design-proxy-streaming.md`): a streamed answer's head
   waits for the end of the read that brought it (`UpstreamRequest::on_data`), so an answer that arrived
-  whole with the `Content-Length` its body has is delivered as a buffered one, one write to the client
-  (`finish`, `whole_as_declared`); anything else goes as before (a chunked answer stays chunked, a
-  script's wrong length is enforced by the writer, a break within that read is a cut body: three
-  integration rows pin these and failed on a first version that took every whole answer). A body whose
+  whole is delivered as a buffered one, one write to the client (`finish`, `whole_as_declared`): with
+  the `Content-Length` its body has, or with none (a chunked answer, a script's output: the client gets
+  the length counted, as from a buffering location; the owner's decision of 2026-11-14 after a stricter
+  first step). A script's wrong length stays a streamed answer the writer holds to it, a break within
+  that read is a cut body (integration rows pin both; a first version that took every whole answer
+  failed them). A body whose
   bytes need no decoding (`raw_body_left`: a length, or to the connection's close) is read into the
   puller's buffer when a pull waits (`read_direct`; `abandon_waiter` cancels the read before the reader's
   buffer goes) and read ahead as before when none does; a buffered body of known length is read into

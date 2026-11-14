@@ -67,11 +67,12 @@ check "streaming, HTTP/2: ten streams at once on one connection each get their o
   i=0; for n in 1 700 16384 16385 65536 65537 100000 300000 1000000 3000000; do [ "$(sha256sum < "$T/par-$i" | cut -d' ' -f1)" = "${SHA[$n]}" ] || bad=$((bad+1)); i=$((i+1)); done
   echo $bad)"
 
-# A HEAD, and the framing the client sees, which is the origin's whatever path the answer took.
+# A HEAD, and the framing the client sees: a length for an answer that arrived whole (the origin's own,
+# or the one agensio counted for a chunked answer), chunked for a body still on its way.
 check "streaming: a HEAD is answered with the length and no body" "200 100000 0" \
   "$(curl -s -I -o "$T/head.txt" -w '%{http_code}' "http://127.0.0.1:18481/len/100000") $(grep -i '^content-length' "$T/head.txt" | tr -dc 0-9) $(curl -s -I "http://127.0.0.1:18481/len/100000" | sed '1,/^\r$/d' | wc -c)"
 fields() { curl -s -D - -o /dev/null "$1" | tr -d '\r' | tr 'A-Z' 'a-z' | grep -oE '^(content-length|transfer-encoding: chunked)' | sed 's/transfer-encoding: //' | paste -sd, -; }
-check "streaming: the framing is the origin's: a length stays a length, a chunked answer stays chunked, whole or in pieces" "content-length chunked chunked" \
+check "streaming: an answer that arrived whole goes out with its length, declared or counted; a chunked one still arriving goes out chunked" "content-length content-length chunked" \
   "$(fields "http://127.0.0.1:18481/whole/700") $(fields "http://127.0.0.1:18481/wchunked/700") $(fields "http://127.0.0.1:18481/chunked/300000")"
 
 # Keep-alive to the origin survives every path: forty answers of mixed kinds open few connections.

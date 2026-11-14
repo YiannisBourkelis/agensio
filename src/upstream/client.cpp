@@ -1202,11 +1202,10 @@ void UpstreamRequest::finish() {
         return;
     }
     if (!options_.buffering && !whole_as_declared()) {
-        // Streaming, the answer ended within the read that brought its head, but it is not a body of
-        // the length its head declares: no Content-Length (a chunked answer, a script's output, an
-        // answer without a body), or one its body does not have (a script's own). It goes on as a
-        // streamed answer does, so the client sees what it saw before: chunked framing, or the
-        // declared length enforced by the client side (surplus cut, a short body ending the connection).
+        // Streaming, the answer ended within the read that brought its head, but it declares a length
+        // its body does not have (a script's own Content-Length, a HEAD's answer). It goes on as a
+        // streamed answer does, so the client side holds it to what was declared, as before (surplus
+        // cut, a short body ending the connection).
         pending_ = std::move(result_.body);
         result_.body.clear();
         pending_pos_ = 0;
@@ -1219,12 +1218,12 @@ void UpstreamRequest::finish() {
     deliver_head();
 }
 
-// Whether the answer collected in result_.body is a body of the length its head declares. Only such
-// an answer is delivered whole (4.1): the client then gets the bytes and the framing a streamed
-// answer gave it, in one write.
+// Whether the answer collected in result_.body may be delivered whole (4.1): it declares no length (a
+// chunked answer, a script's output: the client gets it with the length agensio counted, as from a
+// buffering location, where it got it chunked until 0.1.0-alpha.147), or the one its body has.
 bool UpstreamRequest::whole_as_declared() const noexcept {
     const std::string_view cl = result_.headers.get("content-length");
-    if (cl.empty()) return false;
+    if (cl.empty()) return true;
     std::uint64_t declared = 0;
     const auto r = std::from_chars(cl.data(), cl.data() + cl.size(), declared);
     return r.ec == std::errc() && r.ptr == cl.data() + cl.size() && declared == result_.body.size();
