@@ -114,6 +114,7 @@
 #include "path.hpp"
 #include "services/log.hpp"
 #include "upstream/fcgi.hpp"
+#include "core/spare_buffers.hpp"
 #include "upstream/http_client.hpp"
 #include "upstream/options.hpp"
 #include "upstream/shared_pool.hpp"
@@ -17224,6 +17225,44 @@ std::vector<UpstreamAddress> origin_at(std::uint16_t port) {
 }
 }  // namespace
 
+// The worker's spare buffers (core/spare_buffers.hpp): lent empty with room or at a size, taken
+// back and handed out again without an allocation, a bounded number kept.
+static void test_spare_buffers() {
+    SpareBuffers records(2);
+    std::vector<char> a, b, c;
+    records.lend_empty(a, 17000);
+    CHECK(a.empty() && a.capacity() >= 17000 && records.spares() == 0);
+    const char* block = a.data();
+    a.assign(300, 'x');
+    records.take(a, false);
+    CHECK(a.capacity() == 0 && records.spares() == 1);
+    records.lend_empty(b, 17000);
+    CHECK(b.data() == block && b.empty() && records.spares() == 0);  // the same block, emptied
+    records.lend_empty(a, 17000);
+    records.lend_empty(c, 17000);
+    records.take(a, false);
+    records.take(b, false);
+    records.take(c, false);  // a third is not kept
+    CHECK(records.spares() == 2 && c.capacity() == 0);
+    records.take(c, false);  // nothing to take: nothing happens
+    CHECK(records.spares() == 2);
+
+    SpareBuffers pieces(1);
+    std::vector<char> p, q;
+    pieces.lend_sized(p, 65536);
+    CHECK(p.size() == 65536);
+    const char* piece = p.data();
+    pieces.take(p, true);
+    CHECK(p.empty() && pieces.spares() == 1);
+    pieces.lend_sized(q, 65536);
+    CHECK(q.data() == piece && q.size() == 65536 && pieces.spares() == 0);
+    pieces.take(q, true);
+    pieces.lend_sized(p, 4096);  // another size asked (the key changed on reload): a fresh one
+    CHECK(p.size() == 4096 && p.data() != piece);
+    // A thread has its own.
+    CHECK(&record_spares() == &record_spares() && &record_spares() != &piece_spares());
+}
+
 static void test_upstream_answer_paths() {
     UpstreamOptions streaming;
     streaming.buffering = false;
@@ -17578,6 +17617,7 @@ int main() {
     test_certificate_names();
     test_tls_stream_shed();
     test_upstream_answer_paths();
+    test_spare_buffers();
     test_acme();
 #endif
     if (failures) {

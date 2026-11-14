@@ -85,8 +85,13 @@ struct Response {
         entry.reset();
         owned_file.close();
         scratch.clear();
-        buffer.clear();
+        // A buffered answer's bytes go with the answer. Kept, the block stayed with the connection
+        // until its next buffered answer replaced it (0.1.0-alpha.147: the largest part of what a
+        // busy connection held between its requests). A small one is kept for what appends to it.
+        if (buffer.capacity() > kKeepBuffer) std::string().swap(buffer);
+        else buffer.clear();
     }
+    static constexpr std::size_t kKeepBuffer = 4096;
 };
 
 }  // namespace agensio

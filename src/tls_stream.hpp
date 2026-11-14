@@ -51,6 +51,11 @@ public:
         BIO_set_data(rbio.get(), this);
         rbio_ = rbio.get();
         SSL_set_bio(ssl_.get(), rbio.release(), wbio.release());  // SSL takes ownership of both
+        // SSL_MODE_RELEASE_BUFFERS is not set. It gives 30 KB back per busy connection (OpenSSL's two
+        // record buffers between records) and costs an allocation per record: measured again
+        // 2026-11-14, 4.86 against 4.75 us on the static HTTPS 1 KB row (four alternated rounds, pinned),
+        // nothing on 100 KB (bench/results/proxy-body-techniques-20261114.md). An idle connection gives
+        // the buffers back at its shed instead.
         SSL_set_mode(ssl_.get(), SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_AUTO_RETRY);
         SSL_set_read_ahead(ssl_.get(), 1);  // take everything staged in one BIO read
         SSL_set_accept_state(ssl_.get());

@@ -31,6 +31,7 @@
 
 #include "config.hpp"
 #include "core/response_fields.hpp"
+#include "core/spare_buffers.hpp"
 #include "core/stream.hpp"
 #include "core/strings.hpp"
 #include "core/worker_state.hpp"
@@ -79,7 +80,7 @@ public:
     // A StreamBody read is out: the answer waits on its source, not on the client.
     bool pulling() const noexcept { return pulling_; }
 
-    // Idle: the chunk and coalescing buffers go (they come back on first use).
+    // Idle: nothing of an answer is held (the buffers are the worker's, lent per answer: finish()).
     void shed() noexcept {
         std::vector<char>().swap(chunk_);
         std::vector<char>().swap(out_);
@@ -229,6 +230,9 @@ private:
             // TlsStream encrypts one buffer per write_some, so coalesce everything up to
             // one full-size record; the rest of the body follows as-is, in pieces.
             constexpr std::size_t kRecord = 16384;  // max TLS plaintext per record
+            // The worker's buffer, lent until this write is with the kernel (on_write): room for a
+            // record's plaintext and a head.
+            if (out_.capacity() == 0) record_spares().lend_empty(out_, kRecord + 1024);
             out_.assign(hdr_.begin(), hdr_.end());
             out_.insert(out_.end(), block_.begin(), block_.end());
             out_.insert(out_.end(), tail_.begin(), tail_.end());
@@ -289,6 +293,7 @@ private:
     }
 
     void on_write(const asio::error_code& ec) {
+        if (out_.capacity() != 0) record_spares().take(out_, false);  // the first write is over: its coalescing buffer goes back
         if (ec) {
             owner_.close();
             return;
@@ -323,13 +328,17 @@ private:
         sf_file_ = nullptr;
         stream_ = nullptr;
         mem_rest_ = {};
+        // The answer is whole with the kernel and nothing reads into the piece any more: it goes
+        // back to the worker. (Never from reset(): a closing connection may have a read of its
+        // source in flight into it, and the piece stays the writer's until the writer goes.)
+        if (!chunk_.empty()) piece_spares().take(chunk_, true);
         owner_.on_response_written();
     }
 
     // ---- copy path for file bodies (TLS, or platforms without sendfile) ----
 
     void stream_chunk(FileBody& fb) {
-        if (chunk_.empty()) chunk_.resize(cfg_.stream_chunk_size);
+        if (chunk_.empty()) piece_spares().lend_sized(chunk_, cfg_.stream_chunk_size);
         const std::uint64_t remaining = fb.size - fb.sent;
         const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(remaining, chunk_.size()));
         const std::int64_t got = fb.file->read_at(chunk_.data(), want, fb.offset + fb.sent);
@@ -351,7 +360,7 @@ private:
     // if it ends short the connection is closed so the client sees the truncation
     // instead of a misframed next response.
     void pull(StreamBody& source) {
-        if (chunk_.empty()) chunk_.resize(cfg_.stream_chunk_size);
+        if (chunk_.empty()) piece_spares().lend_sized(chunk_, cfg_.stream_chunk_size);
         if (source_sized_ && source_remaining_ == 0) {
             source_done_ = true;
             finish();
