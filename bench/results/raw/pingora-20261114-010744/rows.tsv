@@ -1,0 +1,12 @@
+origins	2000 origins, cold	1	agensio	1	99007.94	2.43ms	39.63ms	9.72	5322	5.32	68.9	-
+origins	2000 origins, warm	1	agensio	1	107469.45	2.37ms	3.65ms	9.30	510	0.47	69.2	-
+origins	2000 origins, cold	1	pingora	1	51021.10	4.82ms	27.08ms	19.19	4857	9.43	40.7	-
+origins	2000 origins, warm	1	pingora	1	51175.44	4.87ms	7.72ms	19.50	444	0.86	55.9	-
+origins	2000 origins, cold	4	agensio	1	349177.37	652.00us	30.32ms	10.13	16622	4.71	78.6	-
+origins	2000 origins, warm	4	agensio	1	368766.81	641.00us	4.72ms	10.01	618	0.17	78.9	-
+origins	2000 origins, cold	4	pingora	1	181857.47	1.35ms	24.20ms	20.69	5899	3.21	49.9	-
+origins	2000 origins, warm	4	pingora	1	186414.91	1.34ms	2.93ms	20.63	279	0.15	63.8	-
+mixed	mixed traffic, 256 conns	1	agensio	1	57699.71	4.01ms	14.57ms	17.22	186	0.32	59.2	-
+mixed	mixed traffic, 256 conns	1	pingora	1	42128.82	5.56ms	15.98ms	23.65	169	0.40	37.4	-
+mixed	mixed traffic, 256 conns	4	agensio	1	236737.62	658.00us	10.71ms	16.77	193	0.08	64.1	-
+mixed	mixed traffic, 256 conns	4	pingora	1	134569.88	1.52ms	11.76ms	28.67	193	0.14	43.5	-

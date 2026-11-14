@@ -87,7 +87,7 @@ std::vector<std::string> check_upstreams(const Config& cfg);
 
 class UpstreamPool {
 public:
-    explicit UpstreamPool(asio::io_context& ctx) : ctx_(ctx), tick_(ctx) {}
+    explicit UpstreamPool(asio::io_context& ctx) : ctx_(ctx), tick_(ctx) { spares_.reserve(kSpareBuffers); }
     asio::io_context& context() noexcept { return ctx_; }
 
     // Deadlines: an exchange records the time its current phase may take; one timer per
@@ -109,6 +109,19 @@ public:
     void release(const std::string& key, const UpstreamOptions& opts, std::unique_ptr<UpstreamConnection> conn);
     // Removes a queued request (its wait expired or it was cancelled).
     void dequeue(const std::string& key, const UpstreamRequest* req) noexcept;
+
+    // The read buffer of a connection, kReadBuffer bytes: a connection holds one only while an
+    // exchange reads on it. `lend_buffer` gives `c` one, a spare of this worker when one waits;
+    // `take_buffer` takes it back when the exchange is over, into the spares (at most
+    // kSpareBuffers, 1 MB a worker) or freed. Until 0.1.0-alpha.147 a kept connection held its
+    // buffer while idle: 17 KB each, 280 MB for the 16,500 connections four workers kept to
+    // 2,000 origins (bench/pingora, 2026-11-14), and a connection not kept (php-fpm's default)
+    // allocated and zeroed a new one per request.
+    static constexpr std::size_t kReadBuffer = 16 * 1024;
+    static constexpr std::size_t kSpareBuffers = 64;
+    void lend_buffer(UpstreamConnection& c);
+    void take_buffer(UpstreamConnection& c) noexcept;
+    std::size_t spare_buffers() const noexcept { return spares_.size(); }
 
     // Passive health per address, per worker (no sharing, no locks; nginx's is per worker
     // too). `pick` chooses the next member of `group` round-robin, skipping the ones marked
@@ -155,6 +168,7 @@ private:
 
     asio::io_context& ctx_;
     std::unordered_map<std::string, Upstream> upstreams_;
+    std::vector<std::vector<char>> spares_;  // read buffers no connection holds, each kReadBuffer bytes
     std::unordered_map<std::string, Health> health_;
     std::unordered_map<const void*, unsigned> rotation_;  // round-robin position per group
     std::vector<std::pair<long, std::chrono::steady_clock::time_point>> children_;  // pids to reap, since when

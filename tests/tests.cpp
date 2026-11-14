@@ -5645,6 +5645,53 @@ static void test_proxy() {
         CHECK(note == "127.0.0.1:9108 is back");
         pool.mark_success(grp[1], note);  // a healthy member says nothing
     }
+    // A connection's read buffer is the worker's, lent for an exchange (0.1.0-alpha.147): an idle
+    // connection holds none, the next exchange gets the same block back without an allocation or
+    // a zero-fill, the spares are bounded, and a buffer that grew for one huge record is not kept.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        const UpstreamOptions o;
+        auto c = pool.fresh();
+        CHECK(c->in.capacity() == 0);
+        pool.lend_buffer(*c);
+        CHECK(c->in.size() == UpstreamPool::kReadBuffer && pool.spare_buffers() == 0);
+        const char* block = c->in.data();
+        c->in[0] = 'x';
+        c->in_len = 1;
+        pool.take_buffer(*c);
+        CHECK(c->in.capacity() == 0 && c->in_len == 0 && pool.spare_buffers() == 1);
+        auto d = pool.fresh();
+        pool.lend_buffer(*d);
+        CHECK(d->in.data() == block && d->in.size() == UpstreamPool::kReadBuffer && pool.spare_buffers() == 0);
+        pool.lend_buffer(*d);  // one that has its buffer keeps it
+        CHECK(d->in.data() == block);
+        // release() takes it back whether the connection is kept (an open socket) or not.
+        int fds[2] = {-1, -1};
+        CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+        d->socket.assign(asio::generic::stream_protocol(AF_UNIX, SOCK_STREAM), fds[0]);
+        pool.release("k", o, std::move(d));
+        CHECK(pool.spare_buffers() == 1);
+        pool.lend_buffer(*c);
+        pool.release("k", o, std::move(c));  // never connected: not kept, its buffer still is
+        CHECK(pool.spare_buffers() == 1);
+        ::close(fds[1]);
+        // Bounded, and only whole buffers of the one size.
+        std::vector<std::unique_ptr<UpstreamConnection>> many;
+        for (std::size_t i = 0; i < UpstreamPool::kSpareBuffers + 8; ++i) {
+            many.push_back(pool.fresh());
+            pool.lend_buffer(*many.back());
+        }
+        for (auto& m : many) pool.take_buffer(*m);
+        CHECK(pool.spare_buffers() == UpstreamPool::kSpareBuffers);
+        for (auto& m : many) CHECK(m->in.capacity() == 0);
+        auto big = pool.fresh();
+        pool.lend_buffer(*big);  // takes a spare: there is room for one again
+        big->in.resize(big->in.size() * 2);
+        CHECK(pool.spare_buffers() == UpstreamPool::kSpareBuffers - 1);
+        pool.take_buffer(*big);
+        CHECK(big->in.capacity() == 0 && pool.spare_buffers() == UpstreamPool::kSpareBuffers - 1);
+    }
     // What counts toward max_fails: a member that cannot be reached or does not answer as HTTP.
     // Never agensio's own verdict on one exchange: its queue, its temp file, and (since
     // 0.1.0-alpha.144; the alpha.143 report, N4) its head_max: the member answered, at once and in

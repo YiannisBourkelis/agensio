@@ -188,7 +188,9 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   per-worker, bounded, explicit queue with priority reserve, idle keep-alive
   connections; `UpstreamRequest`: one exchange with connect/send/read timeouts, one
   retry for GET/HEAD on a dead reused connection, request body from memory / spill /
-  stream, response buffered with temp-file spill or streamed with a high-water mark),
+  stream, response buffered with temp-file spill or streamed with a high-water mark; a connection's
+  16 KB read buffer is the pool's, lent for an exchange and back among the worker's spares when it ends,
+  so a kept connection holds none, alpha.147),
   `fcgi.hpp` (FastCGI record and params codec, CGI head parser; fuzzed), `fcgi_client`
   (`FcgiRequest`, the FastCGI encoding/decoding), `http_head.hpp` (response head parser;
   fuzzed), `http_client` (`HttpRequest`: HTTP/1.1 framing both ways, keep-alive rules).
@@ -1266,9 +1268,13 @@ two things. Memory under load with large bodies (the mix: 60 against 37.5 MB; ag
 origin's answer by default, the likely cause, not measured apart). And many origins with several
 workers: 2,000 origins by Host, four workers, agensio opens 2.8 times the connections (a pool per
 worker against Pingora's one shared pool) and holds 335 MB against 49, about 17 KB per kept origin
-connection, which is the row Pingora was built for. Seen there and not acted on: an idle TLS client
-connection costs agensio 71 KB against 14 KB plain (OpenSSL's buffers), and a kept origin connection
-17 KB.
+connection, which is the row Pingora was built for. Seen there: an idle TLS client connection costs
+agensio 71 KB against 14 KB plain (OpenSSL's buffers; not acted on), and a kept origin connection 17 KB:
+its 16 KB read buffer, since alpha.147 the worker's and lent per exchange (`UpstreamPool::lend_buffer`,
+`take_buffer`, at most 64 spares a worker), which took that row from 335 to 79 MB
+(`pingora-20261114-010744.md`; 54 MB of it the 2,002 sites) with CPU and the proxy A/B flat
+(`ab-20261114-011109.md`, and `ab-20261114-011629.md`: twelve samples a side of the two proxy rows, 1.002
+and 1.013, after three rounds had read the 100 KB row at 1.063; that row swings 18 to 20 us on one binary).
 
 HTTP/2 (G0, 2026-09-23, `bench/results/ab-20260923-171228.md`, `h2-20260923-164706.md`
 for nginx and Caddy, `h2-20260923-171144.md` for agensio's final rows; one worker, h2load

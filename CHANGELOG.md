@@ -19,6 +19,26 @@
   The benchmark upstream takes `-a ADDRESS` (`-a 0.0.0.0` answers on all of 127.0.0.0/8, so one
   process stands for thousands of origins). No server code changed.
 
+- **A kept connection to an origin no longer holds its read buffer.** Every connection to an
+  origin or to php-fpm had a 16 KB read buffer of its own and kept it while idle in the pool: 17 KB
+  per kept connection, 280 MB for the 16,500 connections four workers kept to 2,000 origins in
+  the Pingora comparison. The buffer is now the worker's, lent to a connection for an exchange
+  (`UpstreamPool::lend_buffer`, `take_buffer`): when the exchange ends it goes back to the
+  worker's spares, at most 64 of them (1 MB a worker), so an idle connection holds none and the
+  next exchange takes a spare without an allocation. A connection that is not kept (php-fpm's
+  default) gets a spare too, where it allocated and zeroed 16 KB per request before.
+  Measured with `bench/pingora/run.sh -T "origins mixed"` (`bench/results/pingora-20261114-010744.md`):
+  2,000 origins, four workers, 335 MB before and 79 MB now (Pingora 50 to 64 MB; 54 MB of
+  agensio's is the 2,002 configured sites), one worker 149 to 69 MB; CPU per request and the
+  connections opened unchanged. Nothing changes in what is served.
+  Tests, written first: the unit test (an idle connection holds no buffer, the next exchange
+  gets the same block, the spares are bounded, a buffer that grew is not kept, `release` takes
+  it back kept or not). Checked: unit tests, also in the build
+  without OpenSSL; the integration suite (866, php-fpm and proxied origins); `bench/ab.sh -P`
+  against 0.1.0-alpha.146, three rounds: static rows 0.981 to 1.037, proxy rows 1.044, 1.063 and
+  0.952 (`bench/results/ab-20261114-011109.md`); the two proxy rows again with twelve samples a
+  side, 1.013 and 1.002 (`ab-20261114-011629.md`): the 100 KB row swings 18 to 20 us on one binary.
+
 ## 0.1.0-alpha.146 (2026-11-14)
 
 - **Security fix: the pseudo-headers of an HTTP/2 or HTTP/3 request are held to HTTP/1's rules.**

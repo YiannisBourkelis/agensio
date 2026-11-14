@@ -220,6 +220,24 @@ std::size_t UpstreamPool::limit_for(const UpstreamOptions& opts, bool priority) 
 
 std::unique_ptr<UpstreamConnection> UpstreamPool::fresh() { return std::make_unique<UpstreamConnection>(ctx_); }
 
+void UpstreamPool::lend_buffer(UpstreamConnection& c) {
+    if (c.in.size() >= kReadBuffer) return;
+    if (c.in.empty() && !spares_.empty()) {  // a spare keeps its size: no allocation, nothing zeroed
+        c.in = std::move(spares_.back());
+        spares_.pop_back();
+        return;
+    }
+    c.in.resize(kReadBuffer);
+}
+
+void UpstreamPool::take_buffer(UpstreamConnection& c) noexcept {
+    c.in_len = 0;
+    // Only a buffer of the one size is kept (one that grew for a huge record is freed), and never
+    // more than the spares hold room for, reserved at construction: no allocation here.
+    if (c.in.size() == kReadBuffer && spares_.size() < kSpareBuffers) spares_.push_back(std::move(c.in));
+    c.in = std::vector<char>();
+}
+
 void UpstreamPool::acquire(const std::string& key, const UpstreamOptions& opts, bool priority,
                            std::shared_ptr<UpstreamRequest> req) {
     Upstream& u = upstreams_[key];
@@ -273,6 +291,7 @@ void UpstreamPool::grant(Upstream& u, Waiter w) {
 void UpstreamPool::release(const std::string& key, const UpstreamOptions& opts, std::unique_ptr<UpstreamConnection> conn) {
     Upstream& u = upstreams_[key];
     if (u.active > 0) --u.active;
+    if (conn) take_buffer(*conn);  // kept or not, its read buffer goes back to the worker
     if (conn && conn->sock().is_open() && u.idle.size() < opts.max_idle) {
         conn->reused = false;
         conn->in_len = 0;
@@ -832,7 +851,7 @@ void UpstreamRequest::read_more() {
         deadline_ = std::chrono::steady_clock::time_point::max();
         return;
     }
-    if (conn_->in.size() < 16 * 1024) conn_->in.resize(16 * 1024);
+    if (conn_->in.size() < UpstreamPool::kReadBuffer) pool_.lend_buffer(*conn_);
     if (conn_->in_len == conn_->in.size()) conn_->in.resize(conn_->in.size() * 2);  // one huge record
     reading_ = true;
     arm(options_.read_timeout);

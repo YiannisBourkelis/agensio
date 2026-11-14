@@ -137,6 +137,24 @@ This is 2,000 origins with steady traffic to each. With far more origins and lit
 each, connections idle out before a worker needs them again, and the gap in connections opened
 grows with the worker count. That shape was not measured.
 
+## After the first change it led to (0.1.0-alpha.147)
+
+The 17 KB per kept origin connection was its read buffer, held while idle. It is now the worker's,
+lent for an exchange. The rows Pingora was ahead on, run again
+([pingora-20261114-010744.md](../results/pingora-20261114-010744.md), one round):
+
+| 2,000 origins | agensio before | agensio now | Pingora |
+|---|---|---|---|
+| one worker, first 10 s | 149 MB | 69 MB | 41 MB |
+| one worker, next 10 s | 157 MB | 69 MB | 56 MB |
+| four workers, first 10 s | 335 MB | 79 MB | 50 MB |
+| four workers, next 10 s | 344 MB | 79 MB | 64 MB |
+
+About 54 MB of agensio's is the 2,002 configured sites, which the Pingora program does not have:
+it computes an origin's address from its name. The connections opened (16,622 against 5,899 with
+four workers) and the CPU per request (10.0 against 20.6 us) are as before, and so is the request
+mix (59 against 37 MB with one worker).
+
 ## What this does and does not show
 
 It shows what each costs per request and per connection on one machine over loopback, with a
