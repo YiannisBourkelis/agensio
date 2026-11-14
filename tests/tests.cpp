@@ -6184,7 +6184,54 @@ static void test_tls_stream_shed() {
     CHECK(SSL_write(c.get(), "ping-4", 6) == 6);
     settle();
     CHECK_EQ(got, std::string("ping-4"));
+
+    // The session moves to another event loop with its descriptor (a kept connection to an origin
+    // handed from one worker to another, docs/design-upstream-pool.md 4.2): shed, given up, the
+    // descriptor released from the first loop and assigned to the second, adopted there. The
+    // descriptor keeps O_NONBLOCK across the move (hardening item 7: OpenSSL writes to it).
+    server_reads();
+    settle();
     tls.lowest_layer().cancel(ignored);
+    settle();
+    CHECK(tls.shed());
+    SSL* session = tls.detach();
+    CHECK(session != nullptr);
+    const int moved = tls.lowest_layer().release(ignored);
+    CHECK(!ignored && moved == fds[0]);
+    asio::io_context ctx2;
+    Sock sock2(ctx2);
+    sock2.assign(asio::generic::stream_protocol(AF_UNIX, SOCK_STREAM), moved);
+    CHECK((::fcntl(moved, F_GETFL) & O_NONBLOCK) != 0);
+    BasicTlsStream<Sock> tls2(std::move(sock2), session);
+    CHECK(!tls2.holds_staging());
+    const auto pump2 = [&] {
+        char buf[32768];
+        int n;
+        while ((n = BIO_read(to_server, buf, sizeof buf)) > 0) send_all(buf, static_cast<std::size_t>(n));
+        ctx2.poll();
+        ctx2.restart();
+        ssize_t r;
+        while ((r = ::recv(fds[1], buf, sizeof buf, MSG_DONTWAIT)) > 0) BIO_write(from_server, buf, static_cast<int>(r));
+    };
+    got = "(pending)";
+    tls2.async_read_some(asio::buffer(in), [&](const std::error_code& ec, std::size_t n) { got = ec ? "(error)" : std::string(in, n); });
+    CHECK(SSL_write(c.get(), "ping-5", 6) == 6);
+    for (int i = 0; i < 20; ++i) pump2();
+    CHECK_EQ(got, std::string("ping-5"));
+    CHECK(tls2.holds_staging());
+    wrote = false;
+    asio::async_write(tls2, asio::buffer(big), [&](const std::error_code& ec, std::size_t) { wrote = !ec; });
+    std::string back2;
+    {
+        char buf[16384];
+        for (int i = 0; i < 400 && back2.size() < big.size(); ++i) {
+            const int n = SSL_read(c.get(), buf, sizeof buf);
+            if (n > 0) back2.append(buf, static_cast<std::size_t>(n));
+            else pump2();
+        }
+    }
+    for (int i = 0; i < 20; ++i) pump2();
+    CHECK(wrote && back2 == big);
     ::close(fds[1]);
 }
 

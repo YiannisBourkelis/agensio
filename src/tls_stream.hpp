@@ -56,6 +56,17 @@ public:
         SSL_set_accept_state(ssl_.get());
     }
 
+    // Adopts a session another stream gave up with detach(), over the same descriptor, now in
+    // `socket`'s event loop (a kept connection to an origin moving between workers,
+    // docs/design-upstream-pool.md 4.2). The session's write BIO names the descriptor, which a
+    // move between loops does not change; its read BIO is pointed at this stream. The staging
+    // buffer comes with the first read.
+    BasicTlsStream(socket_type&& socket, SSL* adopted) noexcept : socket_(std::move(socket)) {
+        ssl_.reset(adopted);
+        rbio_ = SSL_get_rbio(adopted);
+        BIO_set_data(rbio_, this);
+    }
+
     BasicTlsStream(BasicTlsStream&& o) noexcept
         : socket_(std::move(o.socket_)),
           ssl_(std::move(o.ssl_)),
@@ -105,6 +116,15 @@ public:
         return true;
     }
     bool holds_staging() const noexcept { return rbuf_ != nullptr; }
+
+    // Gives the session up to be adopted by a stream in another event loop, or freed with
+    // SSL_free(). Only after shed() returned true: nothing waits in either buffer. This stream is
+    // finished: only lowest_layer() may still be used, to release the descriptor.
+    SSL* detach() noexcept {
+        if (rbio_) BIO_set_data(rbio_, nullptr);
+        rbio_ = nullptr;
+        return ssl_.release();
+    }
 
     lowest_layer_type& lowest_layer() noexcept { return socket_; }
     const lowest_layer_type& lowest_layer() const noexcept { return socket_; }
