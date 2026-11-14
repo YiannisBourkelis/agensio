@@ -155,6 +155,16 @@ it computes an origin's address from its name. The connections opened (16,622 ag
 four workers) and the CPU per request (10.0 against 20.6 us) are as before, and so is the request
 mix (59 against 37 MB with one worker).
 
+The 71 KB of an idle TLS client connection was mostly buffers: agensio's staging buffer and
+OpenSSL's read and write buffers. They are now given back when the connection goes idle
+([pingora-20261114-020730.md](../results/pingora-20261114-020730.md)):
+
+| 10,000 idle client connections | agensio before | agensio now | Pingora |
+|---|---|---|---|
+| HTTP/1.1 | 14.0 KB each | 14.0 KB each | 35.6 KB each |
+| HTTP/1.1 over TLS | 71.4 KB each | 44.6 KB each | 115.4 KB each |
+| HTTP/2 over TLS | 82.2 KB each | 66.0 KB each | 111.4 KB each |
+
 ## What this does and does not show
 
 It shows what each costs per request and per connection on one machine over loopback, with a

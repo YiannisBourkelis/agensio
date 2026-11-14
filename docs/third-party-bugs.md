@@ -149,6 +149,36 @@ When asked to check the third-party bugs:
   oldest supported distribution.
 - **Search terms:** `metadata block`, `WriteMetadataHeader`, `MSKIPBYTES`, `EMIT_METADATA`.
 
+### OpenSSL: `SSL_free_buffers` frees a read buffer that is still in use
+
+- **Upstream:** [CVE-2024-4741](https://openssl-library.org/news/secadv/20240528.txt), OpenSSL's
+  advisory of 2024-05-28, severity low. Fixed in 3.0.14, 3.1.6, 3.2.2 and 3.3.1 (and 1.1.1y for
+  premium support); every later branch carries the fix. Distributions patched older releases
+  without renumbering them: Ubuntu 22.04 ships 3.0.2 and 24.04 ships 3.0.13, both with the fix
+  backported.
+- **Last checked:** 2026-11-14. **Status:** fixed upstream; libraries numbered below the fix are
+  still installed.
+- **The bug:** `SSL_free_buffers` is meant to succeed only when the buffer for incoming records is
+  idle. It freed the buffer in two cases where it was in use: a record's header had been received
+  and processed and its body had not arrived, and a whole record had been processed of which the
+  application had read only part. A use after free on the next read.
+- **How it showed in agensio:** it did not. It was read in the advisory while agensio's first call
+  of the function was written (0.1.0-alpha.147: an idle TLS connection gives back OpenSSL's read
+  and write buffers). The first case is reachable from the network: a client sends exactly the five
+  bytes of a record header and waits past the idle shed. `SSL_has_pending()`, which agensio asks
+  first, shows bytes that wait unprocessed and not a header already processed.
+- **How agensio handles it:** `BasicTlsStream::shed` (`src/tls_stream.hpp`) calls
+  `SSL_free_buffers` only when `tls::free_buffers_safe()` says the loaded library carries the fix by
+  its release number (`free_buffers_fixed` in `src/core/openssl_compat.cpp`, held to the advisory's
+  versions by the unit test). On a library numbered below it, patched or not, an idle TLS connection
+  gives back agensio's own 17 KB staging buffer and keeps OpenSSL's two (about 33 KB). Nothing on
+  the request path. `test_tls_stream_shed` sheds with half a record arrived and reads it whole after.
+- **When fixed:** once no supported distribution ships an OpenSSL numbered below the fix (Ubuntu
+  22.04's standard support ends in April 2027, 24.04's in 2029), the check can go. Sooner, a
+  distribution's patched release could be recognised by name; that was not built, since it trades
+  33 KB per idle TLS connection against trusting a version string.
+- **Search terms:** `SSL_free_buffers`, `CVE-2024-4741`, `ssl3_release_read_buffer`.
+
 ## Checked: fixed upstream
 
 - **php-fpm [bug #69860](https://bugs.php.net/bug.php?id=69860)** "php-fpm process accounting is

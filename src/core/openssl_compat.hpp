@@ -40,6 +40,16 @@ bool expect_peer_name(SSL* ssl, const char* host) noexcept;
 // sent an address as it was given. Call before the handshake.
 bool send_server_name(SSL* ssl, const char* host) noexcept;
 
+// SSL_free_buffers() may be called on this library: it carries the fix of CVE-2024-4741 (the call
+// freed a read buffer still in use when a record's header had been processed and its body had not
+// arrived, a use after free; OpenSSL's advisory of 2024-05-28), by its release: 3.0.14, 3.1.6, 3.2.2,
+// 3.3.1 and everything after. A distribution that patched an older release without renumbering it
+// (Ubuntu 22.04's 3.0.2, 24.04's 3.0.13) is read as unfixed: there an idle TLS connection keeps
+// OpenSSL's two buffers. `free_buffers_fixed` is the rule, unit tested; `free_buffers_safe` asks the
+// library loaded, once.
+bool free_buffers_fixed(unsigned major, unsigned minor, unsigned patch) noexcept;
+bool free_buffers_safe() noexcept;
+
 } // namespace agensio::tls
 
 #endif // AGENSIO_HAS_TLS

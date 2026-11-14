@@ -547,6 +547,9 @@ private:
             shedding_ = false;
             if (ec == asio::error::operation_aborted) {
                 std::vector<char>().swap(in_);
+                // Over TLS the stream's own buffers too (the staging buffer, OpenSSL's read and write
+                // buffers): 51 KB of the 71 an idle TLS connection held (0.1.0-alpha.147).
+                if constexpr (requires { socket_.shed(); }) socket_.shed();
                 wait_readable();
                 return;
             }

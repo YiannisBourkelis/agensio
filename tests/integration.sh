@@ -3286,6 +3286,57 @@ if python3 -c 'import h2' 2>/dev/null; then
   check "idle 2.6 s then a request on the same connection: HTTP/2 h2c" "1 1 none open" "$(python3 tests/h2/reload_client.py 8080 / -- sleep 2.6 | awk -F' [|] ' '{print (length($1)>100), (length($2)>100), $3, $4}')"
   check "idle 2.6 s then a request on the same connection: HTTP/2 over TLS" "1 1 none open" "$(python3 tests/h2/reload_client.py --tls 8443 / -- sleep 2.6 | awk -F' [|] ' '{print (length($1)>100), (length($2)>100), $3, $4}')"
 fi
+# Over TLS the idle connection also gives back the stream's buffers (the staging buffer, OpenSSL's
+# read and write buffers; 0.1.0-alpha.147): a 100 KB answer after the idle spell is whole, and a TLS
+# record of which only the first bytes arrived before the spell is read whole once its rest comes
+# (nothing is freed under it; the client is an SSL on memory BIOs, so it decides which bytes go).
+idle_tls() {
+  python3 - "$ROOT/bench/www/style.css" <<'PY'
+import hashlib, socket, ssl, sys, time
+want = hashlib.md5(open(sys.argv[1], "rb").read()).hexdigest()
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+ctx.set_alpn_protocols(["http/1.1"])
+sock = socket.create_connection(("127.0.0.1", 8443)); sock.settimeout(5)
+inc, out = ssl.MemoryBIO(), ssl.MemoryBIO()
+tls = ctx.wrap_bio(inc, out, server_hostname="localhost")
+def flush():
+    data = out.read()
+    if data: sock.sendall(data)
+    return data
+def call(f, *a):
+    while True:
+        try:
+            return f(*a)
+        except ssl.SSLWantReadError:
+            flush(); inc.write(sock.recv(65536))
+call(tls.do_handshake); flush()
+def answer():
+    d = b""
+    while b"\r\n\r\n" not in d: d += call(tls.read, 65536)
+    head, body = d.split(b"\r\n\r\n", 1)
+    n = int([l for l in head.decode().split("\r\n") if l.lower().startswith("content-length:")][0].split(":")[1])
+    while len(body) < n: body += call(tls.read, 65536)
+    return head.split(b" ")[1].decode(), body
+def get(path, split=False):
+    tls.write(("GET %s HTTP/1.1\r\nHost: localhost\r\n\r\n" % path).encode())
+    record = out.read()
+    if split:  # nine bytes of the record, the idle spell, then the rest
+        sock.sendall(record[:9]); time.sleep(2.6); sock.sendall(record[9:])
+    else:
+        sock.sendall(record)
+    return answer()
+r = [get("/")[0]]
+time.sleep(2.6)
+status, body = get("/style.css")
+r.append(status + ("=same" if hashlib.md5(body).hexdigest() == want else "=differs"))
+r.append(get("/", split=True)[0])
+time.sleep(2.6)
+r.append(get("/")[0])
+print(" ".join(r))
+PY
+}
+check "idle over TLS: a 100 KB answer after the spell is whole; half a record before the spell and its rest after are one request; idle again, served again" \
+  "200 200=same 200 200" "$(idle_tls)"
 
 # Audit 2.1/2.2/2.3: private single-worker instances, including the old timeout-loop hang.
 if [ "$(uname -s)" = Linux ] && python3 -c 'import h2' 2>/dev/null; then

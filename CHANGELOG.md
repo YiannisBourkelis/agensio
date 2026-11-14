@@ -19,6 +19,35 @@
   The benchmark upstream takes `-a ADDRESS` (`-a 0.0.0.0` answers on all of 127.0.0.0/8, so one
   process stands for thousands of origins). No server code changed.
 
+- **An idle TLS connection gives back its buffers.** A client connection idle for two seconds
+  already shed its own buffers; over TLS it kept three more: agensio's 17 KB staging buffer and
+  OpenSSL's read and write buffers, 51 KB of heap together. They are now freed at the same idle
+  shed (`BasicTlsStream::shed`, called by the HTTP/1 and HTTP/2 connections once the cancelled
+  read has returned) and come back with the next bytes. Nothing is freed while bytes of a record
+  wait or a write is in flight.
+  Measured with 10,000 idle connections (`bench/pingora/run.sh -T memory`,
+  `bench/results/pingora-20261114-020730.md`), resident memory per connection: HTTP/1.1 over TLS
+  71.4 KB before and 44.6 now, HTTP/2 over TLS 82.2 and 66.0 (Pingora 115 and 111; a plain
+  connection 14.0). The heap in use falls by the whole 51 KB; resident memory by less, because
+  much of those buffers was never touched. About 25 KB of what remains is OpenSSL's own state
+  for a connection.
+  - OpenSSL's buffers are freed with `SSL_free_buffers`, which had a use after free until 3.0.14,
+    3.1.6, 3.2.2 and 3.3.1 (CVE-2024-4741: it freed the read buffer when exactly a record's
+    header had arrived). agensio calls it only on a library numbered at or above the fix
+    (`tls::free_buffers_safe`). On Ubuntu 22.04 and 24.04, whose patched libraries keep the old
+    number, an idle TLS connection gives back the staging buffer alone.
+    `docs/third-party-bugs.md` has the entry.
+  Tests, written first: `test_tls_stream_shed` (a real handshake over a socket pair with the
+  client on memory BIOs: an exchange, the shed, a request and a 40 KB answer after it, half a
+  record arrived before the shed and read whole after, the version rule); two rows of the
+  integration suite (a 100 KB answer after the idle spell over TLS, a record split across it).
+  Checked: unit tests, also under the address and undefined-behaviour sanitizers and in the
+  build without OpenSSL; the integration suite (867); the idle rows and 800 idle TLS connections
+  against the sanitizer build, no report; `bench/ab.sh -2`, three rounds: HTTP/1 rows 0.999 to
+  1.017, HTTP/2 rows 1.022 to 1.062 (`bench/results/ab-20261114-021609.md`); the HTTP/2 rows and
+  an HTTPS row again with six rounds, 0.983 to 1.019 (`ab-20261114-022252.md`). The request path
+  gains one test of a pointer where a TLS read waits for bytes.
+
 - **A kept connection to an origin no longer holds its read buffer.** Every connection to an
   origin or to php-fpm had a 16 KB read buffer of its own and kept it while idle in the pool: 17 KB
   per kept connection, 280 MB for the 16,500 connections four workers kept to 2,000 origins in

@@ -264,6 +264,11 @@ private:
             shedding_ = false;
             if (ec == asio::error::operation_aborted) {
                 std::vector<char>().swap(in_);
+                // TLS: the stream's own buffers, as HTTP/1 gives them back; not under a write in flight,
+                // whose record OpenSSL's write buffer holds (the next shed finds it done).
+                if constexpr (requires { socket_.shed(); }) {
+                    if (!writer_.writing()) socket_.shed();
+                }
                 wait_readable();
                 return;
             }

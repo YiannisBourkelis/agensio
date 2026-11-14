@@ -6024,6 +6024,170 @@ static void test_certificate_names() {
           !valid_host_name("*.a.test") && !valid_host_name("1.2.3.4") && !valid_host_name("a..b") && !valid_host_name("a b"));
 }
 
+// An idle TLS connection gives back its buffers (BasicTlsStream::shed, 0.1.0-alpha.147): the 17 KB
+// staging buffer and OpenSSL's read and write buffers, about 51 KB of the 71 KB an idle TLS client
+// connection held against a plain one's 14 KB (bench/pingora, 2026-11-14). A real handshake over a
+// socket pair; the client's side is an SSL on memory BIOs, so the test decides which bytes arrive.
+static void test_tls_stream_shed() {
+    struct KeyFree { void operator()(EVP_PKEY* k) const noexcept { EVP_PKEY_free(k); } };
+    struct CertFree { void operator()(X509* x) const noexcept { X509_free(x); } };
+    struct CtxFree { void operator()(SSL_CTX* c) const noexcept { SSL_CTX_free(c); } };
+    struct SslFree { void operator()(SSL* s) const noexcept { SSL_free(s); } };
+    const std::unique_ptr<EVP_PKEY, KeyFree> key(EVP_EC_gen("P-256"));
+    const std::unique_ptr<X509, CertFree> cert(X509_new());
+    CHECK(key && cert);
+    if (!key || !cert) return;
+    X509_set_version(cert.get(), 2);
+    ASN1_INTEGER_set(X509_get_serialNumber(cert.get()), 1);
+    X509_gmtime_adj(X509_getm_notBefore(cert.get()), 0);
+    X509_gmtime_adj(X509_getm_notAfter(cert.get()), 86400);
+    X509_NAME* name = X509_NAME_new();
+    X509_NAME_add_entry_by_NID(name, NID_commonName, V_ASN1_UTF8STRING, reinterpret_cast<const unsigned char*>("shed.test"), -1, -1, 0);
+    X509_set_subject_name(cert.get(), name);
+    X509_set_issuer_name(cert.get(), name);
+    X509_NAME_free(name);
+    X509_set_pubkey(cert.get(), key.get());
+    CHECK(X509_sign(cert.get(), key.get(), EVP_sha256()) > 0);
+    asio::ssl::context server(asio::ssl::context::tls_server);
+    CHECK(SSL_CTX_use_certificate(server.native_handle(), cert.get()) == 1 && SSL_CTX_use_PrivateKey(server.native_handle(), key.get()) == 1);
+    const std::unique_ptr<SSL_CTX, CtxFree> client_ctx(SSL_CTX_new(TLS_client_method()));
+
+    int fds[2] = {-1, -1};
+    CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    asio::io_context ctx;
+    using Sock = asio::generic::stream_protocol::socket;
+    Sock sock(ctx);
+    sock.assign(asio::generic::stream_protocol(AF_UNIX, SOCK_STREAM), fds[0]);
+    sock.native_non_blocking(true);
+    BasicTlsStream<Sock> tls(std::move(sock), server);
+
+    const std::unique_ptr<SSL, SslFree> c(SSL_new(client_ctx.get()));
+    BIO* from_server = BIO_new(BIO_s_mem());
+    BIO* to_server = BIO_new(BIO_s_mem());
+    SSL_set_bio(c.get(), from_server, to_server);  // the SSL owns both
+    SSL_set_connect_state(c.get());
+    const auto send_all = [&](const char* p, std::size_t n) {
+        while (n > 0) {
+            const ssize_t w = ::send(fds[1], p, n, 0);
+            if (w <= 0) return;
+            p += w;
+            n -= static_cast<std::size_t>(w);
+        }
+    };
+    // The client's output to the socket, the server's loop, the server's output to the client.
+    const auto pump = [&] {
+        char buf[32768];
+        int n;
+        while ((n = BIO_read(to_server, buf, sizeof buf)) > 0) send_all(buf, static_cast<std::size_t>(n));
+        ctx.poll();
+        ctx.restart();
+        ssize_t r;
+        while ((r = ::recv(fds[1], buf, sizeof buf, MSG_DONTWAIT)) > 0) BIO_write(from_server, buf, static_cast<int>(r));
+    };
+    const auto client_reads = [&](std::size_t want) {
+        std::string out;
+        char buf[16384];
+        for (int i = 0; i < 400 && out.size() < want; ++i) {
+            const int n = SSL_read(c.get(), buf, sizeof buf);
+            if (n > 0) out.append(buf, static_cast<std::size_t>(n));
+            else pump();
+        }
+        return out;
+    };
+    // One read of the server: the text it got, "(aborted)" for a cancelled one, "(pending)" while none came.
+    std::string got;
+    char in[256];
+    const auto server_reads = [&] {
+        got = "(pending)";
+        tls.async_read_some(asio::buffer(in), [&](const std::error_code& ec, std::size_t n) {
+            got = ec == asio::error::operation_aborted ? "(aborted)" : ec ? "(error)" : std::string(in, n);
+        });
+    };
+    const auto settle = [&] { for (int i = 0; i < 20; ++i) pump(); };
+
+    bool shook = false;
+    tls.async_handshake([&](const std::error_code& ec) { shook = !ec; });
+    for (int i = 0; i < 100 && !(shook && SSL_is_init_finished(c.get())); ++i) {
+        SSL_do_handshake(c.get());
+        pump();
+    }
+    CHECK(shook && SSL_is_init_finished(c.get()));
+    if (!shook) return;
+
+    // An exchange, then idle: the pending read is cancelled as the connection's shed cancels it.
+    server_reads();
+    CHECK(SSL_write(c.get(), "ping-1", 6) == 6);
+    settle();
+    CHECK_EQ(got, std::string("ping-1"));
+    bool wrote = false;
+    asio::async_write(tls, asio::buffer("pong-1", 6), [&](const std::error_code& ec, std::size_t) { wrote = !ec; });
+    settle();
+    CHECK(wrote && client_reads(6) == "pong-1");
+    server_reads();
+    settle();
+    CHECK_EQ(got, std::string("(pending)"));
+    CHECK(tls.holds_staging());
+    asio::error_code ignored;
+    tls.lowest_layer().cancel(ignored);
+    settle();
+    CHECK_EQ(got, std::string("(aborted)"));
+    CHECK(tls.shed() && !tls.holds_staging());
+    CHECK(tls.shed());  // nothing left to give: still true
+    // OpenSSL's own buffers are freed only by a library with the fix of CVE-2024-4741.
+    CHECK(!tls::free_buffers_fixed(1, 1, 1) && !tls::free_buffers_fixed(3, 0, 2) && !tls::free_buffers_fixed(3, 0, 13) && tls::free_buffers_fixed(3, 0, 14) &&
+          !tls::free_buffers_fixed(3, 1, 5) && tls::free_buffers_fixed(3, 1, 6) && !tls::free_buffers_fixed(3, 2, 1) && tls::free_buffers_fixed(3, 2, 2) &&
+          !tls::free_buffers_fixed(3, 3, 0) && tls::free_buffers_fixed(3, 3, 1) && tls::free_buffers_fixed(3, 4, 0) && tls::free_buffers_fixed(3, 5, 7) &&
+          tls::free_buffers_fixed(4, 0, 0) && tls::free_buffers_fixed(4, 1, 0));
+    CHECK(tls::free_buffers_safe() == tls::free_buffers_fixed(OPENSSL_version_major(), OPENSSL_version_minor(), OPENSSL_version_patch()));
+
+    // Traffic after it: the buffers are back, a request is read and a 40 KB answer written whole.
+    server_reads();
+    CHECK(SSL_write(c.get(), "ping-2", 6) == 6);
+    settle();
+    CHECK_EQ(got, std::string("ping-2"));
+    CHECK(tls.holds_staging());
+    std::string big(40000, 'a');
+    for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<char>('a' + i % 23);
+    wrote = false;
+    asio::async_write(tls, asio::buffer(big), [&](const std::error_code& ec, std::size_t) { wrote = !ec; });
+    const std::string back = client_reads(big.size());
+    settle();
+    CHECK(wrote && back == big);
+
+    // Half a record has arrived when the connection goes idle: nothing is freed (the bytes are in
+    // OpenSSL's read buffer), and the record is read whole once its rest arrives.
+    server_reads();
+    CHECK(SSL_write(c.get(), "ping-3", 6) == 6);
+    char record[512];
+    const int len = BIO_read(to_server, record, sizeof record);
+    CHECK(len > 12);
+    if (len > 12) {
+        send_all(record, 9);
+        settle();
+        CHECK_EQ(got, std::string("(pending)"));
+        tls.lowest_layer().cancel(ignored);
+        settle();
+        CHECK_EQ(got, std::string("(aborted)"));
+        CHECK(!tls.shed() && tls.holds_staging());
+        server_reads();
+        send_all(record + 9, static_cast<std::size_t>(len) - 9);
+        settle();
+        CHECK_EQ(got, std::string("ping-3"));
+    }
+    // And idle again with nothing waiting: freed.
+    server_reads();
+    settle();
+    tls.lowest_layer().cancel(ignored);
+    settle();
+    CHECK(tls.shed() && !tls.holds_staging());
+    server_reads();
+    CHECK(SSL_write(c.get(), "ping-4", 6) == 6);
+    settle();
+    CHECK_EQ(got, std::string("ping-4"));
+    tls.lowest_layer().cancel(ignored);
+    ::close(fds[1]);
+}
+
 static void test_acme() {
     using namespace std::chrono;
     // base64url, RFC 4648 section 5 test vectors and no padding.
@@ -16792,6 +16956,7 @@ int main() {
 #ifdef AGENSIO_HAS_TLS
     test_openssl_compat();
     test_certificate_names();
+    test_tls_stream_shed();
     test_acme();
 #endif
     if (failures) {

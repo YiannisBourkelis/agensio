@@ -49,6 +49,22 @@ bool expect_peer_name(SSL* ssl, const char* host) noexcept {
     return X509_VERIFY_PARAM_set1_ip_asc(param, host) == 1 || X509_VERIFY_PARAM_set1_host(param, host, 0) == 1;
 }
 
+bool free_buffers_fixed(unsigned major, unsigned minor, unsigned patch) noexcept {
+    if (major != 3) return major > 3;
+    switch (minor) {
+        case 0: return patch >= 14;
+        case 1: return patch >= 6;
+        case 2: return patch >= 2;
+        case 3: return patch >= 1;
+        default: return true;
+    }
+}
+
+bool free_buffers_safe() noexcept {
+    static const bool safe = free_buffers_fixed(OPENSSL_version_major(), OPENSSL_version_minor(), OPENSSL_version_patch());
+    return safe;
+}
+
 bool send_server_name(SSL* ssl, const char* host) noexcept {
     // a2i_IPADDRESS is what X509_VERIFY_PARAM_set1_ip_asc reads an address with, so a host the
     // certificate is checked for as an address is exactly a host that is not sent as a name.

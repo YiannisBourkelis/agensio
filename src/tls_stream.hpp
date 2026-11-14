@@ -89,6 +89,23 @@ public:
         return true;
     }
 
+    // The connection went idle: what an idle TLS connection holds only for traffic is given back, the
+    // staging buffer and OpenSSL's read and write buffers (SSL_free_buffers), and comes back with the
+    // next bytes. Call with no read or write in flight. False, and nothing freed, while bytes of a
+    // record wait in either or a write is still wanted.
+    //
+    // OpenSSL's buffers only on a library with the fix of CVE-2024-4741 (tls::free_buffers_safe):
+    // before it SSL_free_buffers() freed a read buffer in use when exactly a record's header had
+    // arrived, which SSL_has_pending() does not show. The staging buffer is agensio's own.
+    bool shed() noexcept {
+        if (rpos_ != rlen_ || SSL_has_pending(ssl_.get()) != 0 || SSL_want_write(ssl_.get())) return false;
+        rbuf_.reset();
+        rpos_ = rlen_ = 0;
+        if (tls::free_buffers_safe()) (void)SSL_free_buffers(ssl_.get());
+        return true;
+    }
+    bool holds_staging() const noexcept { return rbuf_ != nullptr; }
+
     lowest_layer_type& lowest_layer() noexcept { return socket_; }
     const lowest_layer_type& lowest_layer() const noexcept { return socket_; }
     executor_type get_executor() noexcept { return socket_.get_executor(); }
@@ -248,6 +265,7 @@ private:
                 rlen_ -= rpos_;
                 rpos_ = 0;
             }
+            if (!rbuf_) rbuf_ = std::make_unique_for_overwrite<char[]>(kReadBufferSize);  // given back while idle (shed)
             if (rlen_ >= kReadBufferSize) {
                 // A full staging buffer OpenSSL refuses to consume means a record larger
                 // than the protocol allows: a zero-length read here would spin forever.

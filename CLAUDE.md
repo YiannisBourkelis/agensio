@@ -220,6 +220,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   comes back with the next bytes), and each worker calls `malloc_trim(0)` at most once a
   second after sheds or closes, because glibc keeps freed 16 KB chunks mapped. Measured:
   an idle HTTP/1 connection 13 KB (25 before), HTTP/2 19 KB (40 before), nginx 7.5 KB.
+  Over TLS the stream's own buffers go at the same shed (alpha.147, `BasicTlsStream::shed`: the 17 KB
+  staging buffer and OpenSSL's read and write buffers through `SSL_free_buffers`, only on a library
+  numbered at or above the fix of CVE-2024-4741, `tls::free_buffers_safe`, `docs/third-party-bugs.md`;
+  never with bytes of a record waiting or a write in flight): 51 KB of heap, an idle HTTP/1 TLS
+  connection 71 to 45 KB resident, HTTP/2 82 to 66 (`pingora-20261114-020730.md`); about 25 KB of the
+  rest is OpenSSL's state for a connection.
 - **Request core (phase A1)**: the unit of work is a `Stream` (`Request` + `Response`);
   HTTP/1 embeds one per connection. Handlers fill a `Response`: status, an optional
   prebuilt header block (the cache entry's, already terminated), extra `Headers`, and a
@@ -1269,7 +1275,8 @@ origin's answer by default, the likely cause, not measured apart). And many orig
 workers: 2,000 origins by Host, four workers, agensio opens 2.8 times the connections (a pool per
 worker against Pingora's one shared pool) and holds 335 MB against 49, about 17 KB per kept origin
 connection, which is the row Pingora was built for. Seen there: an idle TLS client connection costs
-agensio 71 KB against 14 KB plain (OpenSSL's buffers; not acted on), and a kept origin connection 17 KB:
+agensio 71 KB against 14 KB plain (its buffers, given back at the idle shed since alpha.147: 45 KB,
+Pingora 115), and a kept origin connection 17 KB:
 its 16 KB read buffer, since alpha.147 the worker's and lent per exchange (`UpstreamPool::lend_buffer`,
 `take_buffer`, at most 64 spares a worker), which took that row from 335 to 79 MB
 (`pingora-20261114-010744.md`; 54 MB of it the 2,002 sites) with CPU and the proxy A/B flat
