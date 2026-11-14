@@ -165,7 +165,7 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
 - `core/`: `result.hpp` (`Result<T>`, to become `std::expected`), `headers.hpp` (fixed-capacity
   name/value views), `request.hpp`, `response.hpp` (status, prebuilt header block, extra
   fields, `Body`), `body.hpp` (`MemoryBody`, `FileBody`, `StreamBody` for later phases),
-  `stream.hpp` (one request/response exchange), `worker_state.hpp`, `strings.hpp`,
+  `stream.hpp` (one request/response exchange), `worker_state.hpp`, `strings.hpp`, `spare_buffers.hpp` (a worker's buffers lent per answer, alpha.147),
   `openssl_compat.hpp` (the three OpenSSL calls whose spelling differs between 3.0 and 4.1, each
   behind one function held to the old call by the unit tests; nothing of it runs per request),
   `router.hpp/.cpp` (`Router`: site by Host, then `Router::location`: exact before
@@ -230,6 +230,13 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   never with bytes of a record waiting or a write in flight): 51 KB of heap, an idle HTTP/1 TLS
   connection 71 to 45 KB resident, HTTP/2 82 to 66 (`pingora-20261114-020730.md`); about 25 KB of the
   rest is OpenSSL's state for a connection.
+  Busy memory (alpha.147, `docs/design-proxy-streaming.md` 11, found with massif under the request mix):
+  an answer's buffers are the worker's, lent per answer (`core/spare_buffers.hpp`, per thread: the HTTP/1
+  writer's TLS coalescing buffer for the first write, its 64 KB piece for files and streamed bodies until
+  the answer is whole; never given back from `reset()`, a read may be in flight into the piece), and
+  `Response::reset` frees a body buffer above 4 KB with its answer. A busy TLS connection held 173 KB
+  and holds 128, a plain one 84 and 50; free on the static rows. `SSL_MODE_RELEASE_BUFFERS` gives 30 KB
+  more and costs 2.3 % on the static HTTPS 1 KB row: built, measured and taken out the same day.
 - **Request core (phase A1)**: the unit of work is a `Stream` (`Request` + `Response`);
   HTTP/1 embeds one per connection. Handlers fill a `Response`: status, an optional
   prebuilt header block (the cache entry's, already terminated), extra `Headers`, and a
@@ -415,6 +422,21 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   store, limits and health stay per worker, locations of one origin must agree; status
   `upstream_pool.shared`; `tests/shared-pool.sh`. Rule learned: decide density by the average gap; by
   the last gap alone one random pair in twenty-three pinned a connection to a worker for a tick.
+  An origin's answer on its way (alpha.147, `docs/design-proxy-streaming.md`): a streamed answer's head
+  waits for the end of the read that brought it (`UpstreamRequest::on_data`), so an answer that arrived
+  whole with the `Content-Length` its body has is delivered as a buffered one, one write to the client
+  (`finish`, `whole_as_declared`); anything else goes as before (a chunked answer stays chunked, a
+  script's wrong length is enforced by the writer, a break within that read is a cut body: three
+  integration rows pin these and failed on a first version that took every whole answer). A body whose
+  bytes need no decoding (`raw_body_left`: a length, or to the connection's close) is read into the
+  puller's buffer when a pull waits (`read_direct`; `abandon_waiter` cancels the read before the reader's
+  buffer goes) and read ahead as before when none does; a buffered body of known length is read into
+  `result_.body`, sized once (`body_into_place`, `grow_for_overwrite` in `core/strings.hpp`). Before,
+  `buffering = false` cost 5 to 62 % more CPU than buffering (two writes for a small answer, a 100 KB
+  body copied twice in 16 KB pieces). `tests/proxy-streaming.sh` (its own origin, `tests/stream-origin.py`:
+  every size in every framing over each protocol), `test_upstream_answer_paths` (a scripted origin in
+  the unit tests). Rule learned: a memory or path change is judged on the static HTTPS rows, pinned and
+  alternated; the proxied rows swing 10 % and hid a 2.3 % cost.
   CGI (D5, `src/upstream/cgi_client.*`, `src/handlers/cgi.*`): the
   exchange's connect step forks the script with a socketpair as stdin/stdout, so the
   shared exchange code does the rest; processes capped and reaped per worker pool.
@@ -1298,8 +1320,21 @@ its 16 KB read buffer, since alpha.147 the worker's and lent per exchange (`Upst
 and 1.013, after three rounds had read the 100 KB row at 1.063; that row swings 18 to 20 us on one binary).
 The connections opened are `proxy = { pool = "shared" }`'s (alpha.147, the upstream paragraph above):
 6,145 against Pingora's 5,828 in the first ten seconds and 216 against 315 in the next, at 9.9 us
-(`pingora-20261114-043030.md`, the whole comparison with it on). Left to Pingora: memory under load
-with large bodies, and on that row agensio's 54 MB for 2,002 configured sites.
+(`pingora-20261114-043030.md`, the whole comparison with it on). The answer's path and the buffers a
+busy connection kept (alpha.147, `docs/design-proxy-streaming.md`, found by asking what Pingora's
+engineers would ask: it streams, agensio was buffering): `pingora-20261114-134129.md` (default mode)
+1.3 to 2.1 times less CPU on every row (100 KB 25.7 against 46.8 us, the mix 14.2 against 24.2),
+`pingora-20261114-135729.md` (both streaming, `run.sh -X 'buffering = false'`) 1.2 to 1.8 times, where
+agensio streaming had cost 5 to 62 % more than buffering and lost the ten-stream HTTP/2 row; memory
+after the HTTP/2 100 KB row about 100 to 38 MB (Pingora 48), after the mix 60 to 46.5 (Pingora 37).
+Profiled there (perf, `proxy-body-techniques-20261114.md`): a small proxied request is 38,100 cycles,
+76 % kernel (four system calls), 16 % agensio; on 100 KB rows 28 % is `clear_page_erms` (Debian's
+`init_on_alloc` zeroing the pages a send copies into). Left to Pingora: memory under the mix by 10 to
+20 % (the 33 KB a waiting read holds and OpenSSL's 33 KB), memory with 2,000 sites (the configuration
+is held twice, `Server::cfg_` and the generation, 6.5 KB a `SiteConfig` and 2.6 KB a `LocationConfig`
+each; nothing reads the boot copy's sites; not changed), 5 % of the cold connections. Seen in the user
+space of a small request and not taken: the origin's head parsed twice (`feed_head`, 2.5 %), three or
+four clock reads (1.6 %).
 
 HTTP/2 (G0, 2026-09-23, `bench/results/ab-20260923-171228.md`, `h2-20260923-164706.md`
 for nginx and Caddy, `h2-20260923-171144.md` for agensio's final rows; one worker, h2load
@@ -1357,7 +1392,8 @@ What got us there, in order of impact:
    a custom zero-copy BIO feeds to OpenSSL; `socket.async_wait()` was rejected because
    asio re-registers the kevent filter on every non-speculative op.
 3. `SSL_set_read_ahead(1)` (one read per record), no `ERR_clear_error()` before each call
-   (only after an error), `SSL_MODE_RELEASE_BUFFERS` not set (measured: no gain).
+   (only after an error), `SSL_MODE_RELEASE_BUFFERS` not set (2026-11-14: 30 KB less per busy
+   connection, 2.3 % more CPU on HTTPS 1 KB).
 4. Header + body prefix coalesced into one 16 KB record for TLS (`Connection::out_`).
 5. **sendfile for streamed files on plain sockets** (`Connection::sendfile_step`,
    `send_file` in `file.cpp`; macOS, Linux, FreeBSD). The pread + send path copied every
@@ -1408,7 +1444,7 @@ compared; `perf stat -e instructions,L1-icache-load-misses` tells work (instruct
 (misses).
 
 Things measured with no effect (do not retry without new evidence): cache hit-path
-refcount and `last_access` traffic (under 2 %), `SSL_MODE_RELEASE_BUFFERS`, streaming
+refcount and `last_access` traffic (under 2 %), `SSL_MODE_RELEASE_BUFFERS` (a cost, item 3), streaming
 chunk size, memory-BIO reads.
 
 How to profile on macOS: `sample <pid> 5 -file out.txt` while wrk runs, then read the

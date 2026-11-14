@@ -1,0 +1,26 @@
+proxy	/json, 64 conns	1	direct	1	1468893.73	27.00us	88.00us	2.64	-	-	5.5	-
+proxy	/big 100 KB, 64 conns	1	direct	1	303484.39	133.00us	3.16ms	12.49	-	-	5.5	-
+proxy	/json, 64 conns	1	agensio	1	116072.18	539.00us	830.00us	8.62	1	0.00	22.7	-
+proxy	/json, 16 conns	1	agensio	1	110400.29	136.00us	219.00us	9.06	1	0.00	18.5	-
+proxy	/big 100 KB, 64 conns	1	agensio	1	23651.80	2.64ms	3.82ms	42.28	2	0.01	22.8	-
+proxy	/slow 20 ms, 256 conns	1	agensio	1	12588.18	20.07ms	23.05ms	12.11	208	1.65	43.5	-
+tls	/json, 64 conns	1	agensio	1	83707.92	760.00us	1.09ms	11.94	1	0.00	26.2	-
+tls	/big 100 KB, 64 conns	1	agensio	1	19384.72	3.23ms	4.42ms	51.59	1	0.01	27.4	-
+h2	/json, 64 conns x 1	1	agensio	1	68596.04	928us (mean)	4.41ms (max)	14.57	2	0.00	26.8	-
+h2	/json, 64 conns x 10	1	agensio	1	66607.92	9.54ms (mean)	14.50ms (max)	14.99	188	0.29	72.7	-
+h2	/big 100 KB, 64 conns x 10	1	agensio	1	13314.08	46.79ms (mean)	63.28ms (max)	75.09	248	1.81	75.7	-
+mixed	mixed traffic, 256 conns	1	agensio	1	51858.63	4.44ms	15.07ms	19.19	168	0.32	62.5	-
+mixed	mixed traffic, 256 conns	4	agensio	1	206988.59	0.88ms	10.98ms	19.11	193	0.09	63.7	-
+proxy	/json, 64 conns	1	direct	2	1488308.84	33.00us	625.00us	2.63	-	-	9.8	-
+proxy	/big 100 KB, 64 conns	1	direct	2	316549.93	123.00us	3.54ms	11.88	-	-	9.8	-
+proxy	/json, 64 conns	1	agensio	2	98241.43	650.00us	0.87ms	10.18	1	0.00	22.6	-
+proxy	/json, 16 conns	1	agensio	2	107678.12	145.00us	216.00us	9.28	1	0.00	18.4	-
+proxy	/big 100 KB, 64 conns	1	agensio	2	24172.82	2.58ms	3.76ms	41.37	1	0.00	22.7	-
+proxy	/slow 20 ms, 256 conns	1	agensio	2	12473.07	20.06ms	25.33ms	12.76	226	1.80	43.4	-
+tls	/json, 64 conns	1	agensio	2	85847.26	759.00us	1.00ms	11.65	2	0.00	26.2	-
+tls	/big 100 KB, 64 conns	1	agensio	2	19853.47	3.13ms	4.48ms	50.32	1	0.00	27.3	-
+h2	/json, 64 conns x 1	1	agensio	2	75406.11	843us (mean)	7.70ms (max)	13.24	25	0.03	26.7	-
+h2	/json, 64 conns x 10	1	agensio	2	76460.66	8.31ms (mean)	13.84ms (max)	13.08	250	0.36	72.4	-
+h2	/big 100 KB, 64 conns x 10	1	agensio	2	13396.66	46.33ms (mean)	62.40ms (max)	74.60	257	1.84	75.3	-
+mixed	mixed traffic, 256 conns	1	agensio	2	51220.73	4.49ms	15.13ms	19.45	135	0.26	61.9	-
+mixed	mixed traffic, 256 conns	4	agensio	2	204578.04	819.00us	10.89ms	19.29	193	0.09	63.9	-

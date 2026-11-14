@@ -1,0 +1,2 @@
+opened 10000
+alive 10000

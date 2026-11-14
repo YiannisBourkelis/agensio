@@ -22,9 +22,11 @@
 # mixed and origins run once per worker count of -w (default "1 4"); the rest with one worker.
 #
 #   bench/pingora/run.sh [-d SECONDS] [-r ROUNDS] [-T "proxy tls h2 mixed origins memory"]
-#                        [-s "agensio pingora"] [-w "1 4"] [-n ORIGINS] [-i IDLE] [-S] [-P]
+#                        [-s "agensio pingora"] [-w "1 4"] [-n ORIGINS] [-i IDLE] [-S] [-X KEYS] [-P]
 #   -S  agensio with proxy.pool = "shared" on every site (docs/design-upstream-pool.md): idle
 #       connections to an origin a worker asks seldom are shared by the workers, as Pingora's are.
+#   -X  further keys for agensio's proxy table on every site, as written in a site file
+#       (-X 'buffering = false'): one setting against another on the same rows.
 #   -P  no CPU pinning. By default (24 CPUs or more) the proxy runs on CPUs 0..W-1, the upstream
 #       on 4-7 and the load generator on 8-11 and their siblings, so none takes another's time.
 #
@@ -37,12 +39,12 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 HERE="$ROOT/bench/pingora"
 TMP="$ROOT/bench/tmp/pingora/run"
 DUR=10; ROUNDS=1; TESTS="proxy tls h2 mixed origins memory"; SERVERS="agensio pingora"; WORKER_SETS="1 4"
-ORIGINS=2000; IDLE=10000; PIN=1; SHARED=0
+ORIGINS=2000; IDLE=10000; PIN=1; SHARED=0; EXTRA=""
 ARGS="$*"
-while getopts 'd:r:T:s:w:n:i:PS' o; do
+while getopts 'd:r:T:s:w:n:i:PSX:' o; do
   case $o in
     d) DUR=$OPTARG ;; r) ROUNDS=$OPTARG ;; T) TESTS=$OPTARG ;; s) SERVERS=$OPTARG ;; w) WORKER_SETS=$OPTARG ;;
-    n) ORIGINS=$OPTARG ;; i) IDLE=$OPTARG ;; P) PIN=0 ;; S) SHARED=1 ;; *) exit 2 ;;
+    n) ORIGINS=$OPTARG ;; i) IDLE=$OPTARG ;; P) PIN=0 ;; S) SHARED=1 ;; X) EXTRA=$OPTARG ;; *) exit 2 ;;
   esac
 done
 export LC_NUMERIC=C
@@ -85,6 +87,7 @@ ROWS="$RAW/rows.tsv"; MEM="$RAW/memory.tsv"; : > "$ROWS"; : > "$MEM"
 origin_address() { echo "127.1.$(($1 / 250)).$(($1 % 250 + 1))"; }  # the K-th origin, as bench/pingora/proxy maps it
 agensio_conf() {  # workers origins
   local pool=""; [ $SHARED = 1 ] && pool=', pool = "shared"'
+  [ -n "$EXTRA" ] && pool="$pool, $EXTRA"
   {
     printf '[server]\nworkers = %s\nidle_timeout = 65\nmax_requests_per_connection = 1000000\n\n[log]\naccess = "off"\nerror = "stderr"\n' "$1"
     for l in "127.0.0.1:8093" "127.0.0.1:8493"; do
@@ -285,7 +288,7 @@ PINGORA_TLS=$(strings -a "$PINGORA_BIN" 2>/dev/null | awk '/^OpenSSL [0-9]/ {pri
   echo
   echo "- machine: $(uname -m), $(grep -m1 'model name' /proc/cpuinfo | sed 's/.*: //'), $(nproc) CPUs, $(uname -sr)"
   echo "- commit: $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')$(git -C "$ROOT" diff --quiet 2>/dev/null || echo '+dirty'); command: \`bench/pingora/run.sh $ARGS\`"
-  echo "- agensio: $("$AGENSIO_BIN" -v 2>&1 | head -1), $(openssl version 2>/dev/null | cut -d' ' -f1-2) from the system, proxy.pool = $([ $SHARED = 1 ] && echo '"shared" (-S)' || echo '"worker", its default')"
+  echo "- agensio: $("$AGENSIO_BIN" -v 2>&1 | head -1), $(openssl version 2>/dev/null | cut -d' ' -f1-2) from the system, proxy.pool = $([ $SHARED = 1 ] && echo '"shared" (-S)' || echo '"worker", its default')$([ -n "$EXTRA" ] && echo ", proxy keys added (-X): $EXTRA")"
   echo "- Pingora: ${PINGORA_VERSION:-not run} (bench/pingora/proxy, release build with LTO), its own ${PINGORA_TLS:-OpenSSL} linked in (the crate's \`openssl\` feature)"
   echo "- origin: build/agensio_upstream, $UP_WORKERS workers; load: $(wrk -v 2>&1 | head -1 | cut -d' ' -f1-2), h2load $(h2load --version | awk '{print $2}'), ${DUR} s a row, $ROUNDS round(s), 4 load threads (8 with more than one proxy worker)"
   if [ $PIN = 1 ]; then echo "- pinned: the proxy on CPUs 0..W-1 (W workers or threads), the origin on 4-7, the load generator on 8-11 and 20-23"

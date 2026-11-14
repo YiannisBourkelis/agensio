@@ -200,6 +200,81 @@ request, 14 against 37 KB per idle plain connection, 45 against 115 KB over TLS.
 uses less memory under load with large bodies (the request mix: 40 against 60 MB), where agensio
 buffers an origin's answer by default.
 
+## An answer's path and a busy connection's memory (0.1.0-alpha.147, `run.sh -X`)
+
+Two things the comparison had not looked at, both found by asking what a Pingora engineer would
+ask first.
+
+**Pingora streams, agensio buffered.** Every run above has agensio collecting an origin's answer
+before sending it (its default) against a proxy that always streams. With `buffering = false`
+agensio cost 5 to 62 % more CPU than buffering, and one row went to Pingora
+(`bench/results/proxy-body-techniques-20261114.md`). The path was rebuilt
+(`docs/design-proxy-streaming.md`): a small answer leaves in one write, a larger body is read
+straight into the buffer it is sent from, and a buffered body straight into its place. `run.sh -X
+'buffering = false'` puts agensio in the same mode as Pingora.
+
+**A busy connection kept buffers it did not use.** 173 KB per busy TLS connection, against
+Pingora's 100: the last answer's body, a write-coalescing buffer and a 64 KB piece, kept between
+requests. They now go with the answer (128 KB; a plain connection 84 to 50 KB).
+
+The whole comparison again, default mode, two rounds:
+[pingora-20261114-134129.md](../results/pingora-20261114-134129.md). Against the run of the
+section above:
+
+| CPU per request | agensio before | agensio now | Pingora | Pingora / agensio |
+|---|---|---|---|---|
+| small JSON | 8.04 us | 7.37 us | 13.52 us | 1.84 |
+| 100 KB | 31.28 us | 25.66 us | 46.77 us | 1.82 |
+| HTTPS, small JSON | 8.58 us | 8.80 us | 15.16 us | 1.72 |
+| HTTPS, 100 KB | 49.90 us | 41.31 us | 54.25 us | 1.31 |
+| HTTP/2, ten streams, small JSON | 8.56 us | 7.00 us | 10.97 us | 1.57 |
+| HTTP/2, ten streams, 100 KB | 61.79 us | 51.28 us | 78.14 us | 1.52 |
+| request mix, one worker | 16.62 us | 14.15 us | 24.18 us | 1.71 |
+| request mix, four workers | 16.23 us | 14.77 us | 27.16 us | 1.84 |
+| 2,000 origins, four workers | 9.92 us | 9.34 us | 19.33 us | 2.07 |
+
+| resident memory after the row | agensio before | agensio now | Pingora |
+|---|---|---|---|
+| HTTP/2, ten streams, 100 KB | 97 to 107 MB | 38.3 MB | 48.4 MB |
+| request mix, one worker | 60 MB | 46.5 MB | 37.3 MB |
+| request mix, four workers | 64 MB | 47.8 MB | 42.6 MB |
+| 100 KB over HTTPS | 32.6 MB | 23.5 MB | 21.9 MB |
+| 2,000 origins, four workers, cold | 74.5 MB | 74.5 MB | 50.0 MB |
+
+Both proxies streaming (`run.sh -S -X 'buffering = false'`, two rounds):
+[pingora-20261114-135729.md](../results/pingora-20261114-135729.md); "before" is the same mode on
+the commit before the change ([pingora-20261114-103905.md](../results/pingora-20261114-103905.md)).
+
+| CPU per request, both streaming | agensio before | agensio now | Pingora | Pingora / agensio |
+|---|---|---|---|---|
+| small JSON | 9.40 us | 7.27 us | 12.79 us | 1.76 |
+| 100 KB | 41.83 us | 29.89 us | 45.56 us | 1.52 |
+| HTTPS, small JSON | 11.80 us | 8.52 us | 15.68 us | 1.84 |
+| HTTPS, 100 KB | 50.96 us | 46.99 us | 54.91 us | 1.17 |
+| HTTP/2, one stream, small JSON | 13.91 us | 10.02 us | 15.61 us | 1.56 |
+| HTTP/2, ten streams, small JSON | 14.04 us | 8.91 us | 11.90 us | 1.34 |
+| HTTP/2, ten streams, 100 KB | 74.85 us | 60.73 us | 80.91 us | 1.33 |
+| request mix, one worker | 19.32 us | 16.64 us | 25.51 us | 1.53 |
+| request mix, four workers | 19.20 us | 16.36 us | 27.74 us | 1.70 |
+
+So the lead holds in Pingora's own mode: 1.2 to 1.8 times less CPU on every row, where the row of
+ten HTTP/2 streams had gone to Pingora before. Streaming, agensio holds 58.8 MB on the HTTP/2
+100 KB row against Pingora's 51.1 (it reads an answer ahead up to 256 KB so a slow client does not
+hold the origin; Pingora ties the two together), and 46 against 37 MB on the mix.
+
+What is still Pingora's:
+
+- **Memory under the request mix**, by 10 to 20 %. What agensio holds there now is the two buffers
+  of the read that waits for a connection's next request (33 KB) and OpenSSL's own two record
+  buffers (33 KB). OpenSSL can release its two between records (`SSL_MODE_RELEASE_BUFFERS`, which
+  Pingora has on): 97 KB per busy connection then, under Pingora's 100, for 2.3 % more CPU on
+  small static HTTPS answers. Measured, and not set: agensio does not pay CPU on the static path
+  for memory an idle connection gives back anyway.
+- **Memory with 2,000 configured sites.** agensio holds its configuration twice (the boot
+  configuration and the running generation), about 20 KB a site; Pingora's test program has no
+  configuration to hold. Not changed in this step.
+- **Connections opened from a cold start**, by 5 %.
+
 ## What this does and does not show
 
 It shows what each costs per request and per connection on one machine over loopback, with a

@@ -1,0 +1,29 @@
+starting benchmark...
+spawning thread #0: 16 total client(s). 38778 total requests
+spawning thread #1: 16 total client(s). 38778 total requests
+spawning thread #2: 16 total client(s). 38777 total requests
+spawning thread #3: 16 total client(s). 38777 total requests
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+progress: 9% done
+progress: 19% done
+progress: 29% done
+progress: 39% done
+progress: 49% done
+progress: 59% done
+progress: 69% done
+progress: 79% done
+progress: 89% done
+progress: 99% done
+
+finished in 9.86s, 15723.31 req/s, 1.50GB/s
+requests: 155110 total, 155110 started, 155110 done, 155110 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 155110 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 14.80GB (15896315881) total, 1.94MB (2034783) headers (space savings 89.33%), 14.79GB (15883108890) data
+                     min         max         mean         sd        +/- sd
+time for request:     1.32ms     59.25ms     39.71ms      5.14ms    84.84%
+time for connect:     1.03ms    328.59ms    117.87ms    109.00ms    50.00%
+time to 1st byte:     2.91ms    368.80ms    140.06ms    119.82ms    51.56%
+req/s           :     245.64      253.22      248.51        2.52    51.56%

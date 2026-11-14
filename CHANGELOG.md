@@ -19,6 +19,57 @@
   The benchmark upstream takes `-a ADDRESS` (`-a 0.0.0.0` answers on all of 127.0.0.0/8, so one
   process stands for thousands of origins). No server code changed.
 
+- **A proxied answer costs less on its way to the client, streamed or buffered.** The comparison
+  with Pingora had measured agensio buffering an origin's answer (its default) against a proxy that
+  always streams. Measured streaming (`buffering = false`), agensio cost 5 to 62 % more CPU than
+  it did buffering: the head went to the client the moment it was parsed, so a small answer took
+  two writes, and a larger body was read 16 KB at a time and copied twice. Three changes, none of
+  which alters what a client receives (`docs/design-proxy-streaming.md`):
+  - A streamed answer's head waits for the end of the read that brought it. An answer that arrived
+    whole, with the `Content-Length` its body has, goes to the client in one write, as a buffered
+    one does. Anything else goes as before: a chunked answer stays chunked, a script's own
+    `Content-Length` is still enforced, an answer that breaks within that read is still a body cut
+    short.
+  - A streamed body that needs no decoding (one with a length, or one that ends with the
+    connection) is read straight into the buffer the client side sends from, as much as that side
+    asked for: no pass through the connection's buffer and the pending queue. A client slower than
+    the origin is still read ahead for, so the origin is held no longer than before; a client that
+    leaves with such a read in flight has it cancelled before its buffer is let go.
+  - A buffered body of known length is read straight into its place, a string sized once from
+    `Content-Length`, where each read was appended to a string that grew by doubling.
+  Measured (`bench/ab.sh HEAD -P -2`, three rounds, `bench/results/ab-20261114-133451.md`): the
+  default proxied 100 KB answer 18.6 to 14.5 us (0.780), every static, HTTP/2 and small proxied row
+  flat (0.989 to 1.029). Streaming, one worker pinned (`bench/pingora/run.sh -X 'buffering = false'`,
+  `pingora-20261114-103905.md` before and `pingora-20261114-135729.md` after): small JSON 9.4 to
+  7.3 us, over HTTPS 11.8 to 8.5, HTTP/2 at ten streams 14.0 to 8.9, 100 KB 41.8 to 29.9, the
+  request mix 19.3 to 16.6. `tests/proxy-streaming.sh` (new, in the integration suite) sends
+  bodies of every size around the buffers' sizes in each framing through a streaming and a
+  buffered site over HTTP/1.1, HTTPS, HTTP/2 and HTTP/3, then a slow client, eighty clients that
+  leave mid-body and an origin that breaks off.
+
+- **A busy connection holds less.** A heap profile of 256 TLS connections under a request mix
+  showed 165 KB each, most of it kept between requests for no use: the last buffered answer's body
+  until the next one replaced it, a 16 KB write-coalescing buffer and a 64 KB piece for files and
+  streamed bodies from their first use to the connection's idle shed. Now the answer's body is
+  freed when the response is done (above 4 KB), and the two writer buffers are the worker's, lent
+  to a connection for the write or the answer that needs them (`core/spare_buffers.hpp`). A busy
+  TLS connection holds 128 KB where it held 173 (111 against 158 with 1,024 connections), a busy
+  plain one 50 KB where it held 84. No cost: the static HTTPS rows, alternated four times, 4.74
+  against 4.75 us and 34.28 against 34.32. OpenSSL's `SSL_MODE_RELEASE_BUFFERS` would give 30 KB
+  more per busy TLS connection; it costs 2.3 % on small static HTTPS answers, so it was measured
+  and left out.
+
+- **Against Pingora after these two.** The comparison again (`bench/pingora/README.md`, its last
+  section; `pingora-20261114-134129.md` in the default mode, `pingora-20261114-135729.md` with both
+  proxies streaming): agensio spends 1.3 to 2.1 times less CPU per request on every row in its
+  default mode (100 KB 25.7 against 46.8 us, over HTTPS 41.3 against 54.3, the request mix 14.2
+  against 24.2) and 1.2 to 1.8 times less with both streaming, where the row of ten HTTP/2 streams
+  had gone to Pingora. Memory after the HTTP/2 100 KB row went from about 100 MB to 38 (Pingora
+  48), after the request mix from 60 MB to 46.5 (Pingora 37). Left to Pingora: memory under the
+  request mix by 10 to 20 %, memory with 2,000 configured sites (agensio holds its configuration
+  twice, about 20 KB a site), and 5 % fewer connections opened from a cold start. `run.sh -X KEYS`
+  adds keys to agensio's proxy table (`-X 'buffering = false'`).
+
 - **`proxy = { pool = "shared" }`: connections to an origin shared by the workers.** Every worker
   keeps its own idle connections to an origin, which costs nothing per request and is why a
   proxied request is cheap, but it means the connections an origin holds grow with the worker
