@@ -115,6 +115,7 @@
 #include "services/log.hpp"
 #include "upstream/fcgi.hpp"
 #include "upstream/options.hpp"
+#include "upstream/shared_pool.hpp"
 
 using namespace agensio;
 
@@ -5691,6 +5692,99 @@ static void test_proxy() {
         CHECK(pool.spare_buffers() == UpstreamPool::kSpareBuffers - 1);
         pool.take_buffer(*big);
         CHECK(big->in.capacity() == 0 && pool.spare_buffers() == UpstreamPool::kSpareBuffers - 1);
+    }
+    // The store of idle connections that belong to no worker (docs/design-upstream-pool.md 4.1):
+    // the newest is taken, an entry is bounded, the oldest is closed beyond the bound and past its
+    // idle timeout, an empty entry reads as empty without a lock, and the store closes what it
+    // holds when it goes.
+    {
+        using Idle = SharedPool::Idle;
+        const auto now = SharedPool::Clock::now();
+        const auto ms = [](int n) { return std::chrono::milliseconds(n); };
+        // A connected pair: `mine` goes to the store, `peer` tells whether the store closed it.
+        struct Pair { int mine = -1, peer = -1; };
+        const auto pair = [] {
+            int fds[2] = {-1, -1};
+            CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+            return Pair{fds[0], fds[1]};
+        };
+        const auto peer_closed = [](const Pair& p) {
+            char byte;
+            return ::recv(p.peer, &byte, 1, MSG_DONTWAIT) == 0;  // 0: the other end is closed; -1 EAGAIN: open
+        };
+        const auto idle = [&](const Pair& p, std::chrono::milliseconds age = std::chrono::milliseconds(0)) {
+            return Idle{p.mine, AF_UNIX, nullptr, now - age};
+        };
+        std::vector<Pair> pairs;
+        for (int i = 0; i < 8; ++i) pairs.push_back(pair());
+        {
+            SharedPool store;
+            SharedPool::Entry& a = store.entry("127.0.0.1:9001");
+            CHECK(&a == &store.entry("127.0.0.1:9001") && &a != &store.entry("127.0.0.1:9002"));
+            Idle got;
+            CHECK(a.idle() == 0 && !store.take(a, got, now) && store.idle_total() == 0);
+            store.give(a, idle(pairs[0]), 2, ms(0));
+            store.give(a, idle(pairs[1]), 2, ms(0));
+            CHECK(a.idle() == 2 && store.idle_total() == 2);
+            CHECK(store.take(a, got, now) && got.fd == pairs[1].mine && got.family == AF_UNIX && a.idle() == 1);  // the newest
+            store.give(a, got, 2, ms(0));
+            store.give(a, idle(pairs[2]), 2, ms(0));  // beyond the bound: the oldest is closed
+            CHECK(a.idle() == 2 && peer_closed(pairs[0]) && !peer_closed(pairs[1]) && !peer_closed(pairs[2]));
+            store.give(a, idle(pairs[3]), 0, ms(0));  // a bound of none keeps none
+            CHECK(a.idle() == 2 && peer_closed(pairs[3]));
+            // Expiry: one given a second ago under a 100 ms timeout is closed by the sweep, the fresh one stays.
+            SharedPool::Entry& b = store.entry("127.0.0.1:9002");
+            store.give(b, idle(pairs[4], ms(1000)), 8, ms(100));
+            store.give(b, idle(pairs[5]), 8, ms(100));
+            CHECK(store.sweep_due(now + ms(5000)) && !store.sweep_due(now + ms(5200)) && store.sweep_due(now + ms(6100)));
+            store.sweep(now);
+            CHECK(b.idle() == 1 && peer_closed(pairs[4]) && !peer_closed(pairs[5]));
+            // ... and by a taker that finds only expired ones.
+            CHECK(!store.take(b, got, now + ms(500)) && b.idle() == 0 && peer_closed(pairs[5]));
+            b.note_dead();
+            for (const auto& [key, st] : store.stats()) {
+                if (key == "127.0.0.1:9001") CHECK(st.idle == 2 && st.given == 5 && st.taken == 1 && st.expired == 2 && st.dead == 0);
+                if (key == "127.0.0.1:9002") CHECK(st.idle == 0 && st.given == 2 && st.taken == 0 && st.expired == 2 && st.dead == 1);
+            }
+            CHECK(store.stats().size() == 2 && store.idle_total() == 2);
+            CHECK(!peer_closed(pairs[1]) && !peer_closed(pairs[2]));
+        }
+        CHECK(peer_closed(pairs[1]) && peer_closed(pairs[2]));  // the store closed what it held
+        for (int i : {6, 7}) ::close(pairs[static_cast<std::size_t>(i)].mine);
+        for (const Pair& p : pairs) ::close(p.peer);
+        // Several workers at once: a connection is in one place at a time. Four threads take and
+        // give over three entries; whoever holds a connection marks it, and no mark is ever found set.
+        {
+            SharedPool store;
+            constexpr int kConns = 12, kThreads = 4, kRounds = 20000;
+            std::vector<Pair> held;
+            std::vector<std::atomic<int>> in_use(1024);
+            for (auto& u : in_use) u.store(0);
+            SharedPool::Entry* entries[3] = {&store.entry("a"), &store.entry("b"), &store.entry("c")};
+            for (int i = 0; i < kConns; ++i) {
+                held.push_back(pair());
+                store.give(*entries[i % 3], Idle{held.back().mine, AF_UNIX, nullptr, now}, 64, ms(0));
+            }
+            std::atomic<int> clashes{0}, cycles{0};
+            std::vector<std::thread> threads;
+            for (int t = 0; t < kThreads; ++t)
+                threads.emplace_back([&, t] {
+                    for (int r = 0; r < kRounds; ++r) {
+                        SharedPool::Entry& e = *entries[(r + t) % 3];
+                        Idle c;
+                        if (e.idle() == 0 || !store.take(e, c, SharedPool::Clock::now())) continue;
+                        if (in_use[static_cast<std::size_t>(c.fd)].exchange(1) != 0) clashes.fetch_add(1);
+                        cycles.fetch_add(1);
+                        in_use[static_cast<std::size_t>(c.fd)].store(0);
+                        store.give(e, c, 64, ms(0));
+                    }
+                });
+            for (auto& th : threads) th.join();
+            CHECK(clashes.load() == 0 && cycles.load() > 1000);
+            CHECK(store.idle_total() == static_cast<std::size_t>(kConns));
+            for (const Pair& p : held) CHECK(!peer_closed(p));
+            for (const Pair& p : held) ::close(p.peer);
+        }
     }
     // What counts toward max_fails: a member that cannot be reached or does not answer as HTTP.
     // Never agensio's own verdict on one exchange: its queue, its temp file, and (since

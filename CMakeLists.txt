@@ -226,6 +226,7 @@ set(AGENSIO_CORE_SOURCES
   src/upstream/client.cpp
   src/upstream/fcgi_client.cpp
   src/upstream/http_client.cpp
+  src/upstream/shared_pool.cpp
   src/upstream/cgi_client.cpp
   src/server.cpp
   $<$<BOOL:${AGENSIO_HAS_TLS}>:src/core/openssl_compat.cpp>)
