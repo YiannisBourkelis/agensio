@@ -135,6 +135,12 @@ public:
     void lend_buffer(UpstreamConnection& c);
     void take_buffer(UpstreamConnection& c) noexcept;
     std::size_t spare_buffers() const noexcept { return spares_.size(); }
+    // Idle connections this worker keeps, over all its upstreams (the unit tests).
+    std::size_t idle_connections() const noexcept {
+        std::size_t n = 0;
+        for (const auto& [key, u] : upstreams_) n += u.idle.size();
+        return n;
+    }
 
     // Passive health per address, per worker (no sharing, no locks; nginx's is per worker
     // too). `pick` chooses the next member of `group` round-robin, skipping the ones marked
@@ -342,6 +348,15 @@ protected:
     void finish_upgraded();  // 101: the slot goes back, the connection stays for take_connection()
     void fail(UpstreamFailure why, std::error_code ec);
     bool head_done() const noexcept { return head_done_; }
+    // Body bytes that need no decoding, for a read straight into the reader's buffer
+    // (docs/design-proxy-streaming.md 4.2): how many the origin still owes of such a body (0: the
+    // body is framed, a chunked one or FastCGI records, and goes through decode()), and the count
+    // of a read taken that way; true when it was the body's last byte.
+    virtual std::size_t raw_body_left() const noexcept { return 0; }
+    virtual bool raw_body_took(std::size_t n) {
+        (void)n;
+        return false;
+    }
 
     UpstreamOptions options_;
     std::unique_ptr<UpstreamConnection> conn_;
@@ -359,6 +374,8 @@ private:
     void send_body_next();
     void body_sent();
     void read_more();
+    bool whole_as_declared() const noexcept;  // the collected body is what the head's Content-Length says (4.1)
+    void read_direct(std::size_t left);       // into the waiting pull's buffer (4.2)
     void on_data(std::size_t n);
     bool try_retry(std::error_code ec);
     void arm(std::chrono::milliseconds d);
@@ -407,6 +424,7 @@ private:
     bool bodiless_ = false;        // a HEAD's answer, a 204 or 304: nothing for a reader to take
     bool reading_ = false;
     bool in_data_ = false;  // inside on_data(): defers read_more() from re-entrant pulls
+    bool direct_ = false;   // the read in flight goes into the waiter's buffer (4.2)
     struct Waiter {
         char* buf = nullptr;
         std::size_t len = 0;

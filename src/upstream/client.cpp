@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -942,6 +943,16 @@ void UpstreamRequest::read_more() {
         deadline_ = std::chrono::steady_clock::time_point::max();
         return;
     }
+    if (waiter_.handler && head_delivered_ && !options_.buffering && pending_pos_ == pending_.size() && conn_->in_len == 0 &&
+        spill_read_ >= spilled_) {
+        // A pull waits and nothing is held for it: a body whose bytes need no decoding is read straight
+        // into the puller's buffer, as much as it asked for (4.2). With no pull waiting (the client is
+        // the slower side) the read below goes on reading ahead into the connection's buffer.
+        if (const std::size_t left = raw_body_left(); left != 0) {
+            read_direct(left);
+            return;
+        }
+    }
     if (conn_->in.size() < UpstreamPool::kReadBuffer) pool_.lend_buffer(*conn_);
     if (conn_->in_len == conn_->in.size()) conn_->in.resize(conn_->in.size() * 2);  // one huge record
     reading_ = true;
@@ -966,6 +977,47 @@ void UpstreamRequest::read_more() {
                                   immediate(pool_.context(), on_read));
 }
 
+// The origin read into the buffer the client side sends from: no pass through the connection's
+// buffer and the pending queue, and a read as large as the puller's piece. The buffer is the
+// waiter's, valid while its handler is held; abandon_waiter() cancels this read before it lets the
+// handler go, and a cancelled read performs no receive, so nothing is written there afterwards.
+void UpstreamRequest::read_direct(std::size_t left) {
+    reading_ = true;
+    direct_ = true;
+    arm(options_.read_timeout);
+    quick_ack();
+    auto self = shared_from_this();
+    auto on_read = [self](const asio::error_code& ec, std::size_t n) {
+        self->reading_ = false;
+        self->direct_ = false;
+        if (self->phase_ != Phase::receiving) return;
+        if (ec == asio::error::operation_aborted || (!ec && !self->waiter_.handler)) {
+            self->cancel();  // the reader went with this read in flight: its bytes have nowhere to go
+            return;
+        }
+        if (ec) {
+            if (ec == asio::error::eof && self->on_eof()) return;
+            self->fail(UpstreamFailure::closed_early, ec);
+            return;
+        }
+        // As store_body() and satisfy_waiter() do it for a decoded piece: counted, handed on, and only
+        // then the end or the next read. Inside in_data_, so the puller's next pull, made inline by its
+        // write, waits for this frame to read on.
+        self->in_data_ = true;
+        self->result_.body_size += n;
+        self->delivered_ += n;
+        const bool last = self->raw_body_took(n);
+        auto h = std::move(self->waiter_.handler);
+        self->waiter_.handler = nullptr;
+        h(std::error_code{}, n);
+        self->in_data_ = false;
+        if (self->phase_ != Phase::receiving) return;
+        if (last) self->finish();
+        else self->read_more();
+    };
+    conn_->async_read_some(asio::buffer(waiter_.buf, std::min(waiter_.len, left)), immediate(pool_.context(), on_read));
+}
+
 // A reused connection that the upstream had closed (php-fpm reload, an origin's idle
 // timeout): resend once on a fresh one, only while nothing of the response has been seen
 // and for GET/HEAD.
@@ -984,6 +1036,16 @@ void UpstreamRequest::on_data(std::size_t n) {
     conn_->in_len += n;
     in_data_ = true;
     const bool more = decode();
+    if (head_done_ && !head_delivered_ && !options_.buffering && phase_ == Phase::receiving) {
+        // Streaming, and this read did not bring the answer's end: the head goes on now, and the body
+        // bytes that came with it are the first a pull gets. (An answer that ended within this read
+        // was delivered whole by finish().) Inside in_data_, as the decoder is: the writer's pull,
+        // run inline by the delivery, must not start a read of its own.
+        pending_ = std::move(result_.body);
+        result_.body.clear();
+        pending_pos_ = 0;
+        deliver_head();
+    }
     in_data_ = false;
     if (more && phase_ == Phase::receiving) read_more();
 }
@@ -1025,11 +1087,10 @@ UpstreamRequest::HeadStatus UpstreamRequest::feed_head(std::string_view bytes, s
     head_buf_.shrink_to_fit();
     out_.clear();  // no retry once the head arrived
     out_.shrink_to_fit();
-    if (!options_.buffering) {
-        deliver_head();
-        // The reader may have closed inside (its client gone) and ended the exchange: stop decoding.
-        if (phase_ == Phase::cancelled) return HeadStatus::error;
-    }
+    // A streamed answer's head is not delivered here: the read that brought it is decoded to its end
+    // first (on_data), so an answer that arrived whole is delivered whole (docs/design-proxy-streaming.md
+    // 4.1). Until 0.1.0-alpha.147 the head went on at once and the body bytes of the same read were
+    // pulled after it: two writes to the client for every small answer.
     return HeadStatus::complete;
 }
 
@@ -1043,6 +1104,12 @@ void UpstreamRequest::reset_head() {
 bool UpstreamRequest::store_body(std::string_view bytes) {
     if (bytes.empty()) return true;
     result_.body_size += bytes.size();
+    if (!options_.buffering && !head_delivered_) {
+        // Streaming, within the read that brought the head: collected, at most that one read's bytes,
+        // until on_data() or finish() decides how the answer goes on (4.1).
+        result_.body.append(bytes);
+        return true;
+    }
     if (!options_.buffering) {
         if (phase_ == Phase::cancelled) return false;
         pending_.append(bytes);
@@ -1091,12 +1158,37 @@ void UpstreamRequest::finish() {
     pool_.mark_success(address_, note_);
     on_end(true);
     release_connection(true);
-    if (!options_.buffering) {
-        if (!head_delivered_) deliver_head();
+    if (!options_.buffering && head_delivered_) {
         satisfy_waiter();  // a waiting pull gets the end of body
         return;
     }
+    if (!options_.buffering && !whole_as_declared()) {
+        // Streaming, the answer ended within the read that brought its head, but it is not a body of
+        // the length its head declares: no Content-Length (a chunked answer, a script's output, an
+        // answer without a body), or one its body does not have (a script's own). It goes on as a
+        // streamed answer does, so the client sees what it saw before: chunked framing, or the
+        // declared length enforced by the client side (surplus cut, a short body ending the connection).
+        pending_ = std::move(result_.body);
+        result_.body.clear();
+        pending_pos_ = 0;
+        deliver_head();
+        return;
+    }
+    // Buffered; or streaming and the answer ended within the read that brought its head (4.1): its
+    // body is in result_.body and it is delivered as a buffered one, head and body in one result.
+    options_.buffering = true;
     deliver_head();
+}
+
+// Whether the answer collected in result_.body is a body of the length its head declares. Only such
+// an answer is delivered whole (4.1): the client then gets the bytes and the framing a streamed
+// answer gave it, in one write.
+bool UpstreamRequest::whole_as_declared() const noexcept {
+    const std::string_view cl = result_.headers.get("content-length");
+    if (cl.empty()) return false;
+    std::uint64_t declared = 0;
+    const auto r = std::from_chars(cl.data(), cl.data() + cl.size(), declared);
+    return r.ec == std::errc() && r.ptr == cl.data() + cl.size() && declared == result_.body.size();
 }
 
 void UpstreamRequest::finish_upgraded() {
@@ -1161,6 +1253,20 @@ void UpstreamRequest::fail(UpstreamFailure why, std::error_code ec) {
     // Only a member of a list is marked: a lone origin has no other to go to and every request tries
     // it, so its "marked down" line was false, and its failures counted for a list naming the same
     // address under that list's own max_fails (until 0.1.0-alpha.144).
+    if (!options_.buffering && head_done_ && !head_delivered_ && phase_ == Phase::receiving) {
+        // Streaming, and the answer broke within the read that brought its head (a chunk that does not
+        // parse): the head goes on first with the bytes before the break, as it did when it was
+        // delivered the moment it was parsed, and the failure then ends the streamed body. Inside
+        // in_data_, so the writer's pulls made inline wait for the failure below.
+        const bool was_in = in_data_;
+        in_data_ = true;
+        pending_ = std::move(result_.body);
+        result_.body.clear();
+        pending_pos_ = 0;
+        deliver_head();
+        in_data_ = was_in;
+        if (phase_ != Phase::receiving) return;  // the reader went inside
+    }
     if (counts_against_origin(why) && group_ && group_->size() > 1) pool_.mark_failure(address_, options_, note_);
     if (try_next_address(why)) return;
     const Phase was = phase_;
@@ -1192,6 +1298,12 @@ void UpstreamRequest::pull(char* buf, std::size_t len, StreamBody::ReadHandler h
 }
 
 void UpstreamRequest::abandon_waiter() noexcept {
+    if (direct_ && conn_ && conn_->sock().is_open()) {
+        // A read is in flight into this reader's buffer (read_direct): stopped before the buffer's
+        // owner goes. Its completion finds the read aborted, or its reader gone, and ends the exchange.
+        asio::error_code ignored;
+        conn_->sock().cancel(ignored);
+    }
     waiter_.handler = nullptr;  // never answered, and nothing written to its buffer
     waiter_.buf = nullptr;
     waiter_.len = 0;

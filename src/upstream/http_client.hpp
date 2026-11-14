@@ -11,6 +11,8 @@
 // the body was delimited, never after a close-delimited body.
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -44,6 +46,15 @@ private:
     bool decode() override;
     HeadStatus parse_head(std::string_view in, int& status, Headers& headers, std::size_t& length) override;
     bool on_eof() override;
+    std::size_t raw_body_left() const noexcept override {
+        if (framing_ == Framing::length) return static_cast<std::size_t>(std::min<std::uint64_t>(remaining_, SIZE_MAX));
+        return framing_ == Framing::close ? SIZE_MAX : 0;
+    }
+    bool raw_body_took(std::size_t n) override {
+        if (framing_ != Framing::length) return false;
+        remaining_ -= n;
+        return remaining_ == 0;
+    }
     bool keep_alive_ok() const noexcept override { return keep_alive_; }
     const char* kind() const noexcept override { return "proxy"; }
     bool on_head_complete();  // decides the framing from the parsed head

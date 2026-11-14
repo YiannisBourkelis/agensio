@@ -114,6 +114,7 @@
 #include "path.hpp"
 #include "services/log.hpp"
 #include "upstream/fcgi.hpp"
+#include "upstream/http_client.hpp"
 #include "upstream/options.hpp"
 #include "upstream/shared_pool.hpp"
 
@@ -17011,6 +17012,411 @@ static void test_access_log_privacy() {
     fs::remove_all(dir);
 }
 
+// ---- an origin's answer on its way to the client (docs/design-proxy-streaming.md) ----
+// A scripted origin on loopback: every request on a connection is answered with the pieces given,
+// each written after its delay; `close_after` ends the connection behind the last piece.
+namespace {
+struct OriginPiece {
+    std::string bytes;
+    int delay_ms = 0;
+};
+class ScriptedOrigin {
+public:
+    ScriptedOrigin(asio::io_context& ctx, std::vector<OriginPiece> script, bool close_after = false)
+        : acceptor_(ctx, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0)), state_(std::make_shared<State>(ctx)) {
+        state_->script = std::move(script);
+        state_->close_after = close_after;
+        accept();
+    }
+    std::uint16_t port() const { return acceptor_.local_endpoint().port(); }
+    int accepted() const noexcept { return state_->accepted; }
+    int requests() const noexcept { return state_->requests; }
+    int open() const noexcept { return state_->open; }
+
+private:
+    // What a session needs of its origin: shared, since a session lives in the loop's queue and may
+    // outlast the origin object of a test's inner scope.
+    struct State {
+        explicit State(asio::io_context& c) : ctx(c) {}
+        asio::io_context& ctx;
+        std::vector<OriginPiece> script;
+        bool close_after = false;
+        int accepted = 0, requests = 0, open = 0;
+    };
+    struct Session : std::enable_shared_from_this<Session> {
+        Session(std::shared_ptr<State> o, asio::ip::tcp::socket s) : origin(std::move(o)), sock(std::move(s)), timer(origin->ctx) { ++origin->open; }
+        ~Session() { --origin->open; }
+        std::shared_ptr<State> origin;
+        asio::ip::tcp::socket sock;
+        asio::steady_timer timer;
+        std::string in;
+        void read() {
+            auto self = shared_from_this();
+            asio::async_read_until(sock, asio::dynamic_buffer(in), "\r\n\r\n", [self](std::error_code ec, std::size_t n) {
+                if (ec) return;
+                self->in.erase(0, n);
+                ++self->origin->requests;
+                self->write(0);
+            });
+        }
+        void write(std::size_t i) {
+            auto self = shared_from_this();
+            if (i == origin->script.size()) {
+                if (origin->close_after) {
+                    std::error_code ec;
+                    sock.shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+                    sock.close(ec);
+                } else {
+                    read();
+                }
+                return;
+            }
+            timer.expires_after(std::chrono::milliseconds(origin->script[i].delay_ms));
+            timer.async_wait([self, i](std::error_code) {
+                asio::async_write(self->sock, asio::buffer(self->origin->script[i].bytes), [self, i](std::error_code ec, std::size_t) {
+                    if (!ec) self->write(i + 1);
+                });
+            });
+        }
+    };
+    void accept() {
+        acceptor_.async_accept([this, state = state_](std::error_code ec, asio::ip::tcp::socket s) {
+            if (ec) return;  // the origin went: `this` is not touched
+            ++state->accepted;
+            std::error_code ignored;
+            s.set_option(asio::ip::tcp::no_delay(true), ignored);
+            std::make_shared<Session>(state, std::move(s))->read();
+            accept();
+        });
+    }
+    asio::ip::tcp::acceptor acceptor_;
+    std::shared_ptr<State> state_;
+};
+
+// One exchange with the origin, its answer taken as a handler takes it: the buffered result, or the
+// streamed body pulled `pull_size` bytes at a time, each pull `pull_delay_ms` after the one before
+// (a slow client), the reader leaving once it holds `leave_after` bytes.
+struct ExchangeOutcome {
+    bool delivered = false, ended = false, streamed = false;
+    UpstreamFailure failure = UpstreamFailure::none;
+    int status = 0;
+    std::string body;
+    std::size_t body_capacity = 0;
+    bool spilled = false;
+    std::error_code read_error;
+    int pulls = 0;
+    std::chrono::steady_clock::time_point delivered_at{}, ended_at{};
+};
+struct ExchangeRun {
+    std::size_t pull_size = 64 * 1024;
+    int pull_delay_ms = 0;
+    std::size_t leave_after = SIZE_MAX;
+    bool head_request = false;
+    int wait_ms = 3000;
+    int leave_at_ms = -1;             // the reader goes at this time whatever it is doing (its client closed)
+    int probe_at_ms = -1;             // `probe` runs at this time
+    std::function<void()> probe;
+};
+struct ExchangeReader : std::enable_shared_from_this<ExchangeReader> {
+    ExchangeReader(asio::io_context& c, ExchangeOutcome& o, const ExchangeRun& r) : ctx(c), out(o), run(r), timer(c), chunk(r.pull_size) {}
+    asio::io_context& ctx;
+    ExchangeOutcome& out;
+    ExchangeRun run;
+    asio::steady_timer timer;
+    std::vector<char> chunk;
+    std::unique_ptr<StreamBody> source;
+    void pull() {
+        auto self = shared_from_this();
+        ++out.pulls;
+        source->async_read(chunk.data(), chunk.size(), [self](std::error_code ec, std::size_t n) {
+            if (!self->source) return;  // left meanwhile
+            if (ec || n == 0) {
+                self->out.read_error = ec;
+                self->finish();
+                return;
+            }
+            self->out.body.append(self->chunk.data(), n);
+            if (self->out.body.size() >= self->run.leave_after) {
+                self->finish();
+                return;
+            }
+            if (self->run.pull_delay_ms == 0) {
+                self->pull();
+                return;
+            }
+            self->timer.expires_after(std::chrono::milliseconds(self->run.pull_delay_ms));
+            self->timer.async_wait([self](std::error_code) {
+                if (self->source) self->pull();
+            });
+        });
+    }
+    void finish() {
+        out.ended = true;
+        out.ended_at = std::chrono::steady_clock::now();
+        // As a writer lets go of its body: from the loop, never inside the source's own callback.
+        asio::post(ctx, [self = shared_from_this()] { self->source.reset(); });
+    }
+};
+ExchangeOutcome run_exchange(asio::io_context& ctx, UpstreamPool& pool, const std::vector<UpstreamAddress>& origin,
+                             const UpstreamOptions& options, const ExchangeRun& run = {}) {
+    ExchangeOutcome out;
+    auto req = std::make_shared<HttpRequest>(pool, origin, options);
+    auto reader = std::make_shared<ExchangeReader>(ctx, out, run);
+    const std::string head = std::string(run.head_request ? "HEAD" : "GET") + " /x HTTP/1.1\r\nHost: origin.test\r\n";
+    req->start(head, run.head_request, false, UpstreamBodyInput{}, false, true, [&out, req, reader, &run](UpstreamResult& res) {
+        out.delivered = true;
+        out.delivered_at = std::chrono::steady_clock::now();
+        out.failure = res.failure;
+        out.status = res.status;
+        out.streamed = res.streamed;
+        if (res.failure != UpstreamFailure::none || !res.streamed) {
+            out.body = res.body;
+            out.body_capacity = res.body.capacity();
+            if (res.failure == UpstreamFailure::none && res.spill.is_open()) {
+                out.spilled = true;
+                out.body.resize(static_cast<std::size_t>(res.body_size));
+                CHECK(res.spill.read_at(out.body.data(), out.body.size(), 0) == static_cast<std::int64_t>(out.body.size()));
+            }
+            out.ended = true;
+            out.ended_at = out.delivered_at;
+            return;
+        }
+        reader->source = req->body_source(run.head_request);
+        reader->pull();
+    });
+    req.reset();
+    asio::steady_timer leave(ctx), probe(ctx);
+    if (run.leave_at_ms >= 0) {
+        leave.expires_after(std::chrono::milliseconds(run.leave_at_ms));
+        leave.async_wait([&out, reader](std::error_code ec) {
+            if (ec || out.ended) return;
+            reader->timer.cancel();
+            reader->finish();
+        });
+    }
+    if (run.probe_at_ms >= 0) {
+        probe.expires_after(std::chrono::milliseconds(run.probe_at_ms));
+        probe.async_wait([&run](std::error_code ec) {
+            if (!ec) run.probe();
+        });
+    }
+    ctx.restart();
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(run.wait_ms);
+    while (!out.ended && std::chrono::steady_clock::now() < until) ctx.run_one_for(std::chrono::milliseconds(20));
+    leave.cancel();
+    probe.cancel();
+    for (int i = 0; i < 20; ++i) ctx.poll();  // what the end posted: the source let go, the connection back in the pool
+    return out;
+}
+std::string head_of(std::size_t length, const char* more = "") {
+    return "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n" + std::string(more) + "Content-Length: " + std::to_string(length) + "\r\n\r\n";
+}
+std::string body_of(std::size_t n) {
+    std::string b(n, '\0');
+    for (std::size_t i = 0; i < n; ++i) b[i] = static_cast<char>('a' + (i * 7 + i / 251) % 26);
+    return b;
+}
+std::vector<UpstreamAddress> origin_at(std::uint16_t port) {
+    UpstreamAddress a;
+    std::string err;
+    CHECK(parse_upstream_address("127.0.0.1:" + std::to_string(port), a, err));
+    return {a};
+}
+}  // namespace
+
+static void test_upstream_answer_paths() {
+    UpstreamOptions streaming;
+    streaming.buffering = false;
+    streaming.keep_conn = true;
+    UpstreamOptions buffered = streaming;
+    buffered.buffering = true;
+
+    // 4.1: a streamed answer that arrived whole with its head is delivered whole, as a buffered one
+    // is: one result, the body with it, nothing to pull (the client side then sends head and body in
+    // one write). Until 0.1.0-alpha.147 the head was delivered alone and the body pulled after it.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        const std::string body = body_of(700);
+        ScriptedOrigin origin(ctx, {{head_of(body.size()) + body, 0}});
+        const auto grp = origin_at(origin.port());
+        const ExchangeOutcome o = run_exchange(ctx, pool, grp, streaming);
+        CHECK(o.delivered && o.failure == UpstreamFailure::none && o.status == 200);
+        CHECK(!o.streamed && o.pulls == 0);
+        CHECK(o.body == body);
+        // The connection is kept and the next answer comes the same way.
+        const ExchangeOutcome again = run_exchange(ctx, pool, grp, streaming);
+        CHECK(!again.streamed && again.body == body && origin.accepted() == 1 && origin.requests() == 2);
+    }
+    // Only a body of the length its head declares goes that way. A chunked answer whole in one read
+    // stays a streamed one (the client gets it chunked, as before), its bytes the first a pull gets;
+    // so does an answer without a body (a 204, a HEAD's, whose length is not its body's).
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        ScriptedOrigin origin(ctx, {{"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", 0}});
+        const ExchangeOutcome o = run_exchange(ctx, pool, origin_at(origin.port()), streaming);
+        CHECK(o.delivered && o.streamed && !o.read_error && o.body == "hello world");
+        ScriptedOrigin empty(ctx, {{"HTTP/1.1 204 No Content\r\n\r\n", 0}});
+        const ExchangeOutcome e = run_exchange(ctx, pool, origin_at(empty.port()), streaming);
+        CHECK(e.delivered && e.streamed && e.status == 204 && e.body.empty());
+        ScriptedOrigin headed(ctx, {{head_of(5000), 0}});
+        ExchangeRun head_run;
+        head_run.head_request = true;
+        const ExchangeOutcome h = run_exchange(ctx, pool, origin_at(headed.port()), streaming, head_run);
+        CHECK(h.delivered && h.streamed && h.status == 200 && h.body.empty());
+    }
+    // An interim 100 and then the whole answer: whole.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        ScriptedOrigin origin(ctx, {{"HTTP/1.1 100 Continue\r\n\r\n" + head_of(3) + "abc", 0}});
+        const ExchangeOutcome o = run_exchange(ctx, pool, origin_at(origin.port()), streaming);
+        CHECK(o.delivered && !o.streamed && o.status == 200 && o.body == "abc");
+    }
+    // The head alone, the body later: streamed as before, the head delivered when its read is decoded.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        const std::string body = body_of(3000);
+        ScriptedOrigin origin(ctx, {{head_of(body.size()), 0}, {body, 60}});
+        const auto started = std::chrono::steady_clock::now();
+        const ExchangeOutcome o = run_exchange(ctx, pool, origin_at(origin.port()), streaming);
+        CHECK(o.delivered && o.streamed && o.body == body && !o.read_error);
+        CHECK(o.delivered_at - started < std::chrono::milliseconds(50));  // not held for the body
+    }
+    // The head with a part of the body, the rest later: streamed, the first part first.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        const std::string body = body_of(9000);
+        ScriptedOrigin origin(ctx, {{head_of(body.size()) + body.substr(0, 1000), 0}, {body.substr(1000, 4000), 40}, {body.substr(5000), 40}});
+        const ExchangeOutcome o = run_exchange(ctx, pool, origin_at(origin.port()), streaming);
+        CHECK(o.delivered && o.streamed && o.body == body && !o.read_error);
+    }
+    // An answer that breaks within the read that brought its head: as before, the head goes on with
+    // the bytes before the break, and the failure ends the streamed body.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        ScriptedOrigin origin(ctx, {{"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\nZZ\r\n", 0}});
+        const ExchangeOutcome o = run_exchange(ctx, pool, origin_at(origin.port()), streaming);
+        CHECK(o.delivered && o.failure == UpstreamFailure::none && o.streamed && o.status == 200);
+        CHECK(o.body == "hello" && o.read_error);
+    }
+    // 4.2: a larger body of known length is read straight into the buffer the reader gave, as much
+    // as the reader asked for: 200 KB waiting at the origin's socket are a handful of pulls of up to
+    // 64 KB, not one per 16 KB read through the connection's buffer and the pending queue.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        const std::string body = body_of(200 * 1024);
+        ScriptedOrigin origin(ctx, {{head_of(body.size()), 0}, {body, 30}});
+        const auto grp = origin_at(origin.port());
+        const ExchangeOutcome o = run_exchange(ctx, pool, grp, streaming);
+        CHECK(o.delivered && o.streamed && !o.read_error);
+        CHECK(o.body == body);
+        CHECK(o.pulls <= 8);
+        // The connection is whole afterwards: kept, and the next answer on it is right.
+        CHECK(pool.idle_connections() == 1);
+        const ExchangeOutcome again = run_exchange(ctx, pool, grp, streaming);
+        CHECK(again.body == body && origin.accepted() == 1);
+    }
+    // Byte for byte at every size around the buffers' sizes, the body after the head, in one piece and
+    // in three, pulled 64 KB, 16,375 bytes (an HTTP/2 frame's payload over TLS) and 1,000 bytes at a time.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        for (const std::size_t size : {std::size_t{1}, std::size_t{999}, std::size_t{16383}, std::size_t{16384}, std::size_t{16385},
+                                       std::size_t{65535}, std::size_t{65536}, std::size_t{65537}, std::size_t{300000}}) {
+            const std::string body = body_of(size);
+            for (const std::size_t pull : {std::size_t{64 * 1024}, std::size_t{16375}, std::size_t{1000}}) {
+                ScriptedOrigin one(ctx, {{head_of(size), 0}, {body, 15}});
+                ExchangeRun run;
+                run.pull_size = pull;
+                const ExchangeOutcome a = run_exchange(ctx, pool, origin_at(one.port()), streaming, run);
+                CHECK(a.delivered && a.streamed && !a.read_error && a.body == body);
+                ScriptedOrigin three(ctx, {{head_of(size) + body.substr(0, size / 3), 0}, {body.substr(size / 3, size / 3), 10}, {body.substr(size / 3 * 2), 10}});
+                const ExchangeOutcome b = run_exchange(ctx, pool, origin_at(three.port()), streaming, run);
+                CHECK(b.delivered && !b.read_error && b.body == body);
+            }
+        }
+    }
+    // A body that ends with the connection (no length, not chunked): read the same way, its end the close.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        const std::string body = body_of(150000);
+        ScriptedOrigin origin(ctx, {{"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", 0}, {body.substr(0, 70000), 20}, {body.substr(70000), 20}}, true);
+        const ExchangeOutcome o = run_exchange(ctx, pool, origin_at(origin.port()), streaming);
+        CHECK(o.delivered && o.streamed && !o.read_error && o.body == body);
+        CHECK(pool.idle_connections() == 0);
+    }
+    // A chunked body keeps the decoding path, and is whole.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        const std::string body = body_of(90000);
+        std::string wire;
+        for (std::size_t at = 0; at < body.size(); at += 7000) {
+            const std::string_view piece = std::string_view(body).substr(at, 7000);
+            char line[16];
+            std::snprintf(line, sizeof line, "%zx\r\n", piece.size());
+            wire += line;
+            wire += piece;
+            wire += "\r\n";
+        }
+        wire += "0\r\n\r\n";
+        ScriptedOrigin origin(ctx, {{"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", 0}, {wire.substr(0, 50000), 20}, {wire.substr(50000), 20}});
+        const ExchangeOutcome o = run_exchange(ctx, pool, origin_at(origin.port()), streaming);
+        CHECK(o.delivered && o.streamed && !o.read_error && o.body == body);
+    }
+    // A reader slower than the origin: the answer is read ahead as before (under the high-water mark),
+    // so the origin's connection is back in the pool while the reader still takes its bytes.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        const std::string body = body_of(120 * 1024);
+        ScriptedOrigin origin(ctx, {{head_of(body.size()), 0}, {body, 10}});
+        ExchangeRun run;
+        run.pull_size = 4096;
+        run.pull_delay_ms = 10;
+        std::size_t idle_meanwhile = 99;
+        run.probe_at_ms = 150;
+        run.probe = [&] { idle_meanwhile = pool.idle_connections(); };
+        const ExchangeOutcome o = run_exchange(ctx, pool, origin_at(origin.port()), streaming, run);
+        CHECK(o.delivered && o.streamed && !o.read_error && o.body == body);
+        CHECK(o.ended_at - o.delivered_at > std::chrono::milliseconds(200));  // the reader was the slow one
+        CHECK(idle_meanwhile == 1);
+    }
+    // A reader that goes while its read waits on the origin: the read is cancelled before the reader's
+    // buffer is let go (the sanitizer build is the judge of that), the exchange ends and its connection
+    // is closed, since bytes of the answer were left unread.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        const std::string body = body_of(100000);
+        ScriptedOrigin origin(ctx, {{head_of(body.size()), 0}, {body.substr(0, 20000), 10}, {body.substr(20000), 200}});
+        ExchangeRun run;
+        run.leave_at_ms = 80;
+        run.wait_ms = 600;
+        const ExchangeOutcome o = run_exchange(ctx, pool, origin_at(origin.port()), streaming, run);
+        CHECK(o.delivered && o.streamed && o.body == body.substr(0, 20000));
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+        while (std::chrono::steady_clock::now() < until) ctx.run_one_for(std::chrono::milliseconds(20));  // the origin's late bytes
+        CHECK(pool.idle_connections() == 0 && origin.open() == 0);
+    }
+    // Buffered answers are what they were.
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        const std::string body = body_of(40000);
+        ScriptedOrigin origin(ctx, {{head_of(body.size()) + body.substr(0, 500), 0}, {body.substr(500), 30}});
+        const ExchangeOutcome o = run_exchange(ctx, pool, origin_at(origin.port()), buffered);
+        CHECK(o.delivered && !o.streamed && o.body == body);
+    }
+}
+
 int main() {
     test_path();
     test_parser();
@@ -17141,6 +17547,7 @@ int main() {
     test_openssl_compat();
     test_certificate_names();
     test_tls_stream_shed();
+    test_upstream_answer_paths();
     test_acme();
 #endif
     if (failures) {

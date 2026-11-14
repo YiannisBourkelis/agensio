@@ -1439,6 +1439,9 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # Connections to origins shared by the workers (docs/design-upstream-pool.md; tests/shared-pool.sh, its own server).
 check "shared pool: four workers hold one connection to an origin they ask seldom (tests/shared-pool.sh)" "0" \
   "$(tests/shared-pool.sh "$BIN" > bench/tmp/shared-pool.out 2>&1; echo $?)"
+# An origin's answer on its way to the client (docs/design-proxy-streaming.md; tests/proxy-streaming.sh, its own server and origin).
+check "proxy answers: every size in every framing, streamed and buffered, over each protocol (tests/proxy-streaming.sh)" "0" \
+  "$(tests/proxy-streaming.sh "$BIN" > bench/tmp/proxy-streaming.out 2>&1; echo $?)"
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
