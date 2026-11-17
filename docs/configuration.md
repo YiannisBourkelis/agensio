@@ -226,7 +226,9 @@ exactly one leftmost label, and the subject CN only when the subjectAltName hold
 which is how a client's check reads a certificate and what `sites_list` and `site_show` print as
 `tls.names`; until 0.1.0-alpha.146 the CN counted beside the subjectAltName's names, the listing
 left it out, and an IPv6 address in the certificate covered no `Host: [address]`). Whatever sites the listener
-holds, a request whose Host the presented certificate does not name answers `421`, the
+holds, a request whose Host the presented certificate does not name answers `421` (HTTP/1.1,
+HTTP/2 and HTTP/3 alike; until 0.1.0-alpha.147 HTTP/1.1 on a server without `trusted_proxies`
+applied it only to the later requests of a connection, after a proxied one), the
 same constant answer as an unknown Host: a connection opened with `b.example`'s
 certificate never serves `a.example`, and a catch-all site on a TLS listener is bounded
 the same way. A certificate covering several names (a SAN or wildcard certificate) makes

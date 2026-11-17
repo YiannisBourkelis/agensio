@@ -707,6 +707,37 @@ subprocess.run([binary, "ctl", "reload", "--yes", "--reason", "renewal-back", "-
 print(" ".join(out))
 PYT
 )"
+# The same rule over HTTP/1.1 on a server with no trusted proxies (the test VPS's report on
+# 0.1.0-alpha.146, F2): the suite's own server believes 127.0.0.1, and that path filled the
+# connection's certificate before routing, so its HTTP/1.1 rows were checked; without trusted
+# proxies the certificate reached a request only after something else filled it (a proxied request,
+# a log line), so a connection's first request was never held to it and later ones were.
+printf '[server]\nworkers = 1\npid_file = "%s/bench/tmp/authority-h1.pid"\n[log]\naccess = "off"\nerror = "%s/bench/tmp/authority-h1.log"\n' "$ROOT" "$ROOT" > bench/tmp/authority-h1.toml
+for pair in "b.test certs-b" "a.test certs-ab"; do set -- $pair
+  printf '[[site]]\nserver_name = ["%s"]\nlisten = ["127.0.0.1:18452"]\nroot = "%s/bench/www"\ntls = { cert = "%s/bench/tmp/%s/cert.pem", key = "%s/bench/tmp/%s/key.pem" }\n' "$1" "$ROOT" "$ROOT" "$2" "$ROOT" "$2" >> bench/tmp/authority-h1.toml
+done
+"$BIN" -c bench/tmp/authority-h1.toml > bench/tmp/authority-h1.out 2>&1 & AH1=$!
+for _ in $(seq 1 50); do nc -z 127.0.0.1 18452 2>/dev/null && break; sleep 0.1; done
+check "authority, HTTP/1.1 without trusted proxies: SNI b, Host a is 421 on a connection's first request and on every later one; b itself is served" "421 200 421 421" "$(python3 - <<'PYT'
+import socket, ssl
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+ctx.set_alpn_protocols(["http/1.1"])
+def get(conn, host):
+    conn.sendall(("GET / HTTP/1.1\r\nHost: %s\r\n\r\n" % host).encode())
+    data = b""
+    while b"\r\n\r\n" not in data: data += conn.recv(65536)
+    head, body = data.split(b"\r\n\r\n", 1)
+    length = int([l for l in head.decode().split("\r\n") if l.lower().startswith("content-length")][0].split(":")[1])
+    while len(body) < length: body += conn.recv(65536)
+    return head.split(b" ")[1].decode()
+kept = ctx.wrap_socket(socket.create_connection(("127.0.0.1", 18452)), server_hostname="b.test")
+out = [get(kept, "a.test"), get(kept, "b.test"), get(kept, "a.test")]
+kept.close()
+print(" ".join(out), end=" ")
+PYT
+)$(curl -sSk --http1.1 -o /dev/null -w '%{http_code}' --resolve b.test:18452:127.0.0.1 -H 'Host: a.test' https://b.test:18452/)"
+check "authority, HTTP/1.1 without trusted proxies: SNI a, Host b is served (a's certificate names both)" "200" "$(curl -sSk --http1.1 -o /dev/null -w '%{http_code}' --resolve a.test:18452:127.0.0.1 -H 'Host: b.test' https://a.test:18452/)"
+kill $AH1 2>/dev/null; wait $AH1 2>/dev/null
 echo "skip authority: HTTP/2 connection coalescing retry after 421 (HTTP/2 not implemented yet: a client that reuses the 8446 a.test connection for b.test, which a.test's SAN certificate covers, is served; one that reuses a connection whose certificate does not cover the origin gets 421 and must succeed on a new connection)"
 check "control: status names each listener's catch-all or none" "8099=none 8080=localhost 8448=*" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/status | python3 -c 'import json,sys; d={l["address"]:l["catch_all"] for l in json.load(sys.stdin)["listeners"]}; print("8099=%s 8080=%s 8448=%s" % (d["127.0.0.1:8099"] or "none", d["127.0.0.1:8080"], d["127.0.0.1:8448"]))')"
 

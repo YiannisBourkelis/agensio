@@ -147,6 +147,12 @@ public:
                 // ended with (the SNI callback chose it from this listener's contexts).
 #ifdef AGENSIO_HAS_TLS
                 self->cert_names_ = self->listener_->names_for(SSL_get_SSL_CTX(self->socket_.native_handle()));
+                // Held from the first request on (the connection info is not reset between requests).
+                // Until 0.1.0-alpha.147 only fill_connection_info() set it, after routing unless trusted
+                // proxies are configured, so without them a connection's requests were held to the
+                // certificate only after something else had filled the info (a proxied request, a log
+                // line): the test VPS's report on alpha.146, F2.
+                self->stream_.conn.cert = self->cert_names_.get();
                 // ALPN chose HTTP/2: the connection is an Http2Connection from here (phase G).
                 const unsigned char* alpn = nullptr;
                 unsigned alpn_len = 0;

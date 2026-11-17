@@ -343,7 +343,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   last failure (`AcmeManager::failures`). A certificate's names have one reader (alpha.146,
   `acme::certificate_names`: the subjectAltName's DNS names and addresses, the CN only when it holds no
   DNS name, RFC 6125 6.4.4 as `X509_check_host` applies it, held to OpenSSL's checks by the unit test):
-  what a connection answers for (`CertNames`, the 421 rule; a certificate's name is taken whole, an IPv6
+  what a connection answers for (`CertNames`, the 421 rule, held from the handshake on over HTTP/1.1 too since
+  alpha.147: before, only once something had filled the connection's info, at once with `trusted_proxies`, else
+  after a proxied request; a certificate's name is taken whole, an IPv6
   address was cut at its last colon before) and `tls.names` of `sites_list` and `site_show` are that list. The certificate refresh (T3,
   `Server::refresh_certificates` over `switch_to`, the half of a reload after the configuration is
   loaded): the running configuration's certificates read again, no configuration file read; ACME

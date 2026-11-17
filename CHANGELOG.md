@@ -2,6 +2,20 @@
 
 ## 0.1.0-alpha.147 (unreleased)
 
+- **HTTP/1.1 holds a request to the certificate its connection presented, from the first request.**
+  A TLS connection answers only for the names its certificate covers, and a request for another
+  Host is `421` (RFC 9110 7.4). HTTP/2 and HTTP/3 did this always; HTTP/1.1 did it only when the
+  connection's details had already been filled in by something else: on a server with
+  `trusted_proxies` every request, without them only the requests that came after a proxied or
+  PHP one on the same connection. So, on most servers, a client sending one site's name in SNI and
+  another's in Host was served the other site over HTTP/1.1 (the test VPS's report on
+  0.1.0-alpha.146, F2). The certificate's names are now the connection's from its handshake on.
+  **What a client sees:** an HTTP/1.1 request over TLS whose Host the certificate does not name is
+  `421`, as over HTTP/2. A check that connects by address and sends a Host
+  (`curl -k https://203.0.113.5/ -H 'Host: shop.example.com'`) sends no SNI, gets the catch-all's
+  certificate and now a `421` over HTTP/1.1 too; `--resolve shop.example.com:443:203.0.113.5` sends
+  the name. agensio's own health probes send the site's name.
+
 - **Bench: agensio against Pingora as a reverse proxy.** `bench/pingora/` holds a proxy program
   built on Pingora 0.9.1, Cloudflare's Rust framework, written as Pingora's own examples are, and
   `run.sh`, which puts it and agensio in front of the benchmark upstream through six groups: plain
