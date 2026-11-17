@@ -31,10 +31,14 @@ inline std::string_view normalize_host(std::string_view host, char (&buf)[256]) 
     return std::string_view(buf, host.size());
 }
 
-// The form of a host name (RFC 1123 2.1, RFC 6066 3, as written in a certificate or asked of a TLS
-// peer): labels of ASCII letters, digits, '-' and '_' joined by dots, 63 bytes a label and 253 in
-// all, no empty label and so no final dot, and a last label that is not a number (how an address
-// ends, never a name: "1.2.3", "010.0.0.1"). An international name is in its xn-- form.
+// The form of a host name as written in a certificate or asked of a TLS peer (RFC 6066 3: a DNS host
+// name, ASCII, no final dot): labels of ASCII letters, digits, '-' and '_' joined by dots, 63 bytes a
+// label and 253 in all, no empty label and so no final dot, and a last label that is not a number (how
+// an address ends, never a name: "1.2.3", "010.0.0.1"). An international name is in its xn-- form.
+// Wider than RFC 1123 2.1 on purpose, which allows no '_' and no '-' at a label's start or end: the
+// certificate reader uses it (acme::certificate_names), and OpenSSL's X509_check_host compares a
+// certificate's names as written without judging their form, so a stricter rule would refuse names a
+// client's check accepts (the alpha.146 entry of CHANGELOG.md cited RFC 1123 2.1 for this rule).
 inline bool valid_host_name(std::string_view name) noexcept {
     if (name.empty() || name.size() > 253) return false;
     std::size_t label = 0;    // the length of the label being read

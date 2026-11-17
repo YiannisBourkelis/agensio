@@ -3247,10 +3247,19 @@ std::string check_peer_name(std::string_view name) {
     if (name.size() > 1 && name.back() == '.' && check_peer_name(name.substr(0, name.size() - 1)).empty())
         return quoted + " ends with a final dot: no certificate names a host that way, so it would never verify; write \"" +
                text.substr(0, text.size() - 1) + "\"";
-    const std::string why = quoted + " is neither a host name (labels of letters, digits, '-' and '_' joined by dots, an "
-                                     "international name in its xn-- form, no final dot, 253 characters at most) nor an IP address "
-                                     "(192.0.2.1, 2001:db8::1: no brackets, no port)";
-    return valid_host_name(name) ? std::string() : why;
+    if (valid_host_name(name)) return {};
+    // A value that ends in a number is refused for that reason, said: the characters are a name's,
+    // so the general message seemed met (the test VPS's report on 0.1.0-alpha.146, note a).
+    const std::string_view last = name.substr(name.rfind('.') == std::string_view::npos ? 0 : name.rfind('.') + 1);
+    const auto all_digits = [](std::string_view v) { return !v.empty() && v.find_first_not_of("0123456789") == std::string_view::npos; };
+    if (all_digits(last)) {
+        if (name.find_first_not_of("0123456789.") == std::string_view::npos)
+            return quoted + " is not an IP address (an IPv4 address is four numbers from 0 to 255, 192.0.2.1, without leading zeros) "
+                            "and not a host name either, since a host name's last label is never a number";
+        return quoted + " ends in a number, which no host name does (its last label is never all digits), and it is not an IP address";
+    }
+    return quoted + " is neither a host name (labels of letters, digits, '-' and '_' joined by dots, an international name in its "
+                    "xn-- form, no final dot, 253 characters at most) nor an IP address (192.0.2.1, 2001:db8::1: no brackets, no port)";
 }
 
 std::string check_served_dir(std::string_view p) {

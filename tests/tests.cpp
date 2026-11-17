@@ -5410,6 +5410,16 @@ static void test_proxy() {
                             "1.2.3", "1.2.3.4.5", "010.0.0.1", "256.1.1.1", "1.2.3.4 ", "b\xc3\xbc" "cher.example", "http://a.test", "a.test\n"})
         CHECK(!check_peer_name(bad).empty());
     CHECK(check_peer_name("o.test.").find("final dot") != std::string::npos && check_peer_name("*.w.test").find("pattern") != std::string::npos);
+    // A value ending in a number is refused for that reason, said (the test VPS's report on 0.1.0-alpha.146,
+    // note a: the message listed only the characters, which "1.2.3" seems to meet): all numbers is an
+    // address that is not one, a name's last label is never a number.
+    for (const char* digits : {"1.2.3", "256.1.1.1", "127.1", "1.2.3.4.5", "010.0.0.1"}) {
+        const std::string why = check_peer_name(digits);
+        if (why.find("not an IP address") == std::string::npos) std::printf("check_peer_name(%s): %s\n", digits, why.c_str());
+        CHECK(why.find("not an IP address") != std::string::npos && why.find("four numbers") != std::string::npos);
+    }
+    CHECK(check_peer_name("a.123").find("ends in a number") != std::string::npos);
+    CHECK(check_peer_name("a b").find("ends in a number") == std::string::npos && check_peer_name("a b").find("labels of letters") != std::string::npos);
     {
         const std::string head = "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"http://127.0.0.1:9100\"\n";
         CHECK(refused("sni-dot.toml", head + "proxy = { tls = { server_name = \"o.test.\" } }\n", ".proxy.tls.server_name = \"o.test.\""));

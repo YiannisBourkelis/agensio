@@ -34,6 +34,12 @@
   its site to a client that does not verify; a client that verifies with OpenSSL 4, or a browser,
   refuses such a certificate before it asks anything (`docs/tls.md` 3.1).
 
+- **`proxy.tls.server_name`: a refusal says why a value ending in a number is no name**, where it
+  listed the characters a name is made of, which `"1.2.3"` seems to meet; the rule's comment no
+  longer cites RFC 1123 2.1 (the alpha.146 entry below does): the rule is wider on purpose, `_` and a
+  `-` at a label's ends allowed, since certificates carry such names and OpenSSL's check accepts
+  them (the same report's notes a and b).
+
 - **Bench: agensio against Pingora as a reverse proxy.** `bench/pingora/` holds a proxy program
   built on Pingora 0.9.1, Cloudflare's Rust framework, written as Pingora's own examples are, and
   `run.sh`, which puts it and agensio in front of the benchmark upstream through six groups: plain
