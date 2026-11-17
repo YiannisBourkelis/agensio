@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The bytes of :method, :path and :authority over HTTP/2 and HTTP/3, in front of an origin.
+"""The bytes of :method, :path, :authority and every field's value over HTTP/2 and HTTP/3, in front
+of an origin.
 
 An HPACK or QPACK string carries any byte; HTTP/1's request line and Host field cannot hold a
 space or a control character. agensio writes a proxied request's target and host into the
@@ -7,6 +8,11 @@ origin's HTTP/1.1 head, so a pseudo-header with such a byte must never become a 
 (RFC 9113 8.2.1 and 10.3, RFC 9114 4.2 and 10.3). Until 0.1.0-alpha.146 the pseudo-headers were
 stored unchecked and the target was looked at only up to its "?": a line break in a query or in
 :authority reached the origin as a line of its own. On 0.1.0-alpha.145 every row fails.
+
+Every other field's value is held to HTTP/1's rule for a value (RFC 9110 5.5): no control character
+but a tab, no DEL. Until 0.1.0-alpha.147 HTTP/2 and HTTP/3 refused only NUL, CR and LF (RFC 9113
+8.2.1's minimum), so an escape byte or a DEL that HTTP/1 answers 400 reached the origin (the test
+VPS's report on alpha.146, F3); on alpha.146 the rows of BAD_VALUES fail.
 
 Run inside the Linux devbox: python3 tests/pseudo-header-bytes.py BINARY
 One single-worker server proxying everything to an origin in this script, which records every
@@ -42,8 +48,8 @@ TMP = os.path.join(ROOT, "bench", "tmp", "pseudo")
 TLS_PORT, PLAIN_PORT, ORIGIN_PORT = 18490, 18491, 18492
 H3_MESSAGE_ERROR = 0x10E
 
-# (what, method, path, authority or None for the row's own). The authority rows run where no
-# certificate decides the name first (h2c).
+# (what, method, path, authority or None for the row's own[, fields after the pseudo-headers]).
+# The authority rows run where no certificate decides the name first (h2c).
 BAD = [
     ("a line break in the query", b"GET", b"/q?x=1\r\nX-Injected: yes", None),
     ("a line feed in the query", b"GET", b"/q?x=1\nX-Injected: yes", None),
@@ -56,6 +62,12 @@ BAD_AUTHORITY = [
     ("a line break in :authority", b"GET", b"/", b"site.test\r\nX-Injected: yes"),
     ("a line break after a bracketed :authority", b"GET", b"/", b"[::1]\r\nX-Injected: yes"),
     ("a slash in :authority", b"GET", b"/", b"site.test/x"),
+]
+BAD_VALUES = [
+    ("an escape sequence in a field value", b"GET", b"/", None, [(b"x-note", b"a\x1b[31mb")]),
+    ("a DEL in user-agent", b"GET", b"/", None, [(b"user-agent", b"curl\x7f")]),
+    ("a vertical tab in a field value", b"GET", b"/", None, [(b"x-note", b"a\x0bb")]),
+    ("a control character in a second cookie", b"GET", b"/", None, [(b"cookie", b"a=1"), (b"cookie", b"b=\x01")]),
 ]
 
 
@@ -102,7 +114,7 @@ class Origin:
         return got
 
 
-def h2_request(tls, method, path, authority):
+def h2_request(tls, method, path, authority, extra=()):
     """One request on a new connection: 'status N', 'RST_STREAM N', 'GOAWAY N', 'closed' or 'no answer'."""
     s = socket.create_connection(("127.0.0.1", TLS_PORT if tls else PLAIN_PORT))
     s.settimeout(3)
@@ -115,7 +127,7 @@ def h2_request(tls, method, path, authority):
     conn = h2.connection.H2Connection(config=h2.config.H2Configuration(
         client_side=True, header_encoding=None, validate_outbound_headers=False, normalize_outbound_headers=False))
     conn.initiate_connection()
-    conn.send_headers(1, [(b":method", method), (b":scheme", b"https" if tls else b"http"), (b":path", path), (b":authority", authority)], end_stream=True)
+    conn.send_headers(1, [(b":method", method), (b":scheme", b"https" if tls else b"http"), (b":path", path), (b":authority", authority)] + list(extra), end_stream=True)
     s.sendall(conn.data_to_send())
     result = "no answer"
     try:
@@ -141,7 +153,7 @@ def h2_request(tls, method, path, authority):
     return result
 
 
-def h3_request(method, path, authority):
+def h3_request(method, path, authority, extra=()):
     cfg = QuicConfiguration(is_client=True, alpn_protocols=["h3"], verify_mode=ssl.CERT_NONE, server_name="localhost")
     cfg.idle_timeout = 10.0
     quic = QuicConnection(configuration=cfg)
@@ -151,7 +163,7 @@ def h3_request(method, path, authority):
     sock.settimeout(0.05)
     quic.connect(("127.0.0.1", TLS_PORT), time.monotonic())
     sid = quic.get_next_available_stream_id()
-    h3.send_headers(sid, [(b":method", method), (b":scheme", b"https"), (b":path", path), (b":authority", authority)], end_stream=True)
+    h3.send_headers(sid, [(b":method", method), (b":scheme", b"https"), (b":path", path), (b":authority", authority)] + list(extra), end_stream=True)
     result = "no answer"
     end = time.monotonic() + 5
     while time.monotonic() < end and result == "no answer":
@@ -183,11 +195,11 @@ def h3_request(method, path, authority):
 
 
 def run_row(name, origin, request, refused, authority, cases):
-    """`request(method, path, authority)` sends one; `refused` is the answer a malformed one must get."""
+    """`request(method, path, authority, fields)` sends one; `refused` is the answer a malformed one must get."""
     problems = []
     origin.take()
-    for what, method, path, own in cases:
-        got = request(method, path, own or authority)
+    for what, method, path, own, *extra in cases:
+        got = request(method, path, own or authority, extra[0] if extra else [])
         if got != refused:
             problems.append("%s: %s (expected %s)" % (what, got, refused))
     time.sleep(0.3)  # anything on its way to the origin has arrived
@@ -229,10 +241,10 @@ def main():
         else:
             raise SystemExit("the server did not come up (%s/stderr.log)" % TMP)
         failed = 0
-        failed += not run_row("h2c", origin, lambda m, p, a: h2_request(False, m, p, a), "RST_STREAM 1", b"site.test", BAD + BAD_AUTHORITY)
-        failed += not run_row("h2", origin, lambda m, p, a: h2_request(True, m, p, a), "RST_STREAM 1", b"localhost", BAD)
+        failed += not run_row("h2c", origin, lambda m, p, a, x=(): h2_request(False, m, p, a, x), "RST_STREAM 1", b"site.test", BAD + BAD_AUTHORITY + BAD_VALUES)
+        failed += not run_row("h2", origin, lambda m, p, a, x=(): h2_request(True, m, p, a, x), "RST_STREAM 1", b"localhost", BAD + BAD_VALUES)
         if HAVE_H3:
-            failed += not run_row("h3", origin, h3_request, "reset 0x%x" % H3_MESSAGE_ERROR, b"localhost", BAD)
+            failed += not run_row("h3", origin, h3_request, "reset 0x%x" % H3_MESSAGE_ERROR, b"localhost", BAD + BAD_VALUES)
         else:
             print("skip h3       (aioquic not installed)")
     finally:

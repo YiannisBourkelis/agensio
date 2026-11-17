@@ -421,7 +421,12 @@ Applied while decoding, so nothing invalid ever reaches the dispatcher:
   field that differs from `:authority` is malformed (RFC 9113 8.3.1);
 - field names lower-case and token characters only; values without CR, LF or NUL
   (RFC 9113 8.2.1 says malformed, and this is the HTTP/2 to HTTP/1.1 smuggling class of
-  2021: what we forward to php-fpm or an origin can never contain a line break);
+  2021: what we forward to php-fpm or an origin can never contain a line break), and since
+  0.1.0-alpha.147 without any other control character but a tab or DEL either: HTTP/1's rule
+  for a value (RFC 9110 5.5, which RFC 9113 8.2.1 asks for and RFC 9114 4.1.2 requires; 5.5
+  lets a recipient keep those characters only where no downstream HTTP parser reads the value,
+  and agensio hands values on to one). Before, a value HTTP/1 answers 400 reached php-fpm or
+  an origin over HTTP/2 and HTTP/3 (the test VPS's report on alpha.146, F3);
 - the pseudo-headers' values and `host` by HTTP/1's own rules for a request line and a Host
   field (`valid_target`, `valid_host`, `valid_method`, `valid_scheme`): no space, no control
   character, no DEL, and for a host none of `/ \ " < >`; once per dynamic-table entry like
@@ -775,7 +780,7 @@ item 2.10).
 | Resource loop, dependency cycle (CVE-2019-9513, Imperva 2016) | PRIORITY frames building a pathological tree | no tree: priorities are not implemented (`NO_RFC7540_PRIORITIES`), PRIORITY frames are glitches | 100 | `h2-attacks.py priority-flood` |
 | Stream multiplexing abuse | thousands of streams | `MAX_CONCURRENT_STREAMS` enforced (`REFUSED_STREAM` beyond), ids monotonic, GOAWAY at `max_requests_per_connection` | 128 concurrent, 1,000 per connection | h2spec 5.1.2; `h2-attacks.py stream-flood` |
 | Frame size, padding, reserved bits | frames larger than advertised, padding longer than the payload | `FRAME_SIZE_ERROR` / `PROTOCOL_ERROR` before buffering | 16 KB | h2spec 4.2, 6.1; `fuzz_h2_conn` |
-| Request smuggling over the HTTP/1.1 downgrade (2021) | CR/LF in values, a space or a line break in `:path`, `:authority` or `:method`, `transfer-encoding`, a `content-length` that disagrees with DATA, `:authority` against `Host` | the field rules of 6.4 at decode time, before the request exists; the pseudo-headers by HTTP/1's request-line rules since 0.1.0-alpha.146 | none reaches php-fpm or an origin | unit tests of `fields.hpp` and of the assembly against the HTTP/1 parser; `tests/pseudo-header-bytes.py` (h2c, HTTP/2, HTTP/3 through the proxy to a recording origin); integration through the proxy and FastCGI fixtures |
+| Request smuggling over the HTTP/1.1 downgrade (2021) | CR/LF in values, a space or a line break in `:path`, `:authority` or `:method`, `transfer-encoding`, a `content-length` that disagrees with DATA, `:authority` against `Host`; a control character in a value that one parser trims or reads as whitespace and another keeps | the field rules of 6.4 at decode time, before the request exists; the pseudo-headers by HTTP/1's request-line rules since 0.1.0-alpha.146, every other value by its rule for a value since 0.1.0-alpha.147 | none reaches php-fpm or an origin | unit tests of `fields.hpp` and of the assembly against the HTTP/1 parser; `tests/pseudo-header-bytes.py` (h2c, HTTP/2, HTTP/3 through the proxy to a recording origin); integration through the proxy and FastCGI fixtures |
 | Header list size, table size games | `SETTINGS_HEADER_TABLE_SIZE` above ours, a dynamic table update larger than allowed | `COMPRESSION_ERROR`; our table never exceeds 4 KB; we never use the peer's table for encoding | 4 KB | `fuzz_hpack` differential |
 | Memory as a whole | anything that grows without bound | every buffer belongs to a stream or the connection and has a cap; the sum of the caps is the connection's worst case (7.3) | about 3.8 MB worst case at the defaults, 22 KB idle | the attack suite samples RSS through every run |
 

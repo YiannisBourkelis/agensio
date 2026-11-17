@@ -69,7 +69,7 @@ inline bool sink_field(RequestSeen& seen, Request& req, std::string& cookie, std
     if (!(o.checked && *o.checked)) {
         if (!o.static_table) {
             if (!fields::valid_name(n)) { seen.bad = true; seen.reason = "field name not a lower-case token"; return true; }
-            if (!fields::valid_value(v)) { seen.bad = true; seen.reason = "field value with CR, LF, NUL or edge whitespace"; return true; }
+            if (!fields::valid_value(v)) { seen.bad = true; seen.reason = "field value with a control character or edge whitespace"; return true; }
             if (n.size() == 4 && n == "host" && !fields::valid_host(v)) { seen.bad = true; seen.reason = "host with whitespace, a control character or a delimiter"; return true; }
         }
         if (fields::connection_specific(n)) { seen.bad = true; seen.reason = "connection-specific field"; return true; }

@@ -2,6 +2,17 @@
 
 ## 0.1.0-alpha.147 (unreleased)
 
+- **HTTP/2 and HTTP/3 refuse a control character in a field's value, as HTTP/1.1 does.** HTTP/1.1
+  has always answered `400` to a request whose field value holds a control character other than
+  a tab (an escape byte, a vertical tab, DEL: RFC 9110 5.5 calls them invalid). HTTP/2 and HTTP/3
+  refused only NUL, CR and LF, the minimum RFC 9113 8.2.1 requires, so such a value reached
+  php-fpm, a proxied application or a CGI script over them (the test VPS's report on
+  0.1.0-alpha.146, F3). RFC 9110 lets a server keep these characters only where no other HTTP
+  parser reads the value, and agensio hands values on to one. Such a request is now malformed,
+  as one with a line break in a value is: its stream is reset (HTTP/2 `PROTOCOL_ERROR`, HTTP/3
+  `H3_MESSAGE_ERROR`) and nothing of it reaches the application. A browser sends such a value only
+  when a page's script sets it, and over HTTP/1.1 that request was already answered `400`.
+
 - **HTTP/1.1 holds a request to the certificate its connection presented, from the first request.**
   A TLS connection answers only for the names its certificate covers, and a request for another
   Host is `421` (RFC 9110 7.4). HTTP/2 and HTTP/3 did this always; HTTP/1.1 did it only when the

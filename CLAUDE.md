@@ -1013,7 +1013,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   connection; the clock read once per socket event), `connection.hpp` (frames, streams, request assembly with the field rules
   of `core/fields.hpp` (the pseudo-headers' values and `host` by the HTTP/1 parser's own rules for a request
   line and a Host field, byte for byte, held equal by the unit test: alpha.146, before which they were stored
-  unchecked and a line break in a query or in `:authority` reached a proxied origin; `tests/pseudo-header-bytes.py`),
+  unchecked and a line break in a query or in `:authority` reached a proxied origin; every other value by its
+  rule for a value, no control character but a tab, alpha.147, before which only NUL, CR and LF were refused;
+  `tests/pseudo-header-bytes.py`),
   receive windows sized to the body limit, timeouts (the idle close reads
   `last_progress_`, moved by a completed frame, the preface or a write, never by a byte that
   completes nothing, and the header-block deadline holds with no stream open; alpha.116, audit

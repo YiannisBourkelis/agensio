@@ -27,10 +27,16 @@ inline bool valid_name(std::string_view name) noexcept {
     return true;
 }
 
-// No NUL, CR or LF anywhere; no leading or trailing space or tab (RFC 9113 8.2.1).
+// A value by HTTP/1's rule for one (`http1/parser.cpp`, RFC 9110 5.5): no control character but
+// a tab, no DEL, anywhere; and no leading or trailing space or tab (RFC 9113 8.2.1). RFC 9113
+// 8.2.1 requires refusing NUL, CR and LF and asks for 5.5's whole rule (SHOULD); RFC 9114 4.1.2
+// makes any invalid character malformed. 5.5 lets a recipient keep the other control characters
+// only where no downstream HTTP parser reads the value, and agensio hands values on to php-fpm,
+// to an origin's HTTP/1.1 parser and to CGI scripts. Until 0.1.0-alpha.147 only NUL, CR and LF
+// were refused, so a value HTTP/1 answers 400 reached the application over HTTP/2 and HTTP/3.
 inline bool valid_value(std::string_view value) noexcept {
     for (const unsigned char c : value)
-        if (c == 0 || c == '\r' || c == '\n') return false;
+        if ((c < 0x20 && c != '\t') || c == 0x7f) return false;
     if (!value.empty() && (value.front() == ' ' || value.front() == '\t' || value.back() == ' ' || value.back() == '\t'))
         return false;
     return true;

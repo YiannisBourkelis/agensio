@@ -15159,7 +15159,8 @@ static void test_request_assembly_cookies() {
 // the four pseudo-headers were stored unchecked and the target was only looked at up to its "?",
 // so a line break in a query or in :authority reached a proxied origin as a line of its own.
 // The rule is HTTP/1's, byte for byte: what its parser refuses in a request line or a Host
-// field, HTTP/2 and HTTP/3 refuse in :method, :path, :authority and host.
+// field, HTTP/2 and HTTP/3 refuse in :method, :path, :authority and host; and since
+// 0.1.0-alpha.147 what it refuses in any field's value, they refuse in every other field.
 static void test_request_assembly_field_bytes() {
     using Fields = std::vector<std::pair<std::string, std::string>>;
     auto assemble = [](const Fields& fields, std::uint8_t* mark = nullptr, std::size_t marked = 0) {
@@ -15229,6 +15230,26 @@ static void test_request_assembly_field_bytes() {
     CHECK(!assemble(with("GET", "http\r\n", "/", "a.test")));
     CHECK(!assemble(with("GET", "1http", "/", "a.test")));
 
+    // Every other field's value by HTTP/1's rule for a value (RFC 9110 5.5): no control character
+    // but a tab, no DEL. Until 0.1.0-alpha.147 HTTP/2 and HTTP/3 refused only NUL, CR and LF, RFC
+    // 9113 8.2.1's minimum, so a value HTTP/1 answers 400 reached php-fpm or an origin over them
+    // (the test VPS's report on 0.1.0-alpha.146, F3). Tab and bytes above 0x7f stay.
+    {
+        auto with_field = [&](Fields extra) {
+            Fields f = with("GET", "https", "/", "a.test");
+            f.insert(f.end(), extra.begin(), extra.end());
+            return assemble(f);
+        };
+        CHECK(!with_field({{"x-note", "a\x1b[31mb"}}));
+        CHECK(!with_field({{"user-agent", "curl\x7f"}}));
+        CHECK(!with_field({{"x-note", "a\x0b" "b"}}));
+        CHECK(!with_field({{"x-note", "a\x01"}}));
+        CHECK(!with_field({{"cookie", "a=1"}, {"cookie", "b=\x01"}}));
+        CHECK(with_field({{"x-note", "a\tb"}}));
+        CHECK(with_field({{"x-note", "caf\xc3\xa9 \x80\xff"}}));
+        CHECK(with_field({{"cookie", "a=1"}, {"cookie", "b=2"}}));
+    }
+
     // A dynamic-table entry is judged once: its mark is set by a value that passed and by no
     // other, so a bad entry is refused each time it is referenced.
     {
@@ -15261,6 +15282,14 @@ static void test_request_assembly_field_bytes() {
         const bool method2 = assemble(with("G" + b + "T", "https", "/", "a.test"));
         if (method1 != method2) std::printf("method byte 0x%02x: HTTP/1 %d, HTTP/2 %d\n", c, method1, method2);
         CHECK(method1 == method2);
+        // Inside a value; at a value's edge HTTP/1 trims a space or a tab and HTTP/2 refuses one
+        // (RFC 9113 8.2.1), the one difference the RFCs make.
+        const bool value1 = h1("GET / HTTP/1.1\r\nHost: a.test\r\nX-Note: a" + b + "b\r\n\r\n");
+        Fields with_value = with("GET", "https", "/", "a.test");
+        with_value.emplace_back("x-note", "a" + b + "b");
+        const bool value2 = assemble(with_value);
+        if (value1 != value2) std::printf("value byte 0x%02x: HTTP/1 %d, HTTP/2 %d\n", c, value1, value2);
+        CHECK(value1 == value2);
     }
 }
 
@@ -15305,6 +15334,8 @@ static void test_h2_frame_and_settings() {
           !fields::valid_name("a b") && !fields::valid_name("") && !fields::valid_name("a\x7f" "b"));
     CHECK(fields::valid_value("text/html; charset=utf-8") && fields::valid_value("") && !fields::valid_value("a\r\nb") &&
           !fields::valid_value(std::string_view("a\0b", 3)) && !fields::valid_value(" x") && !fields::valid_value("x\t"));
+    CHECK(!fields::valid_value("a\x01") && !fields::valid_value("a\x1b[0m") && !fields::valid_value("a\x7f") &&
+          !fields::valid_value("\x1f") && fields::valid_value("a\tb") && fields::valid_value("\x80\xff"));
     CHECK(fields::connection_specific("transfer-encoding") && fields::connection_specific("keep-alive") &&
           !fields::connection_specific("te") && !fields::connection_specific("host"));
 }
