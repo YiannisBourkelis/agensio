@@ -202,6 +202,61 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-11-17, the release check of 0.1.0-alpha.147, before the tag, on 0c824ed1 (the series since
+alpha.146: an origin's kept connection without its read buffer, an idle TLS connection's buffers given
+back, `pool = "shared"`, the proxy's answer path, a busy connection's buffers lent per answer, the proxy
+settings of the control plane; and the alpha.146 report's F1, F2, F3 and notes). Nothing found. The release
+build: unit, integration (874, isolation, the cookbook, `shared-pool.sh`, `proxy-streaming.sh`,
+`h3-attacks.py`, `h2-streamed-bodies.py` and `pseudo-header-bytes.py` inside it), reload (29), control (28),
+pools (26), auth (51, in `agensio-devbox:php` with its network) and Pebble (21) pass; the builds without
+OpenSSL, without libxcrypt, without libbrotli and without libzstd link and pass their unit tests (TSan's
+too, on the field-value change); the sanitizer build (`build-asan`, GCC 14): unit, the integration suite
+(874) and Pebble (21) clean, no sanitizer report in the 650 files the runs wrote under `bench/tmp` nor in
+their logs. The Arch build (`scripts/arch-check.sh`, OpenSSL 4.1.0, GCC 16.2.1): 10 of 10; 87 compiler
+warnings against 86, the one more being `_FORTIFY_SOURCE redefined` for the new translation unit
+`upstream/shared_pool.cpp` (makepkg's flags and agensio's hardening both define it, once per file).
+`scripts/fuzz-all.sh -t 300`, every target (twenty-six, twenty-four at once, one process each, five
+minutes): 622.0 M runs, no finding. The A/B against alpha.146 in the devbox (`--network none`, load average
+2.4 to 2.6 at the start): `bench/ab.sh v0.1.0-alpha.146 -3 -r 4` (`ab-20261117-211846.md`) 0.954 to 1.039;
+`-2 -P -C -r 3` (`ab-20261117-212559.md`) the proxied 100 KB body 0.755, the same through compression 0.753,
+the uncompressed proxied page 0.861, the 512 KB pages 0.938 and 0.963 (the series' work), every other row
+0.970 to 1.030. `perf stat` on the rows above 1.03 and on `https /`, the binaries alternated three times
+(`perfstat-release-147-20261117.md`): the same instructions a request for `https /style.css`, `comp /` and
+h3 at 64 streams (the last two with about 20 % more L1i misses: layout); `https /` 330 to 460 more user
+instructions a request (1.2 to 1.6 % of the whole, the kernel's identical, cycles overlapping), bisected to
+two steps of about 200: 8b12bf19 (the TLS coalescing buffer lent per answer, the price of 45 KB less a busy
+TLS connection) and 800e3356 (F2: HTTP/1.1 over TLS now runs the certificate-name check HTTP/2 and HTTP/3
+always ran).
+
+| target | runs | edges | result |
+|---|---|---|---|
+| fuzz_archive | 18.88 M | 640 | clean |
+| fuzz_auth_users | 10.37 M | 499 | clean |
+| fuzz_chunked | 72.96 M | 63 | clean |
+| fuzz_compressed_body | 0.60 M | 606 | clean |
+| fuzz_cron_lines | 10.86 M | 120 | clean |
+| fuzz_dotenv | 1.24 M | 2361 | clean |
+| fuzz_fcgi | 66.99 M | 96 | clean |
+| fuzz_fields | 2.54 M | 591 | clean |
+| fuzz_h2_bodies | 0.04 M | 9446 | clean |
+| fuzz_h2_conn | 0.74 M | 12081 | clean |
+| fuzz_hpack | 2.35 M | 529 | clean |
+| fuzz_hpack_roundtrip | 0.38 M | 466 | clean |
+| fuzz_http_head | 55.34 M | 152 | clean |
+| fuzz_json | 8.73 M | 550 | clean |
+| fuzz_log_line | 5.37 M | 773 | clean |
+| fuzz_parser | 37.55 M | 240 | clean |
+| fuzz_path | 8.83 M | 236 | clean |
+| fuzz_php_constraint | 13.56 M | 755 | clean |
+| fuzz_qpack | 6.95 M | 646 | clean |
+| fuzz_quic_conn | 0.41 M | 1813 | clean |
+| fuzz_quic_packet | 22.24 M | 217 | clean |
+| fuzz_redirect | 4.86 M | 1238 | clean |
+| fuzz_refuse | 3.06 M | 875 | clean |
+| fuzz_response_headers | 0.54 M | 3362 | clean |
+| fuzz_sql_scan | 9.38 M | 159 | clean |
+| fuzz_transport_params | 276.15 M | 211 | clean |
+
 2026-11-13, the release check of 0.1.0-alpha.144, before the tag, on 754d2a5b and the fix it led to (the
 alpha.143 report: `Retry-After` on a queue's 503, an oversized head and a lone origin out of passive
 health, the info line for an HTTP/3 connection that ends idle with an answer unfinished, four log and
