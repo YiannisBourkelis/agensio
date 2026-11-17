@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.147 (unreleased)
+## 0.1.0-alpha.147 (2026-11-18)
 
 - **HTTP/2 and HTTP/3 refuse a control character in a field's value, as HTTP/1.1 does.** HTTP/1.1
   has always answered `400` to a request whose field value holds a control character other than
