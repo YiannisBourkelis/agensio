@@ -1,7 +1,9 @@
 // The OpenSSL calls whose spelling changed between the versions agensio builds against
 // (3.0 to 4.1), each behind one function, so no caller names a function a version deprecates:
 // SSL_set1_host() and X509_NAME_get_text_by_NID() since 4.0, ASN1_STRING_length() since 4.1.
-// Each does what the call it replaces did, on every version; the unit tests hold them to that.
+// Each does what the call it replaces did, on every version; the unit tests hold them to that. One
+// exception, on purpose: common_name_text reads an entry of any encoding as text, where the old call
+// gave a BMPString's raw bytes. asn1_utf8 replaces nothing: the text OpenSSL's name checks compare.
 //
 // Nothing here runs per request: names are read when a certificate is loaded, and a peer's
 // name is set once per TLS connection agensio opens (to an origin, a CA, a download). They are
@@ -14,6 +16,7 @@
 #include <openssl/types.h>
 
 #include <cstddef>
+#include <string>
 #include <string_view>
 
 namespace agensio::tls {
@@ -22,10 +25,17 @@ namespace agensio::tls {
 std::size_t asn1_length(const ASN1_STRING* s) noexcept;
 std::string_view asn1_text(const ASN1_STRING* s) noexcept;
 
-// The first commonName of `name` as X509_NAME_get_text_by_NID() gave it into a buffer of
-// `limit + 1` bytes read as a C string: the entry's bytes as they are, at most `limit` of
-// them, ending before a NUL byte. Empty when the name has none. The view points into `name`.
-std::string_view first_common_name(const X509_NAME* name, std::size_t limit) noexcept;
+// An ASN.1 string as UTF-8 text, whatever its type (a BMPString is UTF-16, a UniversalString
+// UTF-32), as OpenSSL's own name checks read one (ASN1_STRING_to_UTF8). Empty when it does not
+// convert. Every byte is kept, a NUL included: a caller judging a name refuses it.
+std::string asn1_utf8(const ASN1_STRING* s);
+
+// The first commonName of `name` as text, for a listing (an issuer's name): in UTF-8 whatever the
+// entry's type, at most `limit` bytes (cut at a character's start), ending before a NUL byte;
+// empty when the name has none. In place of X509_NAME_get_text_by_NID(), deprecated since 4.0,
+// which gave the same for the UTF8String and PrintableString entries every CA writes, and an
+// entry's raw bytes for any other type (a BMPString issuer printed as "" until 0.1.0-alpha.147).
+std::string common_name_text(const X509_NAME* name, std::size_t limit);
 
 // The certificate `ssl`'s peer shows must name `host`, and nothing else is expected of it:
 // an IP literal is looked for among the certificate's IP addresses, any other name among

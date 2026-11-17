@@ -714,14 +714,18 @@ std::vector<std::string> certificate_names(const X509* x) {
         GENERAL_NAMES_free(sans);
     }
     if (dns) return names;
-    // The entry's bytes whole (a NUL byte inside makes it no host name, never a shorter one).
+    // Every CN, each as text, as X509_check_host tries them (do_x509_check: each commonName entry in
+    // turn, through ASN1_STRING_to_UTF8). Until 0.1.0-alpha.147 only the first was read, and as its
+    // raw bytes, so a second CN and one written as a BMPString named nothing (the test VPS's report
+    // on alpha.146, F1). The text whole: a NUL byte inside makes it no host name, never a shorter one.
     const X509_NAME* subject = X509_get_subject_name(x);
-    const int at = subject ? X509_NAME_get_index_by_NID(subject, NID_commonName, -1) : -1;
-    if (at < 0) return names;
-    const ASN1_STRING* data = X509_NAME_ENTRY_get_data(X509_NAME_get_entry(subject, at));
-    if (!data) return names;
-    const std::string_view cn = tls::asn1_text(data);
-    if (valid_host_name(cn.starts_with("*.") ? cn.substr(2) : cn)) names.emplace_back(cn);
+    for (int at = -1; subject && (at = X509_NAME_get_index_by_NID(subject, NID_commonName, at)) >= 0;) {
+        const X509_NAME_ENTRY* entry = X509_NAME_get_entry(subject, at);
+        const std::string cn = tls::asn1_utf8(entry ? X509_NAME_ENTRY_get_data(entry) : nullptr);
+        const std::string_view name = cn;
+        if (!valid_host_name(name.starts_with("*.") ? name.substr(2) : name)) continue;
+        if (std::find(names.begin(), names.end(), cn) == names.end()) names.push_back(cn);
+    }
     return names;
 }
 
@@ -744,7 +748,7 @@ bool certificate_info_of(const X509* x509, CertInfo& out, std::string& error) {
             out.fingerprint.push_back(hex[md[i] & 15]);
         }
     }
-    const std::string_view cn = tls::first_common_name(X509_get_issuer_name(x.get()), 127);
+    const std::string cn = tls::common_name_text(X509_get_issuer_name(x.get()), 127);
     out.issuer = cn;
     out.placeholder = cn == kPlaceholderName;
     out.names = certificate_names(x.get());

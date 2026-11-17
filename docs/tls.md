@@ -139,10 +139,14 @@ application's own removed (0.1.0-alpha.104; [redirects.md](redirects.md) 4.2). W
 key, both PEM. The certificate must cover every name in `server_name`: a request for a name it
 does not cover is answered `421`, over HTTP/1.1, HTTP/2 and HTTP/3 alike. Its names are the DNS
 names and addresses of its subjectAltName; the subject's CN counts only for a certificate whose
-subjectAltName holds no DNS name, as clients built on OpenSSL read one (browsers ignore the CN
-altogether, so give every name in the subjectAltName). Until 0.1.0-alpha.147 an HTTP/1.1 request
-on a server without `trusted_proxies` was held to the certificate only after something else on its
-connection had needed the connection's details. `agensio ctl sites` and `agensio ctl site NAME` print the names a certificate
+subjectAltName holds no DNS name, every CN of it, each read as text whatever its encoding, as
+RFC 6125 and OpenSSL 3 read one. Browsers ignore the CN altogether, and so does OpenSSL 4 by
+default (RFC 9525, which replaced RFC 6125): a client that verifies refuses a certificate named
+only by its CN, so give every name in the subjectAltName. The CN still counts here so that a
+self-signed certificate made with `-subj /CN=name` alone serves its site to a client that does
+not verify (`curl -k`). Until 0.1.0-alpha.147 only the first CN was read, a CN written as a BMPString
+named nothing, and an HTTP/1.1 request on a server without `trusted_proxies` was held to the
+certificate only after something else on its connection had needed the connection's details. `agensio ctl sites` and `agensio ctl site NAME` print the names a certificate
 is served for (`tls.names` for the file, `tls.served.names` for the one in memory). A TLS client asking for a name no site lists is refused
 during the handshake (`unrecognized_name`), so another site's certificate is never shown.
 `agensio ctl status` counts those refusals (`tls_handshakes_refused`, with the addresses).

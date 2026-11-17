@@ -69,11 +69,13 @@ std::vector<AcmeSite> sites_of(const Config& cfg);
 // renewals still work after the privilege drop. Throws on failure.
 void prepare_storage(const Config& cfg, const std::vector<AcmeSite>& sites, int uid, int gid);
 
-// The names a certificate covers, as a client checks one (RFC 6125 6.4.4; what OpenSSL's
-// X509_check_host and X509_check_ip do, held to them by the unit test): the DNS names and IP
+// The names a certificate covers, as a client checks one (RFC 6125 6.4.4; what OpenSSL 3's
+// X509_check_host and X509_check_ip do by default, held to OpenSSL's matcher under that rule by the
+// unit test on OpenSSL 3 and 4; OpenSSL 4 and browsers read no CN at all, RFC 9525): the DNS names and IP
 // addresses of its subjectAltName in their order, an address as the stack prints it, and, only when
-// the subjectAltName holds no DNS name, the subject's first commonName if it has the form of a host
-// name ("*.example.com" too). The one reader of a certificate's names: what a TLS connection answers
+// the subjectAltName holds no DNS name, each of the subject's commonNames, read as text whatever its
+// encoding, that has the form of a host name ("*.example.com" too; every one and as text since
+// 0.1.0-alpha.147, the first one's raw bytes before). The one reader of a certificate's names: what a TLS connection answers
 // for (CertNames, the 421 rule) and what sites_list and site_show print are this list. Until
 // 0.1.0-alpha.146 the server counted the CN beside the subjectAltName's names and the listing read the
 // DNS names alone, so a certificate without a subjectAltName was served for its CN and listed as

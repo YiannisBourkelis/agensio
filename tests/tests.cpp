@@ -5938,15 +5938,31 @@ static void test_openssl_compat() {
         Name name(X509_NAME_new());
         CHECK(name);
         for (const auto& [nid, bytes] : c.entries) CHECK(add(name.get(), nid, bytes));
-        CHECK_EQ(std::string(tls::first_common_name(name.get(), 255)), std::string(c.at255));
-        CHECK_EQ(std::string(tls::first_common_name(name.get(), 127)), std::string(c.at127));
+        CHECK_EQ(tls::common_name_text(name.get(), 255), std::string(c.at255));
+        CHECK_EQ(tls::common_name_text(name.get(), 127), std::string(c.at127));
 #if OPENSSL_VERSION_NUMBER < 0x40000000L
         char big[256] = {}, small[128] = {};
         X509_NAME_get_text_by_NID(name.get(), NID_commonName, big, sizeof big);
         X509_NAME_get_text_by_NID(name.get(), NID_commonName, small, sizeof small);
-        CHECK_EQ(std::string(tls::first_common_name(name.get(), 255)), std::string(big));
-        CHECK_EQ(std::string(tls::first_common_name(name.get(), 127)), std::string(small));
+        CHECK_EQ(tls::common_name_text(name.get(), 255), std::string(big));
+        CHECK_EQ(tls::common_name_text(name.get(), 127), std::string(small));
 #endif
+    }
+    // Text whatever the entry's type, where the old call gave a BMPString's raw UTF-16 bytes (read as a
+    // C string: nothing); a cut never splits a character; asn1_utf8 keeps every byte, a NUL included.
+    {
+        Name name(X509_NAME_new());
+        const std::string utf16("\0d\0""5\0.\0t\0e\0s\0t", 14);
+        CHECK(X509_NAME_add_entry_by_NID(name.get(), NID_commonName, V_ASN1_BMPSTRING, reinterpret_cast<const unsigned char*>(utf16.data()), 14, -1, 0) == 1);
+        CHECK_EQ(tls::common_name_text(name.get(), 127), std::string("d5.test"));
+        CHECK_EQ(tls::common_name_text(name.get(), 3), std::string("d5."));
+        Name greek(X509_NAME_new());
+        CHECK(add(greek.get(), NID_commonName, "\xce\xb4\xce\xbf"));  // two 2-byte characters
+        CHECK_EQ(tls::common_name_text(greek.get(), 3), std::string("\xce\xb4"));
+        Name nul(X509_NAME_new());
+        CHECK(add(nul.get(), NID_commonName, with_nul));
+        CHECK_EQ(tls::asn1_utf8(X509_NAME_ENTRY_get_data(X509_NAME_get_entry(nul.get(), 0))), std::string(with_nul));
+        CHECK(tls::asn1_utf8(nullptr).empty() && tls::common_name_text(nullptr, 10).empty());
     }
     // An ASN.1 string's bytes are all of them, a NUL included (the subjectAltName entries are read this way).
     {
@@ -6039,8 +6055,9 @@ static void test_certificate_names() {
     const std::unique_ptr<EVP_PKEY, KeyFree> key(EVP_EC_gen("P-256"));
     CHECK(key != nullptr);
     if (!key) return;
-    // Self-signed, then through DER and back: read as a certificate loaded from a file is.
-    const auto make = [&](std::string_view cn, const char* san) -> CertPtr {
+    // Self-signed, then through DER and back: read as a certificate loaded from a file is. `fill` adds
+    // the subject's names after its organisation (the subject is also the issuer).
+    const auto build = [&](const std::function<void(X509_NAME*)>& fill, const char* san) -> CertPtr {
         CertPtr x(X509_new());
         X509_set_version(x.get(), 2);
         ASN1_INTEGER_set(X509_get_serialNumber(x.get()), 1);
@@ -6048,8 +6065,7 @@ static void test_certificate_names() {
         X509_gmtime_adj(X509_getm_notAfter(x.get()), 86400);
         X509_NAME* name = X509_NAME_new();
         X509_NAME_add_entry_by_NID(name, NID_organizationName, V_ASN1_UTF8STRING, reinterpret_cast<const unsigned char*>("agensio tests"), -1, -1, 0);
-        if (!cn.empty())
-            X509_NAME_add_entry_by_NID(name, NID_commonName, V_ASN1_UTF8STRING, reinterpret_cast<const unsigned char*>(cn.data()), static_cast<int>(cn.size()), -1, 0);
+        fill(name);
         X509_set_subject_name(x.get(), name);
         X509_set_issuer_name(x.get(), name);
         X509_NAME_free(name);
@@ -6071,7 +6087,30 @@ static void test_certificate_names() {
         OPENSSL_free(der);
         return back;
     };
+    const auto make = [&](std::string_view cn, const char* san) -> CertPtr {
+        return build(
+            [cn](X509_NAME* name) {
+                if (!cn.empty())
+                    X509_NAME_add_entry_by_NID(name, NID_commonName, V_ASN1_UTF8STRING, reinterpret_cast<const unsigned char*>(cn.data()), static_cast<int>(cn.size()), -1, 0);
+            },
+            san);
+    };
     using Names = std::vector<std::string>;
+    // The reference: OpenSSL's matcher under RFC 6125 6.4.4's rule, the CN read only when the
+    // subjectAltName holds no DNS name. That rule was X509_check_host's default up to OpenSSL 3; OpenSSL 4
+    // follows RFC 9525 and never reads the CN by default (X509_CHECK_FLAG_ALWAYS_CHECK_SUBJECT reads it
+    // always), so the flags ask for the subject exactly when the rule does: the same answer on 3.5 and on
+    // 4.1, where with flags 0 this test failed for every certificate named by its CN (found by
+    // scripts/arch-check.sh, 2026-11-15). OpenSSL still decides case, wildcards, encodings and NUL bytes.
+    const auto client_host = [](X509* x, const char* host) {
+        bool dns = false;
+        if (auto* sans = static_cast<GENERAL_NAMES*>(X509_get_ext_d2i(x, NID_subject_alt_name, nullptr, nullptr))) {
+            for (int i = 0; i < sk_GENERAL_NAME_num(sans); ++i) dns = dns || sk_GENERAL_NAME_value(sans, i)->type == GEN_DNS;
+            GENERAL_NAMES_free(sans);
+        }
+        const unsigned flags = dns ? X509_CHECK_FLAG_NEVER_CHECK_SUBJECT : X509_CHECK_FLAG_ALWAYS_CHECK_SUBJECT;
+        return X509_check_host(x, host, 0, flags, nullptr) == 1;
+    };
     struct Case { const char* cn; const char* san; Names names; };
     const Case cases[] = {
         {"cn.test", "", {"cn.test"}},                                         // no subjectAltName: the CN (the listing gave none)
@@ -6109,10 +6148,61 @@ static void test_certificate_names() {
         for (const char* host : probes) {
             asio::error_code ec;
             (void)asio::ip::make_address(host, ec);
-            const bool client = ec ? X509_check_host(x.get(), host, 0, 0, nullptr) == 1 : X509_check_ip_asc(x.get(), host, 0) == 1;
+            const bool client = ec ? client_host(x.get(), host) : X509_check_ip_asc(x.get(), host, 0) == 1;
             const std::string as_host = !ec && std::string_view(host).find(':') != std::string_view::npos ? "[" + std::string(host) + "]" : std::string(host);  // as a Host field writes it
             CHECK(covered.covers(as_host) == client);
             if (covered.covers(as_host) != client) std::printf("CN=%s SAN=%s host %s: covered %d, a client's check %d\n", c.cn, c.san, host, covered.covers(host), client);
+        }
+    }
+    // Two subjects a client's check reads and a first-CN, raw-bytes reader did not (the test VPS's report
+    // on 0.1.0-alpha.146, F1): a CN written as a BMPString (UTF-16), which OpenSSL reads through
+    // ASN1_STRING_to_UTF8, and a subject with two CNs, every one of which OpenSSL tries. The issuer's
+    // name is read the same way (sites_list printed a BMPString issuer as "").
+    {
+        const auto bmp_cn = [](std::string_view text) {
+            return [text](X509_NAME* name) {
+                std::string utf16;
+                for (const char c : text) {
+                    utf16.push_back('\0');
+                    utf16.push_back(c);
+                }
+                X509_NAME_add_entry_by_NID(name, NID_commonName, V_ASN1_BMPSTRING, reinterpret_cast<const unsigned char*>(utf16.data()), static_cast<int>(utf16.size()), -1, 0);
+            };
+        };
+        const auto two_cns = [](X509_NAME* name) {
+            X509_NAME_add_entry_by_NID(name, NID_commonName, V_ASN1_UTF8STRING, reinterpret_cast<const unsigned char*>("a.test"), -1, -1, 0);
+            X509_NAME_add_entry_by_NID(name, NID_commonName, V_ASN1_UTF8STRING, reinterpret_cast<const unsigned char*>("d7.test"), -1, -1, 0);
+        };
+        struct Shape { const char* what; std::function<void(X509_NAME*)> fill; const char* san; Names names; const char* issuer; };
+        const Shape shapes[] = {
+            {"a BMPString CN", bmp_cn("d5.test"), "", {"d5.test"}, "d5.test"},
+            {"two CNs", two_cns, "", {"a.test", "d7.test"}, "a.test"},
+            {"two CNs beside a DNS name", two_cns, "DNS:san.test", {"san.test"}, "a.test"},
+            {"a BMPString CN that is no host name", bmp_cn("My Company"), "", {}, "My Company"},
+        };
+        for (const Shape& sh : shapes) {
+            const CertPtr x = build(sh.fill, sh.san);
+            CHECK(x != nullptr);
+            if (!x) continue;
+            const Names names = acme::certificate_names(x.get());
+            if (names != sh.names) {
+                std::printf("certificate_names, %s:", sh.what);
+                for (const auto& n : names) std::printf(" %s", n.c_str());
+                std::printf("\n");
+            }
+            CHECK(names == sh.names);
+            acme::CertInfo info;
+            std::string error;
+            CHECK(acme::certificate_info_of(x.get(), info, error) && info.names == sh.names);
+            if (info.issuer != sh.issuer) std::printf("certificate_info_of, %s: issuer \"%s\"\n", sh.what, info.issuer.c_str());
+            CHECK(info.issuer == sh.issuer);
+            CertNames covered;
+            for (const auto& n : names) covered.add(n);
+            for (const char* host : {"d5.test", "a.test", "d7.test", "san.test", "y.test"}) {
+                const bool client = client_host(x.get(), host);
+                if (covered.covers(host) != client) std::printf("%s, host %s: covered %d, a client's check %d\n", sh.what, host, covered.covers(host), client);
+                CHECK(covered.covers(host) == client);
+            }
         }
     }
     CHECK(acme::certificate_names(nullptr).empty());

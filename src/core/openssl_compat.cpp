@@ -26,17 +26,28 @@ std::string_view asn1_text(const ASN1_STRING* s) noexcept {
     return {reinterpret_cast<const char*>(ASN1_STRING_get0_data(s)), asn1_length(s)};
 }
 
-// The way OpenSSL names in place of X509_NAME_get_text_by_NID(): the entry by its index,
-// then its data. The cuts are that call's (its buffer's size) and its callers' (a C string).
-std::string_view first_common_name(const X509_NAME* name, std::size_t limit) noexcept {
-    const int at = X509_NAME_get_index_by_NID(name, NID_commonName, -1);
+std::string asn1_utf8(const ASN1_STRING* s) {
+    if (!s) return {};
+    unsigned char* utf8 = nullptr;
+    const int n = ASN1_STRING_to_UTF8(&utf8, s);
+    if (n < 0 || !utf8) return {};
+    std::string text(reinterpret_cast<const char*>(utf8), static_cast<std::size_t>(n));
+    OPENSSL_free(utf8);
+    return text;
+}
+
+std::string common_name_text(const X509_NAME* name, std::size_t limit) {
+    const int at = name ? X509_NAME_get_index_by_NID(name, NID_commonName, -1) : -1;
     if (at < 0) return {};
     const X509_NAME_ENTRY* entry = X509_NAME_get_entry(name, at);
-    const ASN1_STRING* data = entry ? X509_NAME_ENTRY_get_data(entry) : nullptr;
-    if (!data) return {};
-    std::string_view text = asn1_text(data);
-    text = text.substr(0, std::min(text.size(), limit));
-    return text.substr(0, text.find('\0'));
+    std::string text = asn1_utf8(entry ? X509_NAME_ENTRY_get_data(entry) : nullptr);
+    if (const std::size_t nul = text.find('\0'); nul != std::string::npos) text.resize(nul);
+    if (text.size() > limit) {
+        std::size_t cut = limit;
+        while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) --cut;  // not inside a character
+        text.resize(cut);
+    }
+    return text;
 }
 
 // The body of SSL_set1_host() in OpenSSL 3.5 and 4.1, made of the calls it is made of, which

@@ -166,8 +166,9 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   name/value views), `request.hpp`, `response.hpp` (status, prebuilt header block, extra
   fields, `Body`), `body.hpp` (`MemoryBody`, `FileBody`, `StreamBody` for later phases),
   `stream.hpp` (one request/response exchange), `worker_state.hpp`, `strings.hpp`, `spare_buffers.hpp` (a worker's buffers lent per answer, alpha.147),
-  `openssl_compat.hpp` (the three OpenSSL calls whose spelling differs between 3.0 and 4.1, each
-  behind one function held to the old call by the unit tests; nothing of it runs per request),
+  `openssl_compat.hpp` (the OpenSSL calls whose spelling differs between 3.0 and 4.1, each
+  behind one function held to the old call by the unit tests, and `asn1_utf8`, an ASN.1 string as
+  text as OpenSSL's name checks read one; nothing of it runs per request),
   `router.hpp/.cpp` (`Router`: site by Host, then `Router::location`: exact before
   prefix, longest prefix first, implicit `/` last; an exact `.php` location also takes its
   script's path-info form, `LocationConfig::script_exact`, alpha.109; `try_files` fallbacks
@@ -341,12 +342,16 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   health judges the certificates as served (`Server::tls_facts`, `control::TlsFacts`, T2):
   `certificate_not_loaded`, `acme_renewal_overdue` and `acme_renewal_failed` with the manager's
   last failure (`AcmeManager::failures`). A certificate's names have one reader (alpha.146,
-  `acme::certificate_names`: the subjectAltName's DNS names and addresses, the CN only when it holds no
-  DNS name, RFC 6125 6.4.4 as `X509_check_host` applies it, held to OpenSSL's checks by the unit test):
-  what a connection answers for (`CertNames`, the 421 rule, held from the handshake on over HTTP/1.1 too since
-  alpha.147: before, only once something had filled the connection's info, at once with `trusted_proxies`, else
-  after a proxied request; a certificate's name is taken whole, an IPv6
-  address was cut at its last colon before) and `tls.names` of `sites_list` and `site_show` are that list. The certificate refresh (T3,
+  `acme::certificate_names`: the subjectAltName's DNS names and addresses, the CNs only when it holds no
+  DNS name, each CN read as text through `tls::asn1_utf8` as OpenSSL does (alpha.147: before, the first
+  CN's raw bytes, so a BMPString CN or a second CN named nothing), RFC 6125 6.4.4 as OpenSSL 3's
+  `X509_check_host` applies it, held by the unit test to OpenSSL's matcher under that rule, the flags
+  pinned: OpenSSL 4 reads no CN by default, RFC 9525, and the test asking with flags 0 failed on Arch
+  from alpha.146 on): what a connection answers for (`CertNames`, the
+  421 rule, held from the handshake on over HTTP/1.1 too since alpha.147: before, only once something
+  had filled the connection's info, at once with `trusted_proxies`, else after a proxied request; a
+  certificate's name is taken whole, an IPv6 address was cut at its last colon before) and `tls.names`
+  of `sites_list` and `site_show` are that list. The certificate refresh (T3,
   `Server::refresh_certificates` over `switch_to`, the half of a reload after the configuration is
   loaded): the running configuration's certificates read again, no configuration file read; ACME
   uses it after an order, an hourly watch (`arm_certificate_watch`, one stat per file,

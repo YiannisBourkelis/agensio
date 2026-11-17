@@ -16,6 +16,24 @@
   certificate and now a `421` over HTTP/1.1 too; `--resolve shop.example.com:443:203.0.113.5` sends
   the name. agensio's own health probes send the site's name.
 
+- **A certificate's CN is read as OpenSSL 3's check reads it.** For a certificate whose
+  subjectAltName holds no DNS name, the subject's CN is a name of it, and since 0.1.0-alpha.146 one
+  reader decides what a connection answers for and what `tls.names` lists. That reader took only
+  the first CN, and its raw bytes: a CN written as a BMPString (UTF-16) named nothing and a second
+  CN was never read, where `X509_check_host` reads every CN as text (the test VPS's report on
+  alpha.146, F1). Every CN is now read, each through `ASN1_STRING_to_UTF8`, and the issuer that
+  `sites_list` prints too (a BMPString issuer showed as `""`). Rare shapes; certificates from a
+  public CA carry their names in the subjectAltName and are not affected.
+  OpenSSL 4 no longer reads the CN by default (RFC 9525, as browsers): there `X509_check_host`
+  refuses a certificate named only by its CN, so the unit test, which asked OpenSSL with default
+  flags, had failed on the Arch build since alpha.146 (OpenSSL 4.1; the release job builds that
+  package without running the unit tests; `scripts/arch-check.sh` runs them and found it). The
+  server never calls it and behaves alike on both; the test now asks OpenSSL's matcher for the
+  subject exactly when RFC 6125's rule does, the same reference on OpenSSL 3 and 4. agensio keeps
+  the CN for a certificate without DNS names, so a self-signed `-subj /CN=name` certificate serves
+  its site to a client that does not verify; a client that verifies with OpenSSL 4, or a browser,
+  refuses such a certificate before it asks anything (`docs/tls.md` 3.1).
+
 - **Bench: agensio against Pingora as a reverse proxy.** `bench/pingora/` holds a proxy program
   built on Pingora 0.9.1, Cloudflare's Rust framework, written as Pingora's own examples are, and
   `run.sh`, which puts it and agensio in front of the benchmark upstream through six groups: plain
