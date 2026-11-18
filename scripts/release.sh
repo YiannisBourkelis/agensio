@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Cut a release: set the version everywhere it lives, check the changelog has its
-# section, build and run the unit tests, commit, tag and push. The release workflow on
-# GitHub then builds the packages and attaches them to the release.
+# section, build and run the unit tests, run the release workflow's build jobs here
+# (scripts/release-check.sh), commit, tag and push. The release workflow on GitHub then
+# builds the packages and attaches them to the release.
 #
-# usage: scripts/release.sh [version] [--dry-run] [--no-push]
+# usage: scripts/release.sh [version] [--dry-run] [--no-push] [--no-check]
 #   version   X.Y.Z or X.Y.Z-<pre>.<n> (alpha.2, beta.1, rc.1); the tag is v<version>.
 #             Without it the next version is suggested from the current one (alpha.1 ->
 #             alpha.2, 0.1.0 -> 0.1.1) and you can accept it with Enter or type another;
@@ -14,13 +15,20 @@
 # carrying its marker line (alpha.68 shipped a commit list and skipped alpha.67 that way).
 #   --dry-run show what would change, touch nothing
 #   --no-push commit and tag, do not push
+#   --no-check tag without scripts/release-check.sh: the workflow's jobs (Ubuntu 22.04 with
+#             GCC 12, Debian 13, Fedora, Arch) are then first met on GitHub, after the tag.
+#             The check takes about three minutes and needs docker and the network; it
+#             stops the run before the commit when a job would fail (0.1.0-alpha.147's
+#             packages job did, on GCC 12, and that release had no Debian 12, Ubuntu or
+#             Fedora package and no APT update).
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")/.."
-version=""; dry=0; push=1
+version=""; dry=0; push=1; check=1
 for a in "$@"; do
     case "$a" in
         --dry-run) dry=1;;
         --no-push) push=0;;
+        --no-check) check=0;;
         -*) echo "unknown option $a"; exit 2;;
         *) version="$a";;
     esac
@@ -50,7 +58,7 @@ if [ -z "$version" ]; then
         version="$next"
     fi
 fi
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]] || { echo "usage: $0 [X.Y.Z[-alpha.N|-beta.N|-rc.N]] [--dry-run] [--no-push]  (got '$version')"; exit 2; }
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]] || { echo "usage: $0 [X.Y.Z[-alpha.N|-beta.N|-rc.N]] [--dry-run] [--no-push] [--no-check]  (got '$version')"; exit 2; }
 base="${version%%-*}"                       # 0.1.0
 pre="${version#"$base"}"; pre="${pre#-}"     # alpha.2 or ""
 tag="v$version"
@@ -117,6 +125,11 @@ say "  packaging/arch/PKGBUILD  _tag -> $version, pkgver -> ${base}${pre//./}"
 if [ -n "$pre" ]; then rpm_release="0.1.$pre"; else rpm_release="1"; fi
 say "  packaging/rpm/agensio.spec  upstream_version -> $version, Version -> $base, Release -> $rpm_release, changelog entry"
 say "  CHANGELOG.md             date of the $version section -> $today"
+if [ $check = 1 ]; then
+    say "  check: build and unit tests here, then scripts/release-check.sh (the workflow's jobs in containers, about 3 min)"
+else
+    say "  check: build and unit tests here only (--no-check: the workflow's jobs are first met on GitHub)"
+fi
 say "  git: commit 'Release $tag', annotated tag $tag$([ $push = 1 ] && echo ', push main and the tag')"
 # The release commit carries the version bump and the changelog: an edited CHANGELOG.md
 # may be pending, nothing else.
@@ -149,6 +162,16 @@ cmake --build build > /dev/null
 built=$(build/agensio -v | awk '{print $2}')
 [ "$built" = "$version" ] || fail "binary says $built after the bump"
 build/agensio_tests | tail -1
+
+# 5b. The release workflow's jobs, here, on this tree (the version set, nothing committed): a
+#     job that would fail on GitHub stops the run before anything is committed or tagged.
+if [ $check = 1 ]; then
+    command -v docker > /dev/null || fail "scripts/release-check.sh needs docker; install it, or pass --no-check to tag without the check"
+    scripts/release-check.sh --version "$version" ||
+        fail "scripts/release-check.sh failed (logs in bench/tmp/release-check/): nothing committed or tagged. The version files are changed but not committed; undo them before the next run with: git checkout -- CMakeLists.txt packaging/arch/PKGBUILD packaging/rpm/agensio.spec. Fix the cause, or pass --no-check to tag without the check"
+else
+    say "warning: --no-check: the workflow's jobs (Ubuntu 22.04 with GCC 12, Debian 13, Fedora, Arch) were not run here"
+fi
 
 # 6. Commit, tag, push.
 git add CMakeLists.txt packaging/arch/PKGBUILD packaging/rpm/agensio.spec CHANGELOG.md

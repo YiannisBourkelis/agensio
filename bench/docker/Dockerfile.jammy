@@ -1,0 +1,19 @@
+# Ubuntu 22.04 with what the release workflow's `packages` job has: GCC 12 from the distribution,
+# OpenSSL 3.0 (no QUIC TLS API, so no HTTP/3), the job's packages, and a current CMake (the job's
+# lukka/get-cmake action takes the newest release; here PyPI's newest). libcrypt-dev and adduser
+# are not in the job's list but are on GitHub's Ubuntu runner, so the build has passwords and the
+# .deb installs as there. scripts/release-check.sh runs the job's steps in it on the working tree
+# before a tag: the oldest compiler and OpenSSL a release meets, where Arch is the newest (the
+# packages of 0.1.0-alpha.147 did not build here: a library member GCC 12 and 13 lack).
+#
+# REFRESH changes once a day in the script, so the packages are those of the day of the check.
+FROM ubuntu:22.04
+ARG REFRESH=none
+RUN echo "packages as of ${REFRESH}" && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+         ninja-build g++-12 libssl-dev zlib1g-dev libzstd-dev libbrotli-dev pkg-config rpm dpkg-dev file \
+         libcrypt-dev adduser ca-certificates git python3-pip sudo \
+    && pip3 install --no-cache-dir --upgrade cmake \
+    && rm -rf /var/lib/apt/lists/*
+# The job builds as the runner's user, not root.
+RUN useradd -m build

@@ -1,0 +1,12 @@
+# Debian 13 with what the release workflow's `debian13` job installs (its GCC, OpenSSL 3.5, so the
+# build serves HTTP/3, and the +deb13 .deb). scripts/release-check.sh runs the job's steps in it on
+# the working tree before a tag; the job runs as root in its container, and so does the check.
+#
+# REFRESH changes once a day in the script, so the packages are those of the day of the check. The
+# package lists stay: the .deb is installed with apt-get, which resolves its dependencies from them.
+FROM debian:trixie
+ARG REFRESH=none
+RUN echo "packages as of ${REFRESH}" && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+         ca-certificates git cmake ninja-build g++ libssl-dev zlib1g-dev libzstd-dev libbrotli-dev pkg-config \
+         libcrypt-dev dpkg-dev file openssl

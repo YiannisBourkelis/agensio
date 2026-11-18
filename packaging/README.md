@@ -30,6 +30,15 @@
   - `packages`, on Ubuntu 22.04: `agensio_<version>_amd64.deb` (and the `.rpm`) for Debian 12, Ubuntu 22.04 and later, without HTTP/3 (OpenSSL 3.0 has no QUIC TLS API). It feeds the APT repository and the `fedora` smoke test.
   - `debian13`, in a `debian:trixie` container: `agensio_<version>+deb13_amd64.deb` (`-DAGENSIO_DEB_SUFFIX=deb13`), against Debian 13's OpenSSL 3.5, with HTTP/3, which the job proves by loading a configuration with `"h3"`; Debian 13 and later only.
   - Whichever finishes first creates the release (`release-upload.sh`, which also takes the version's section of `CHANGELOG.md` as the notes), and the other attaches its files to it.
+- `scripts/release-check.sh` runs the workflow's build jobs here before a tag, on the working tree, each in its
+  job's image and all at once (about three minutes): `packages` (`bench/docker/Dockerfile.jammy`: Ubuntu 22.04,
+  GCC 12, OpenSSL 3.0; build, unit tests, the version, the `.deb` and `.rpm`, the `.deb` installed),
+  `debian13` (`Dockerfile.trixie`: the build with the suffix, an `"h3"` configuration accepted, the `.deb`
+  installed), `fedora` (the `.rpm` installed) and `arch` (`scripts/arch-check.sh`). `scripts/release.sh` runs
+  it after setting the version and stops before the commit when a row fails; `--no-check` tags without it. A
+  change to a job's steps or packages changes its row in the script, or its Dockerfile, in the same commit:
+  the tag of 0.1.0-alpha.147 failed in the `packages` job on GCC 12, which nothing here had built with, and
+  that release went out without its Debian 12, Ubuntu and Fedora packages or an APT update.
 
 Version strings: the tag is `v0.1.0-alpha.1`; Debian gets `0.1.0~alpha.1` (a tilde sorts
 before the release), RPM `0.1.0-0.1.alpha.1`, Arch `0.1.0alpha1-1`.
