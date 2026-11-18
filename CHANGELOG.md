@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.149 (unreleased)
+## 0.1.0-alpha.149 (2026-11-18)
 
 - **A streamed answer of known length ends over HTTP/2 without TLS (h2c).** Since 0.1.0-alpha.147,
   an answer a location streams (`buffering = false`, `stream_paths`, `proxy_buffering = off`) whose
