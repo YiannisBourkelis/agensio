@@ -56,8 +56,11 @@ agent host  --stdin/stdout-->  agensio mcp  --unix socket-->  agensio (control A
   server's version (`X-Agensio-Version`), and when it differs from the bridge's the tool
   result carries a note saying so: a long-lived `agensio mcp` keeps the tools and texts it
   started with after an upgrade (reconnect the MCP server in the agent host), and a server
-  not restarted after one still runs the old code (`systemctl restart agensio`). Bridges
-  before 0.1.0-alpha.26 cannot tell; reconnect them once after upgrading.
+  not restarted after one still runs the old code (`systemctl restart agensio`). The note
+  is the first member of the structured answer, and an argument the bridge refuses itself
+  (one a newer server added) carries it too (0.1.0-alpha.149; before, it came last and the
+  refusal had none). Bridges before 0.1.0-alpha.26 cannot tell; reconnect them once after
+  upgrading. In Claude Code `/mcp` reconnects a server.
 - **Files cannot travel through the bridge**: a tool argument is JSON inside the model's
   context, so an archive on your machine reaches the server by `ssh admin@host agensio
   ctl upload NAME < file` (the same SSH session the bridge uses), and the agent then

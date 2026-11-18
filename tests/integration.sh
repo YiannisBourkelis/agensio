@@ -1053,6 +1053,12 @@ print("yes" if e1 and "did you mean 'public_archives'" in t1 and "Nothing was do
 p.stdin.close(); p.wait()
 PYT
 ) $(curl -sS -o bench/tmp/unknown-field.json -w '%{http_code}' --unix-socket $CS -X POST -d '{"public_archive":["/db/"],"confirm":true,"reason":"t"}' http://control/v1/sites/created.test) $(grep -q "unknown field 'public_archive' (did you mean 'public_archives'?)" bench/tmp/unknown-field.json && echo yes || echo no) $(grep -q '^public_archives' bench/tmp/sites.d/created.test.toml && echo yes || echo no)"
+# A bridge left running across an upgrade (the alpha.148 report's note: a bridge on alpha.146 refused
+# stream_paths, its note on the versions unseen): against a server of another version every tool answer
+# carries the note first in its structured answer, and an argument the bridge refuses itself asks the
+# server's version and carries it too (0.1.0-alpha.149; tests/mcp-version-note.py, a fake control socket).
+check "MCP: a bridge facing a server of another version puts the note first in every answer, and in its own refusal of an unknown argument" "first bridge note yes text yes refused yes" \
+  "$(timeout 30 tests/mcp-version-note.py "$BIN" bench/tmp/mcpnote 2>&1)"
 # A dump on a static site is downloadable as it stands (the alpha.96 report: health said nothing about
 # it): health names it with its path as served, a zip there is a download and is not named, and
 # public_archives through site-update records it as served on purpose; cleared, it is named again.

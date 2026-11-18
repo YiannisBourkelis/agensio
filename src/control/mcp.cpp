@@ -735,7 +735,16 @@ private:
                 std::string msg = "unknown argument '" + key + "'" + (nearest.empty() ? std::string() : " (did you mean '" + nearest + "'?)") + " for " +
                                   std::string(name) + (known.empty() ? ", which takes no arguments" : "; its arguments are");
                 for (std::size_t i = 0; i < known.size(); ++i) msg += (i ? ", " : " ") + std::string(known[i]);
-                tool_error(id, msg + ". Nothing was done.");
+                // Refused here, the server never asked: its version is asked now, since an argument a newer
+                // server has is refused by a bridge left on the older one (the alpha.148 report: stream_paths
+                // refused by a bridge on alpha.146, with no word of the versions).
+                ControlReply status;
+                std::string ignored;
+                std::string note;
+                if (control_request(socket_, "GET", "/v1/status", "", status, ignored, client_header()))
+                    note = version_mismatch_note(AGENSIO_VERSION, status.version);
+                if (!note.empty()) note += " The argument below may be one the server's version added, which this bridge does not know.";
+                tool_error(id, (note.empty() ? std::string() : note + " ") + msg + ". Nothing was done.");
                 return;
             }
         }
@@ -840,8 +849,16 @@ private:
         content.push(json::Value::object().set("type", "text").set("text", reply.body));
         json::Value r = json::Value::object().set("content", std::move(content)).set("isError", reply.status >= 400);
         if (is_json && parsed.is_object()) {
-            if (!note.empty())
-                parsed.set("bridge", json::Value::object().set("version", AGENSIO_VERSION).set("server", reply.version).set("note", note));
+            if (!note.empty()) {
+                // First, ahead of the answer's own members: at the end of a long answer (server_status,
+                // health_check) a reader stops before it (the alpha.148 report: a bridge left on
+                // alpha.146 refused the new fields, its note unseen at the bottom of every answer).
+                json::Value first = json::Value::object().set(
+                    "bridge", json::Value::object().set("note", note).set("version", AGENSIO_VERSION).set("server", reply.version));
+                for (const auto& [k, v] : parsed.members())
+                    if (k != "bridge") first.set(k, v);
+                parsed = std::move(first);
+            }
             r.set("structuredContent", parsed);
         }
         result(id, std::move(r));

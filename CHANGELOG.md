@@ -71,6 +71,16 @@
   Host field. nginx and Apache httpd accept it the same way. HTTP/1 only: HTTP/2 and HTTP/3 carry
   the host in `:authority`.
 
+- **An MCP bridge older than its server says so where the agent reads it.** Since 0.1.0-alpha.26
+  each answer of a bridge whose version differs from the server's carries a note naming both and
+  how to reconnect. In the structured answer, the one Claude Code shows, the note came last, below
+  a long answer, and an argument the old bridge refused itself never reached the server and carried
+  none: a bridge left on alpha.146 refused `stream_paths` with no word of the versions (the same
+  report's note). The note now comes first, and the bridge's own refusal of an unknown argument
+  asks the server's version and says the argument may be one the newer version added. A bridge
+  started before an upgrade keeps its tools until the agent host reconnects it (Claude Code:
+  `/mcp`).
+
 ## 0.1.0-alpha.148 (2026-11-18)
 
 - **The packages for Debian 12, Ubuntu 22.04 and Fedora build again.** 0.1.0-alpha.147's release
