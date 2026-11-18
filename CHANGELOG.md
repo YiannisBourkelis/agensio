@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.148 (unreleased)
+## 0.1.0-alpha.148 (2026-11-18)
 
 - **The packages for Debian 12, Ubuntu 22.04 and Fedora build again.** 0.1.0-alpha.147's release
   stopped while compiling them: a helper of that release used a member of the C++ standard library
