@@ -16568,9 +16568,39 @@ static void test_strict_hosts() {
     // The authority of a TLS connection: the names of the certificate it presented
     // (RFC 6125 matching), against a raw Host header value.
     {
-        char buf[256];
-        CHECK(normalize_host("Example.COM.:8443", buf) == "example.com" && normalize_host("[::1]:8443", buf) == "::1" && normalize_host("a.test", buf) == "a.test");
-        CHECK(normalize_host("", buf).empty() && normalize_host(std::string(300, 'a'), buf).empty() && normalize_host(":8080", buf).empty());
+        CHECK(host_name_part("Example.COM.:8443") == "Example.COM" && host_name_part("[::1]:8443") == "::1" && host_name_part("a.test") == "a.test");
+        CHECK(host_name_part("").empty() && host_name_part(":8080").empty() && host_name_part("[::1") == "[::1" && host_name_part("[a]b:1") == "a");
+        CHECK(equals_folded("Example.COM", "example.com") && equals_folded("example.com", "example.com"));
+        CHECK(!equals_folded("example.co", "example.com") && !equals_folded("Example.COM", "example.org"));
+        // Eight bytes at a time, each byte folded in its own lane: held to the byte rule for every byte
+        // value at every place of names of 1 to 24 bytes (the word loop, its overlapping last word and
+        // the byte loop below eight), against the name's folding and against it one bit apart there.
+        // The stored side holds no capital (CertNames::add folds every name): one that would is skipped.
+        const auto fold = [](char ch) { return (ch >= 'A' && ch <= 'Z') ? static_cast<char>(ch + 32) : ch; };
+        const auto by_rule = [&](std::string_view name, std::string_view lower) {
+            if (name.size() != lower.size()) return false;
+            for (std::size_t i = 0; i < name.size(); ++i)
+                if (fold(name[i]) != lower[i]) return false;
+            return true;
+        };
+        std::size_t wrong = 0;
+        for (std::size_t n = 1; n <= 24; ++n)
+            for (std::size_t at = 0; at < n; ++at)
+                for (int b = 0; b < 256; ++b) {
+                    std::string name(n, 'q');
+                    name[0] = 'Z';  // a capital in the first word too
+                    name[at] = static_cast<char>(b);
+                    std::string lower(name);
+                    for (char& ch : lower) ch = fold(ch);
+                    wrong += !equals_folded(name, lower);
+                    for (const unsigned char bit : {0x20, 0x01, 0x80}) {
+                        std::string other(lower);
+                        other[at] = static_cast<char>(static_cast<unsigned char>(other[at]) ^ bit);
+                        if (fold(other[at]) != other[at]) continue;
+                        wrong += equals_folded(name, other) != by_rule(name, other);
+                    }
+                }
+        CHECK(wrong == 0);
         CertNames c;
         c.add("Example.com");
         c.add("*.wild.test");
@@ -16592,6 +16622,71 @@ static void test_strict_hosts() {
         CHECK(!v6.covers("[2001:db8::2]") && !v6.covers("[::2]") && !v6.covers("2001:db8::1"));  // unbracketed is no Host form: "::1" read as a port
         CertNames none;
         CHECK(none.empty() && !none.covers("example.com"));
+    }
+    // covers() compares the Host in place, with no copy (0.1.0-alpha.148: the copy into a zeroed 256-byte
+    // buffer and the memcmp calls cost 178 instructions a call against 133). Held to the rule as written
+    // until then, a lowercased copy of the Host's name compared with each name: every value of up to five
+    // bytes of an alphabet where ports, brackets, dots, case and wildcards meet, and the lengths around
+    // the 253-byte limit.
+    {
+        const auto until_147 = [](const CertNames& c, std::string_view host) {
+            if (host.empty()) return false;
+            if (host.front() == '[') {
+                const auto close = host.find(']');
+                if (close != std::string_view::npos) host = host.substr(1, close - 1);
+            } else {
+                const auto colon = host.rfind(':');
+                if (colon != std::string_view::npos) host = host.substr(0, colon);
+            }
+            if (!host.empty() && host.back() == '.') host.remove_suffix(1);
+            if (host.empty() || host.size() > 253) return false;
+            std::string h(host);
+            for (char& ch : h)
+                if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch + 32);
+            for (const auto& e : c.exact)
+                if (e == h) return true;
+            for (const auto& w : c.wildcard) {
+                if (h.size() <= w.size() || h.compare(h.size() - w.size(), w.size(), w) != 0) continue;
+                const std::string_view label = std::string_view(h).substr(0, h.size() - w.size());
+                if (!label.empty() && label.find('.') == std::string_view::npos) return true;
+            }
+            return false;
+        };
+        CertNames c;
+        for (const char* n : {"a", "x.a", "*.a", "*.x.a", "Ax", "1", "::1", "a:1", "[a]"}) c.add(n);
+        const std::string_view alphabet = "aAx.:[]1";
+        std::size_t checked = 0, covered = 0, differ = 0;
+        std::string host;
+        std::vector<std::size_t> at;
+        for (std::size_t len = 0; len <= 5; ++len) {
+            at.assign(len, 0);
+            for (;;) {
+                host.clear();
+                for (const std::size_t i : at) host.push_back(alphabet[i]);
+                const bool now = c.covers(host);
+                differ += now != until_147(c, host);
+                covered += now;
+                ++checked;
+                std::size_t k = 0;
+                while (k < len && ++at[k] == alphabet.size()) at[k++] = 0;
+                if (k == len) break;
+            }
+        }
+        CHECK(checked == 37449 && differ == 0 && covered > 1000);
+        CertNames longest;
+        longest.add(std::string(253, 'a'));
+        longest.add("*." + std::string(250, 'b'));
+        std::size_t long_covered = 0;
+        for (std::size_t n = 248; n <= 257; ++n) {
+            const std::string a(n, 'a'), upper(n, 'A'), sub = "x." + std::string(n - 2, 'b'), mixed = "X" + std::string(n - 1, 'b');
+            for (const std::string& name : {a, upper, sub, mixed})
+                for (const std::string& h : {name, name + ".", name + ":8443", name + ".:8443", "[" + name + "]", "[" + name + "]:1"}) {
+                    const bool now = longest.covers(h);
+                    differ += now != until_147(longest, h);
+                    long_covered += now;
+                }
+        }
+        CHECK(differ == 0 && long_covered > 0);
     }
     // A named site answers its names only; adding sites never changes that; "*" or
     // default = true is the only catch-all.

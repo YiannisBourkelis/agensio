@@ -348,7 +348,8 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   `X509_check_host` applies it, held by the unit test to OpenSSL's matcher under that rule, the flags
   pinned: OpenSSL 4 reads no CN by default, RFC 9525, and the test asking with flags 0 failed on Arch
   from alpha.146 on): what a connection answers for (`CertNames`, the
-  421 rule, held from the handshake on over HTTP/1.1 too since alpha.147: before, only once something
+  421 rule, the Host compared in place eight bytes at a time since alpha.148, 133 instructions a call
+  where the copy into a zeroed buffer cost 178; held from the handshake on over HTTP/1.1 too since alpha.147: before, only once something
   had filled the connection's info, at once with `trusted_proxies`, else after a proxied request; a
   certificate's name is taken whole, an IPv6 address was cut at its last colon before) and `tls.names`
   of `sites_list` and `site_show` are that list. The certificate refresh (T3,
