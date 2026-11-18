@@ -36,6 +36,16 @@
   A size past 2^64 bytes is refused as a size, in a setting and in the configuration file
   (`17179869185G` read as 1 GB).
 
+- **`stream_paths` matches whole path segments.** `"/events"` streamed every path starting with
+  those characters, `/events.json` and `/eventsx` too, as nginx's `location /events` does, where
+  the field's text said it covers what lies below it (the same report, F3). A path now covers
+  itself and what lies below it as a directory, as the access, password and response-header rules
+  match and as Apache's `<Location>` does: `/events` becomes two locations, `/events` exact and
+  `/events/`; `/events/` covers only what lies below it. A streamed path gives up what buffering
+  gives (a slow client holds an application worker; a failure is a cut body, not a clean 502), so
+  no path is streamed that nobody named. A site's file gets the new locations at its next change
+  through `site_update`; until then it keeps the prefix it was written with.
+
 ## 0.1.0-alpha.148 (2026-11-18)
 
 - **The packages for Debian 12, Ubuntu 22.04 and Fedora build again.** 0.1.0-alpha.147's release

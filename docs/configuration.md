@@ -2338,8 +2338,11 @@ KEY=VALUE`, `site_update` with `settings`; `agensio ctl settings NAME` shows the
 and the site field `stream_paths` (`--stream-path PATH`, repeatable; `--no-stream-paths`): the
 paths whose answers go to the client as they arrive (event streams, long polling, a chat's tokens,
 a large generated download), each written as a location with the site's upstream and `buffering =
-false`, which takes the site's other proxy keys. A path covers what lies below it; `/` is refused
-(that is `proxy_buffering`); at most 16. Everything else stays buffered. Both are for sites that
+false`, which takes the site's other proxy keys. A path is matched by whole segments, as the
+access rules are: `/events` covers `/events` itself and what lies below `/events/` (two locations,
+one exact), never `/events.json` or `/eventsx`; `/events/` covers only what lies below it (before
+0.1.0-alpha.149 `/events` was a prefix of the bare string, as nginx's `location /events` is, and
+streamed `/events.json` too). `/` is refused (that is `proxy_buffering`); at most 16. Everything else stays buffered. Both are for sites that
 proxy (`app = "proxy"`, `rails`, `redmine`, `django`, `wagtail`, `node`); a PHP script that
 streams still gets its location in the root additions file. The other keys of the table above
 (the headers sent on, the origin's TLS policy, hidden fields) stay root's: they change what the

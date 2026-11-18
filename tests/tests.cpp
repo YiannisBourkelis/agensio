@@ -7616,8 +7616,22 @@ static void test_control_sites() {
                 app.stream_paths = {"/events", "/api/chat/"};
                 const std::string text = render_site(app, "x");
                 CHECK(text.find("proxy = { pool = \"shared\", read_timeout = 300, tunnel_timeout = 120, max_connections = 32 }") != std::string::npos);
-                CHECK(text.find("path = \"/events\"\nupstream = \"http://127.0.0.1:9100\"\nproxy = { buffering = false }") != std::string::npos);
-                CHECK(text.find("path = \"/api/chat/\"") != std::string::npos);
+                CHECK(text.find("path = \"/events\"\nmatch = \"exact\"\nupstream = \"http://127.0.0.1:9100\"\nproxy = { buffering = false }") != std::string::npos);
+                CHECK(text.find("path = \"/events/\"\nupstream = \"http://127.0.0.1:9100\"\nproxy = { buffering = false }") != std::string::npos);
+                CHECK(text.find("path = \"/api/chat/\"") != std::string::npos && text.find("path = \"/api/chat\"") == std::string::npos);
+                // Both spellings of one path give its two locations once each (a location twice is refused at load).
+                {
+                    SiteSpec twice = app;
+                    twice.stream_paths = {"/events", "/events/", "/api/chat/"};
+                    const std::string t2 = render_site(twice, "x");
+                    std::size_t n = 0;
+                    for (std::size_t at = t2.find("path = \"/events/\""); at != std::string::npos; at = t2.find("path = \"/events/\"", at + 1)) ++n;
+                    CHECK(n == 1 && t2.find("path = \"/events\"\nmatch = \"exact\"") != std::string::npos);
+                    std::ofstream(dir / "sites.d" / "stream.toml") << t2;
+                    bool loaded = true;
+                    try { (void)load_config(dir / "agensio.toml"); } catch (const std::exception& ex) { loaded = false; std::printf("stream twice: %s\n", ex.what()); }
+                    CHECK(loaded);
+                }
                 SiteSpec back;
                 CHECK(SiteSpec::from_json(app.to_json(), back) && back.stream_paths == app.stream_paths);
                 std::ofstream(dir / "sites.d" / "stream.toml") << text;
@@ -7634,6 +7648,13 @@ static void test_control_sites() {
                     const LocationConfig& chat = Router::location(*ss, "/api/chat/room");
                     CHECK(page.proxy.options.buffering && !events.proxy.options.buffering && !chat.proxy.options.buffering);
                     CHECK(Router::location(*ss, "/api/other").proxy.options.buffering);
+                    // A path covers itself and what lies below it as a directory, whole segments as the
+                    // access rules match: "/events" never streams "/eventsx" or "/events.json" (until
+                    // 0.1.0-alpha.149 it did, a location prefix of the bare string: the alpha.148 report, F3).
+                    // One given with its slash covers what lies below it, as written.
+                    CHECK(!Router::location(*ss, "/events").proxy.options.buffering && !Router::location(*ss, "/events/").proxy.options.buffering);
+                    CHECK(Router::location(*ss, "/eventsx").proxy.options.buffering && Router::location(*ss, "/events.json").proxy.options.buffering);
+                    CHECK(Router::location(*ss, "/api/chatter").proxy.options.buffering);
                     for (const LocationConfig* l : {&page, &events, &chat})
                         CHECK(l->proxy.options.shared_pool && l->proxy.options.read_timeout.count() == 300000 && l->proxy.options.max_connections == 32 &&
                               l->proxy.tunnel_timeout_s == 120);

@@ -185,6 +185,16 @@ struct RuleLocation {
     bool immutable = false;  // cache only: Cache-Control's immutable (RFC 8246), for names that change with their content
 };
 std::vector<RuleLocation> rule_locations(const SiteSpec& spec);
+// The locations a site's stream_paths render (0.1.0-alpha.149), each (path, exact) once: a path
+// ending in '/' covers what lies below it; any other covers itself (an exact location) and what lies
+// below it (a prefix location of the path and '/'), whole segments as the access rules and Apache's
+// <Location> match, so "/events" never streams "/events.json" (the alpha.148 report, F3: a prefix of
+// the bare string did). The renderer writes them, site_show labels them "stream_paths".
+struct StreamLocation {
+    std::string path;
+    bool exact = false;
+};
+std::vector<StreamLocation> stream_locations(const SiteSpec& spec);
 // rules.admin expanded into restricted-shaped rules ({path, allow, match?, mode?}): the preset's
 // administration paths, the login page with login: true, Drupal's language prefixes.
 json::Value admin_rules(const SiteSpec& spec);

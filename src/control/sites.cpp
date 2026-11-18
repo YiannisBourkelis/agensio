@@ -671,6 +671,25 @@ json::Value admin_rules(const SiteSpec& spec) {
     return out;
 }
 
+std::vector<StreamLocation> stream_locations(const SiteSpec& spec) {
+    std::vector<StreamLocation> out;
+    if (!proxy_app(spec.app)) return out;
+    const auto add = [&out](std::string path, bool exact) {
+        for (const StreamLocation& l : out)
+            if (l.path == path && l.exact == exact) return;
+        out.push_back({std::move(path), exact});
+    };
+    for (const std::string& p : spec.stream_paths) {
+        if (p.ends_with('/')) {
+            add(p, false);
+        } else {
+            add(p, true);
+            add(p + "/", false);
+        }
+    }
+    return out;
+}
+
 std::vector<RuleLocation> rule_locations(const SiteSpec& spec) {
     std::vector<RuleLocation> out;
     const json::Value& r = spec.rules;
@@ -1778,12 +1797,11 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         out += "   # this site's own; every other field from the main file's [response_compression] (docs/configuration.md 20)\n";
     }
     rules_locations(out);
-    // The paths answered as they arrive (stream_paths): a location each, with the site's upstream and
-    // buffering off; the site's own proxy table gives the location its other keys.
-    if (proxy_app(spec.app))
-        for (const auto& p : spec.stream_paths)
-            out += "\n[[site.location]]   # stream_paths: answered as it arrives\npath = " + toml_string(p) + "\nupstream = " + toml_string(spec.upstream) +
-                   "\nproxy = { buffering = false }\n";
+    // The paths answered as they arrive (stream_paths): the locations stream_locations gives, with the
+    // site's upstream and buffering off; the site's own proxy table gives them their other keys.
+    for (const StreamLocation& l : stream_locations(spec))
+        out += "\n[[site.location]]   # stream_paths: answered as it arrives\npath = " + toml_string(l.path) + (l.exact ? "\nmatch = \"exact\"" : "") +
+               "\nupstream = " + toml_string(spec.upstream) + "\nproxy = { buffering = false }\n";
     // Path redirects as the site file's own tables; their keys are the reference's (load_redirect_rules
     // refused any other), their values strings or numbers.
     for (const auto& r : spec.redirects.items()) {

@@ -282,7 +282,7 @@ proxies); without it the events wait for the stream's end:
 
 ```sh
 agensio ctl site-update live.example.com --stream-path /events --yes --reason "each event goes on as it is sent"
-agensio ctl site live.example.com          # stream_paths: /events, and the location from it with buffering false
+agensio ctl site live.example.com          # stream_paths: /events, and its two locations (/events exact, /events/) with buffering false
 ```
 
 On a PHP site no field of `site-update` adds a location, so the stream's location goes into the
