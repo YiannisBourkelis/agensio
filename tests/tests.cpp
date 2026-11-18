@@ -17571,7 +17571,7 @@ std::vector<UpstreamAddress> origin_at(std::uint16_t port) {
 // The worker's spare buffers (core/spare_buffers.hpp): lent empty with room or at a size, taken
 // back and handed out again without an allocation, a bounded number kept.
 static void test_spare_buffers() {
-    SpareBuffers records(2);
+    SpareBuffers<2> records;
     std::vector<char> a, b, c;
     records.lend_empty(a, 17000);
     CHECK(a.empty() && a.capacity() >= 17000 && records.spares() == 0);
@@ -17590,7 +17590,7 @@ static void test_spare_buffers() {
     records.take(c, false);  // nothing to take: nothing happens
     CHECK(records.spares() == 2);
 
-    SpareBuffers pieces(1);
+    SpareBuffers<1> pieces;
     std::vector<char> p, q;
     pieces.lend_sized(p, 65536);
     CHECK(p.size() == 65536);
@@ -17603,7 +17603,7 @@ static void test_spare_buffers() {
     pieces.lend_sized(p, 4096);  // another size asked (the key changed on reload): a fresh one
     CHECK(p.size() == 4096 && p.data() != piece);
     // A thread has its own.
-    CHECK(&record_spares() == &record_spares() && &record_spares() != &piece_spares());
+    CHECK(&record_spares() == &record_spares() && static_cast<const void*>(&record_spares()) != static_cast<const void*>(&piece_spares()));
 }
 
 static void test_upstream_answer_paths() {

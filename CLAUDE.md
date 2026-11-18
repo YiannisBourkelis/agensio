@@ -236,7 +236,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-six, each seeded fr
   writer's TLS coalescing buffer for the first write, its 64 KB piece for files and streamed bodies until
   the answer is whole; never given back from `reset()`, a read may be in flight into the piece), and
   `Response::reset` frees a body buffer above 4 KB with its answer. A busy TLS connection held 173 KB
-  and holds 128, a plain one 84 and 50; free on the static rows. `SSL_MODE_RELEASE_BUFFERS` gives 30 KB
+  and holds 128, a plain one 84 and 50; within noise on the static rows, about 115 instructions an
+  answer under callgrind since alpha.148 (178 before, the spares a vector of vectors; now fixed slots,
+  `perf-cert-lend-20261118.md`). `SSL_MODE_RELEASE_BUFFERS` gives 30 KB
   more and costs 2.3 % on the static HTTPS 1 KB row: built, measured and taken out the same day.
 - **Request core (phase A1)**: the unit of work is a `Stream` (`Request` + `Response`);
   HTTP/1 embeds one per connection. Handlers fill a `Response`: status, an optional
