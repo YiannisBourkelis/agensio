@@ -3,8 +3,9 @@
 # whatever the path. A private server in front of tests/stream-origin.py, which sends bodies of
 # every size around the buffers' sizes in each framing (a length, chunked, to the connection's
 # close; whole with the head or after it), through a streaming site and a buffered one, plain and
-# over TLS, HTTP/1.1, HTTP/2 and HTTP/3 where this curl speaks it. Then the clients that are not
-# polite: one that reads slowly, one that leaves mid-body, and an origin that breaks off.
+# over TLS, HTTP/1.1, HTTP/2 (over TLS and h2c) and HTTP/3 where this curl speaks it. Then the
+# clients that are not polite: one that reads slowly, one that leaves mid-body, and an origin that
+# breaks off.
 # usage: tests/proxy-streaming.sh build/agensio
 set -uo pipefail
 BIN=$(readlink -f "${1:-build/agensio}")
@@ -20,7 +21,7 @@ site() {  # port tls proxy-table
   printf '\n[[site.location]]\npath = "/"\nupstream = "http://127.0.0.1:%s"\n' $OP
 }
 {
-  printf '[server]\nworkers = 2\nprotocols = ["h1", "h2", "h3"]\npid_file = "%s/agensio.pid"\n[log]\naccess = "off"\nerror = "%s/error.log"\nlevel = "info"\n[control]\nsocket = "%s"\n' "$T" "$T" "$CS"
+  printf '[server]\nworkers = 2\nprotocols = ["h1", "h2", "h2c", "h3"]\npid_file = "%s/agensio.pid"\n[log]\naccess = "off"\nerror = "%s/error.log"\nlevel = "info"\n[control]\nsocket = "%s"\n' "$T" "$T" "$CS"
   site 18481 plain 'buffering = false, max_connections = 16'
   site 18482 tls   'buffering = false, max_connections = 16'
   site 18483 plain 'max_connections = 16'
@@ -35,7 +36,10 @@ H3=no; curl -sk --http3-only --max-time 5 -o /dev/null "https://127.0.0.1:18482/
 SIZES="0 1 700 16383 16384 16385 65535 65536 65537 100000 1000000 3000000"
 declare -A SHA
 for n in $SIZES 300000; do SHA[$n]=$(curl -s "http://127.0.0.1:$OP/sha/$n"); done
-got() { curl -sk --max-time 20 "$@" | sha256sum | cut -d' ' -f1; }
+# The body's sha256, and curl's complaint when the transfer did not end cleanly: every byte arriving
+# is not enough, the stream must end (the alpha.148 report's F1: an h2c stream whose END_STREAM never
+# came gave the whole body and curl's exit 92 at the server's idle timeout).
+got() { { curl -sk --max-time 20 "$@" || echo "curl exit $?"; } | sha256sum | cut -d' ' -f1; }
 # Every size in every framing through one site and protocol: how many bodies differed.
 sweep() {  # url-base curl-options...
   local base=$1 bad=0 kind n; shift
@@ -49,9 +53,11 @@ sweep() {  # url-base curl-options...
 check "streaming, HTTP/1.1: every size in every framing arrives byte for byte"          "0" "$(sweep http://127.0.0.1:18481)"
 check "streaming, HTTPS (HTTP/1.1): the same"                                            "0" "$(sweep https://127.0.0.1:18482 --http1.1)"
 check "streaming, HTTP/2: the same"                                                      "0" "$(sweep https://127.0.0.1:18482 --http2)"
+check "streaming, h2c (HTTP/2 without TLS): the same"                                    "0" "$(sweep http://127.0.0.1:18481 --http2-prior-knowledge)"
 check "buffered, HTTP/1.1: the same (3 MB goes through the temp file)"                   "0" "$(sweep http://127.0.0.1:18483)"
 check "buffered, HTTPS (HTTP/1.1): the same"                                             "0" "$(sweep https://127.0.0.1:18484 --http1.1)"
 check "buffered, HTTP/2: the same"                                                       "0" "$(sweep https://127.0.0.1:18484 --http2)"
+check "buffered, h2c (HTTP/2 without TLS): the same"                                     "0" "$(sweep http://127.0.0.1:18483 --http2-prior-knowledge)"
 if [ $H3 = yes ]; then
   check "streaming, HTTP/3: the same"                                                    "0" "$(sweep https://127.0.0.1:18482 --http3-only)"
   check "buffered, HTTP/3: the same"                                                     "0" "$(sweep https://127.0.0.1:18484 --http3-only)"

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0-alpha.149 (unreleased)
+
+- **A streamed answer of known length ends over HTTP/2 without TLS (h2c).** Since 0.1.0-alpha.147,
+  an answer a location streams (`buffering = false`, `stream_paths`, `proxy_buffering = off`) whose
+  origin gave a `Content-Length` reached an h2c client whole but never ended: its last DATA frame
+  went out, the frame that ends the stream did not, and the server cancelled the stream at
+  `idle_timeout` (curl: exit 92). Every such answer longer than one read hung; before alpha.147 the
+  same happened now and then. Over TLS, HTTP/1.1 and HTTP/3 these answers ended. The cause: the end
+  of such a body was a step of its own in the next write cycle, and on h2c, where that cycle waits
+  for the write of the bytes it refers to, the cycle had nothing else to send and started no other.
+  The last DATA frame of a body of known length now carries the end itself, as a file's always has:
+  one write fewer per streamed answer over HTTP/2, with or without TLS (the test VPS's report on
+  alpha.148, F1). `tests/proxy-streaming.sh` now sweeps h2c too, and counts a transfer that does
+  not end cleanly as a failure even when every byte arrived.
+
 ## 0.1.0-alpha.148 (2026-11-18)
 
 - **The packages for Debian 12, Ubuntu 22.04 and Fedora build again.** 0.1.0-alpha.147's release

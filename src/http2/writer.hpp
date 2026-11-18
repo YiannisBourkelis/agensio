@@ -474,6 +474,13 @@ private:
                     continue;
                 }
             } else if (StreamBody* source = source_of(r)) {
+                // A source of known length whose every byte was read is at its end: its last chunk's
+                // last frame carries END_STREAM, as a file's does. Until 0.1.0-alpha.149 the end was a
+                // pull of its own in the next cycle, re-queued silently; on h2c, where that cycle waits
+                // for the write of the chunk it refers to, the cycle had nothing else to send, started
+                // no other, and the stream waited for its END_STREAM until the client sent something
+                // or the idle timeout cancelled it (the alpha.148 report, F1).
+                if (s.source_sized && s.source_remaining == 0) s.source_done = true;
                 if (s.chunk_pos == s.chunk_len) {
                     if (!s.source_done) {
                         // A read in flight: a WINDOW_UPDATE or a SETTINGS change re-queues every
@@ -537,11 +544,6 @@ private:
 
     void pull(H2Stream& s, StreamBody& source) {
         if (s.chunk.empty()) s.chunk.resize(cfg_.stream_chunk_size);
-        if (s.source_sized && s.source_remaining == 0) {
-            s.source_done = true;
-            enqueue_silent(s);
-            return;
-        }
         std::size_t want = s.chunk.size();
         if (s.source_sized) want = static_cast<std::size_t>(std::min<std::uint64_t>(s.source_remaining, want));
         s.pulling = true;
