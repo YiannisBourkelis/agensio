@@ -10,6 +10,9 @@ head, read into the writer's buffer, decoded, read ahead) each meet bodies aroun
   /close/N      no length: the body ends with the connection
   /slow/N       Content-Length N in ten pieces, 30 ms apart
   /cut/N        declares N, sends half and closes
+  /badlen/V     Content-Length V as written (not a number agensio can hold), 10 bytes, closes
+  /twolen       two Content-Length fields that disagree (10 and 5), 10 bytes
+  /upgrade      a 101 the request did not ask for
   /sha/N        the sha256 of the N-byte body, as text
   /stats        connections accepted so far, as text
 usage: stream-origin.py PORT
@@ -79,6 +82,15 @@ def serve(conn):
                 conn.sendall(ok + b"Content-Length: %d\r\n\r\n" % n)
                 time.sleep(0.01)
                 conn.sendall(data[:n // 2])
+                return
+            elif kind == "badlen":
+                conn.sendall(ok + b"Content-Length: " + parts[1].encode() + b"\r\n\r\n0123456789")
+                return
+            elif kind == "twolen":
+                conn.sendall(ok + b"Content-Length: 10\r\nContent-Length: 5\r\n\r\n0123456789")
+            elif kind == "upgrade":
+                conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+                time.sleep(0.2)
                 return
             else:
                 conn.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")

@@ -15,6 +15,18 @@
   alpha.148, F1). `tests/proxy-streaming.sh` now sweeps h2c too, and counts a transfer that does
   not end cleanly as a failure even when every byte arrived.
 
+- **An origin's answer with a broken `Content-Length` is a 502 on a streaming location too.**
+  RFC 9112 6.3 has a proxy discard a response whose `Content-Length` is invalid and answer 502.
+  A buffering location did; a streaming one sent the head on as a `200`: a 20-digit length wrapped
+  past 2^64 (`99999999999999999999` reached the client as `7766279631452241919`), and `-1`, `1e9`
+  or `+10` went out chunked and ended at once (the same report, F2). Two more heads the check missed
+  on either kind of location: two `Content-Length` fields that disagree, where the first one framed
+  the body and the answer was a `200`, and a `101` the request did not ask for, which a streaming
+  location passed on to the client as a `101`. All are a 502 now, nothing of them reaches the
+  client, and the error log names `bad_response_head` or `protocol_error`. A PHP or CGI script's
+  length of twenty digits no longer wraps either: it leaves the answer without a length, as `-1`
+  always did.
+
 ## 0.1.0-alpha.148 (2026-11-18)
 
 - **The packages for Debian 12, Ubuntu 22.04 and Fedora build again.** 0.1.0-alpha.147's release

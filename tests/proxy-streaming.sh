@@ -95,6 +95,14 @@ check "streaming: a client reading at 400 KB/s gets a 300 KB slow answer whole (
 check "an origin that closes halfway: streamed, the client sees a short body; buffered, a 502" "short 502" \
   "$(curl -s -o /dev/null --max-time 10 "http://127.0.0.1:18481/cut/200000"; [ $? -ne 0 ] && echo -n short || echo -n whole) $(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:18483/cut/200000")"
 
+# An origin's head whose framing cannot be trusted is discarded and answered 502, streamed or buffered
+# (RFC 9112 6.3): a Content-Length that is no number agensio can hold, two that disagree, a 101 nobody
+# asked for. Until 0.1.0-alpha.149 a streaming site sent the first three on as a 200 (a 20-digit
+# length wrapped past 2^64, the others chunked and cut), the alpha.148 report's F2.
+check "an origin's invalid framing is a 502 on a streaming site as on a buffered one" "502 502 502 502 502 502 502 502 502 502 502 502" \
+  "$(for u in badlen/99999999999999999999 badlen/-1 badlen/1e9 badlen/+10 twolen upgrade; do for p in 18481 18483; do
+       curl -s -o /dev/null --max-time 10 -w '%{http_code} ' "http://127.0.0.1:$p/$u"; done; done | sed 's/ $//')"
+
 # Clients that leave mid-body, more of them than the location has connections: every slot comes
 # back (a read in flight into a gone client's buffer is cancelled, the exchange ended), the server
 # stands, and the next answer is whole.

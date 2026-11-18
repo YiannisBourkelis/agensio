@@ -347,6 +347,10 @@ protected:
     void finish();
     void finish_upgraded();  // 101: the slot goes back, the connection stays for take_connection()
     void fail(UpstreamFailure why, std::error_code ec);
+    // The head parsed, but the answer it describes cannot be relayed (a Content-Length that is not a
+    // number, a 101 nobody asked for): the exchange fails as a whole, a 502 whatever the location's
+    // buffering, and the head never goes on (RFC 9112 6.3: a proxy discards such a response).
+    void refuse_head(UpstreamFailure why);
     bool head_done() const noexcept { return head_done_; }
     // Body bytes that need no decoding, for a read straight into the reader's buffer
     // (docs/design-proxy-streaming.md 4.2): how many the origin still owes of such a body (0: the
@@ -417,6 +421,7 @@ private:
     Completion done_;
     Phase phase_ = Phase::queued;
     bool head_done_ = false;
+    bool head_refused_ = false;  // refuse_head(): no head goes on, streamed or not
     bool head_delivered_ = false;
     std::string head_buf_;  // response bytes until the head is complete (grows up to head_max)
     // Streaming mode (from the start, or after the temp-file cap switched to it).

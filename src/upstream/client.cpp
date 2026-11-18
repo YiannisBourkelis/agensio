@@ -696,16 +696,12 @@ std::unique_ptr<StreamBody> UpstreamRequest::body_source(bool head) {
     std::uint64_t length = 0;
     bool sized = false;
     if (const std::string_view cl = result_.headers.get("content-length"); !cl.empty()) {
-        std::uint64_t v = 0;
-        sized = true;
-        for (char c : cl) {
-            if (c < '0' || c > '9') {
-                sized = false;
-                break;
-            }
-            v = v * 10 + static_cast<std::uint64_t>(c - '0');
-        }
-        length = v;
+        // Digits only (from_chars takes no sign for an unsigned type) and within 64 bits: an origin's
+        // length was checked before this (refuse_head), a script's was not, and its 20-digit value
+        // wrapped here (until 0.1.0-alpha.149). One that does not parse leaves the body unsized.
+        const auto r = std::from_chars(cl.data(), cl.data() + cl.size(), length);
+        sized = r.ec == std::errc() && r.ptr == cl.data() + cl.size();
+        if (!sized) length = 0;
     }
     sized_ = sized;
     declared_ = length;
@@ -1291,11 +1287,14 @@ void UpstreamRequest::fail(UpstreamFailure why, std::error_code ec) {
     // Only a member of a list is marked: a lone origin has no other to go to and every request tries
     // it, so its "marked down" line was false, and its failures counted for a list naming the same
     // address under that list's own max_fails (until 0.1.0-alpha.144).
-    if (!options_.buffering && head_done_ && !head_delivered_ && phase_ == Phase::receiving) {
+    if (!options_.buffering && head_done_ && !head_refused_ && !head_delivered_ && phase_ == Phase::receiving) {
         // Streaming, and the answer broke within the read that brought its head (a chunk that does not
         // parse): the head goes on first with the bytes before the break, as it did when it was
         // delivered the moment it was parsed, and the failure then ends the streamed body. Inside
-        // in_data_, so the writer's pulls made inline wait for the failure below.
+        // in_data_, so the writer's pulls made inline wait for the failure below. Not for a head that
+        // is itself refused (refuse_head): until 0.1.0-alpha.149 an origin's invalid Content-Length
+        // went on to the client as a 200, wrapped past 2^64 or as a chunked answer that ended at
+        // once, where a buffered location answered 502 (the alpha.148 report, F2).
         const bool was_in = in_data_;
         in_data_ = true;
         pending_ = std::move(result_.body);
@@ -1325,6 +1324,11 @@ void UpstreamRequest::fail(UpstreamFailure why, std::error_code ec) {
         result_.failure = why;
         satisfy_waiter();  // streaming: the pull completes with the error
     }
+}
+
+void UpstreamRequest::refuse_head(UpstreamFailure why) {
+    head_refused_ = true;
+    fail(why, std::error_code());
 }
 
 void UpstreamRequest::pull(char* buf, std::size_t len, StreamBody::ReadHandler handler) {

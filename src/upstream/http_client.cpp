@@ -71,7 +71,7 @@ bool HttpRequest::on_head_complete() {
     }
     if (status == 101) {
         if (!upgrade_) {  // a 101 nobody asked for: the connection is unusable
-            fail(UpstreamFailure::protocol_error, std::error_code());
+            refuse_head(UpstreamFailure::protocol_error);
             return true;
         }
         finish_upgraded();
@@ -97,9 +97,17 @@ bool HttpRequest::on_head_complete() {
         std::uint64_t n = 0;
         const auto r = std::from_chars(cl.data(), cl.data() + cl.size(), n);
         if (r.ec != std::errc() || r.ptr != cl.data() + cl.size()) {
-            fail(UpstreamFailure::bad_response_head, std::error_code());
+            refuse_head(UpstreamFailure::bad_response_head);
             return true;
         }
+        // Two fields that disagree are as invalid as one that does not parse (RFC 9112 6.3: the
+        // response is discarded, 502); repeats of one value may stand for it (RFC 9110 8.6). Until
+        // 0.1.0-alpha.149 the first one framed the body, whatever the others said.
+        for (const HeaderField& h : result_.headers)
+            if (Headers::iequals(h.name, "content-length") && h.value != cl) {
+                refuse_head(UpstreamFailure::bad_response_head);
+                return true;
+            }
         framing_ = Framing::length;
         remaining_ = n;
         return true;

@@ -115,6 +115,10 @@ What the client sees:
   a short body ending the connection).
 - **An answer that breaks within the read that brought its head**: the head goes on first and the
   body is cut, as before.
+- **A head whose framing cannot be trusted** (an origin's `Content-Length` that is no number
+  agensio can hold, two that disagree, a `101` nobody asked for): it never goes on, the answer is a
+  502 whatever the buffering (RFC 9112 6.3: a proxy discards such a response; `refuse_head`). Until
+  0.1.0-alpha.149 a streaming location sent it on as a `200` (the alpha.148 report's F2).
 - On a site that compresses, a small answer delivered whole is compressed whole, with its length,
   where it was compressed as a stream.
 
