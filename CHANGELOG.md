@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-alpha.148 (unreleased)
+
+- **Small HTTPS answers cost less CPU again.** The release check of 0.1.0-alpha.147 found a 1 KB
+  answer over HTTPS and HTTP/1.1 running 330 to 460 more instructions than in alpha.146, about 1.5 %
+  of the server's own work for it, in two changes of that release: the certificate check every such
+  request now gets, and the write buffer a connection borrows from its worker for each answer. The
+  check compares the requested name with the certificate's names in place, eight bytes at a time,
+  where it first copied the name into a cleared buffer (133 instructions a check where it took 178),
+  and the worker keeps its spare buffers in fixed slots, so lending one is a swap. On that row 175 to
+  193 fewer instructions a request; over HTTP/2, which always ran the check, 125 fewer. Nothing
+  changes in what is served (`bench/results/perf-cert-lend-20261118.md`).
+
 ## 0.1.0-alpha.147 (2026-11-18)
 
 - **HTTP/2 and HTTP/3 refuse a control character in a field's value, as HTTP/1.1 does.** HTTP/1.1

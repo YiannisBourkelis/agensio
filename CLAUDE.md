@@ -1465,6 +1465,14 @@ when the base is too old to have one. A comparison by hand still needs the two s
 compared; `perf stat -e instructions,L1-icache-load-misses` tells work (instructions) from layout
 (misses).
 
+Which function costs what, exactly (2026-11-18, `bench/results/perf-cert-lend-20261118.md`): a sampled
+profile put `malloc` at 100 to 233 instructions a request on builds that allocate the same, which read as
+an allocation the F2 fix never made. Callgrind counts every instruction: the server under it, a warm-up
+run, `callgrind_control -z`, a fixed number of requests, `callgrind_control -d`, per function divided by
+the requests (the script is in that file). Its CPU model is not the machine's (glibc's AVX2 `memcmp` and
+vector stores are cheap on the machine), so check the outcome with `perf stat -e instructions:u` and,
+for a small function, a loop calling it under the build's flags.
+
 Things measured with no effect (do not retry without new evidence): cache hit-path
 refcount and `last_access` traffic (under 2 %), `SSL_MODE_RELEASE_BUFFERS` (a cost, item 3), streaming
 chunk size, memory-BIO reads.
