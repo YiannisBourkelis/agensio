@@ -1411,6 +1411,14 @@ Failures are logged with a reason and a fix hint (socket owner/group/mode agains
 agensio's uid, the script php-fpm could not open, bytes seen before a child closed) and
 appear in the JSON access log as `upstream`.
 
+A script that sets its own `Content-Length` (a download script) is held to it, buffered or
+streamed, as nginx holds it (0.1.0-alpha.149): an answer shorter than the length it declares is
+a 502 logged as `short_body` with both lengths when it is whole before anything went to the
+client, and a cut body (the connection closed, an HTTP/2 or HTTP/3 stream reset) when part of it
+already had; a longer one is cut to the length declared, with a warning. A script that died
+mid-download is never sent as a complete file. A HEAD's answer keeps the length declared. CGI
+scripts (section 13) the same.
+
 ## 7b. PHP versions
 
 Several PHP versions can be installed side by side, each its own php-fpm with its own

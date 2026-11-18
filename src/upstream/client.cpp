@@ -44,6 +44,7 @@ const char* to_string(UpstreamFailure f) noexcept {
         case UpstreamFailure::protocol_error: return "protocol_error";
         case UpstreamFailure::spill_error: return "spill_error";
         case UpstreamFailure::tls_error: return "tls_error";
+        case UpstreamFailure::short_body: return "short_body";
     }
     return "unknown";
 }
@@ -79,7 +80,7 @@ std::string limit_text(UpstreamFailure f, const UpstreamOptions& o, std::string_
 // as an invalid header).
 bool counts_against_origin(UpstreamFailure f) noexcept {
     return f != UpstreamFailure::pool_saturated && f != UpstreamFailure::queue_timeout && f != UpstreamFailure::spill_error &&
-           f != UpstreamFailure::head_too_large;
+           f != UpstreamFailure::head_too_large && f != UpstreamFailure::short_body;
 }
 
 int status_for(UpstreamFailure f) noexcept {
@@ -717,6 +718,10 @@ std::string UpstreamRequest::failure_text() const {
     switch (result_.failure) {
         case UpstreamFailure::read_timeout: t += ": no bytes for " + duration_text(options_.read_timeout) + " (" + table + ".read_timeout)"; break;
         case UpstreamFailure::closed_early: t += ": the connection closed before the answer's end"; break;
+        case UpstreamFailure::short_body:
+            t += ": the script declared Content-Length " + std::to_string(result_.script_declared) + " and sent " +
+                 std::to_string(result_.script_sent) + " bytes";
+            break;
         default: break;
     }
     return t;
@@ -1188,6 +1193,8 @@ bool UpstreamRequest::store_body(std::string_view bytes) {
 }
 
 void UpstreamRequest::finish() {
+    // A script's whole answer, its head not gone yet, is held to the length it declared first.
+    if (script_length_ && !head_delivered_ && !held_to_script_length()) return;
     phase_ = Phase::finished;
     pool_.unwatch(this);
     pool_.mark_success(address_, note_);
@@ -1225,6 +1232,28 @@ bool UpstreamRequest::whole_as_declared() const noexcept {
     return r.ec == std::errc() && r.ptr == cl.data() + cl.size() && declared == result_.body.size();
 }
 
+// A script's whole answer (hold_script_length), its head not gone yet: the Content-Length it wrote
+// against the body it sent. A value that is not a number is no length, and the body's own is counted
+// as before; a HEAD, a 1xx, 204 or 304 has no body to hold.
+bool UpstreamRequest::held_to_script_length() {
+    if (head_request_ || result_.status < 200 || result_.status == 204 || result_.status == 304) return true;
+    const std::string_view cl = result_.headers.get("content-length");
+    if (cl.empty()) return true;
+    std::uint64_t declared = 0;
+    const auto r = std::from_chars(cl.data(), cl.data() + cl.size(), declared);
+    if (r.ec != std::errc() || r.ptr != cl.data() + cl.size() || declared == result_.body_size) return true;
+    result_.script_declared = declared;
+    result_.script_sent = result_.body_size;
+    if (result_.body_size < declared) {
+        refuse_head(UpstreamFailure::short_body);  // nothing went to the client: a 502, streamed or not
+        return false;
+    }
+    // Longer: the answer is its first `declared` bytes, in memory or in the temp file.
+    if (!result_.spill.is_open()) result_.body.resize(static_cast<std::size_t>(declared));
+    result_.body_size = declared;
+    return true;
+}
+
 void UpstreamRequest::finish_upgraded() {
     phase_ = Phase::finished;
     pool_.unwatch(this);
@@ -1259,7 +1288,7 @@ void UpstreamRequest::deliver_head() {
 // pool's verdict for this worker and are not retried elsewhere.
 bool UpstreamRequest::try_next_address(UpstreamFailure why) {
     if (!group_ || group_->size() < 2 || phase_ == Phase::cancelled) return false;
-    if (why == UpstreamFailure::pool_saturated || why == UpstreamFailure::queue_timeout) return false;
+    if (why == UpstreamFailure::pool_saturated || why == UpstreamFailure::queue_timeout || why == UpstreamFailure::short_body) return false;
     if (sent_any_ && (!retry_ok_ || result_.head_bytes > 0)) return false;
     const std::size_t next = pool_.pick(*group_, options_, member_, tried_);
     if (next == SIZE_MAX) return false;
@@ -1402,6 +1431,15 @@ void UpstreamRequest::satisfy_waiter() {
     if (phase_ == Phase::finished) {
         auto h = std::move(waiter_.handler);
         waiter_.handler = nullptr;
+        if (script_length_ && sized_ && !bodiless_ && result_.body_size < declared_) {
+            // A script's streamed answer ended short of the length it declared: the pull fails, so the
+            // writer cuts the body as it did on a short end and its error-log line names both lengths.
+            result_.failure = UpstreamFailure::short_body;
+            result_.script_declared = declared_;
+            result_.script_sent = result_.body_size;
+            h(std::error_code(asio::error::connection_reset), 0);
+            return;
+        }
         h(std::error_code{}, 0);
     } else if (phase_ == Phase::failed) {
         auto h = std::move(waiter_.handler);

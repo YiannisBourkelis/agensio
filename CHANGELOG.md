@@ -46,6 +46,19 @@
   no path is streamed that nobody named. A site's file gets the new locations at its next change
   through `site_update`; until then it keeps the prefix it was written with.
 
+- **A PHP or CGI script is held to the `Content-Length` it sets, buffered or streamed.** A
+  buffering location dropped the script's length and sent the body with the length it counted, so
+  a download whose script died after setting its length (a memory or time limit) reached the
+  client as a complete, shorter file, which browsers and caches keep (the same report, F4). The
+  rule is now nginx's (since 1.19.1) on both kinds of location: an answer whole before its head
+  goes out (buffered, or streamed and within one read) and shorter than its `Content-Length` is a
+  502, the error log naming the script and both lengths (`short_body`); a longer one is cut to the
+  length declared, with a warning. A streamed answer that ends short after its head went out is cut
+  as before, its error-log line now naming both lengths; a whole one there closed the connection
+  where it is now a 502. A HEAD, a 204 and a 304 keep the length the script declares; a length that
+  is no number is not one, and the body's own is sent, as before. Apache httpd drops a script's
+  length and sends what it wrote; RFC 3875 leaves the framing to the server.
+
 ## 0.1.0-alpha.148 (2026-11-18)
 
 - **The packages for Debian 12, Ubuntu 22.04 and Fedora build again.** 0.1.0-alpha.147's release

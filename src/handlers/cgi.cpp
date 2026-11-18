@@ -89,6 +89,7 @@ std::shared_ptr<UpstreamRequest> CgiHandler::start(Stream& s, const SiteConfig& 
         argv.push_back(x->script);
         const std::string cwd = x->script.substr(0, x->script.rfind('/'));
         x->req = std::make_shared<CgiRequest>(*x->pool, x->loc->cgi.addresses, x->loc->cgi.options);
+        x->req->hold_script_length(x->stream->request.method == Method::head);
         x->req->start(std::move(env), std::move(argv), cwd, std::move(x->body), x->loc->priority,
                       [this, x](UpstreamResult& r) { finish(*x, r); });
     };
@@ -127,6 +128,10 @@ void CgiHandler::finish(Exchange& x, UpstreamResult& res) {
                 msg += ": no output for " + std::to_string(x.loc->cgi.options.read_timeout.count() / 1000) +
                        " s (cgi.read_timeout); the process was killed";
                 break;
+            case UpstreamFailure::short_body:
+                msg += ": the script declared Content-Length " + std::to_string(res.script_declared) + " and sent " +
+                       std::to_string(res.script_sent) + " bytes (it ended early, or the length it set is wrong); answered 502";
+                break;
             default: msg += limit_text(res.failure, x.loc->cgi.options, "cgi", "processes of this location"); break;
         }
         log_.error(msg);
@@ -137,6 +142,9 @@ void CgiHandler::finish(Exchange& x, UpstreamResult& res) {
         x.done();
         return;
     }
+    if (res.script_sent > res.script_declared)  // a longer body, cut to its declared length (hold_script_length)
+        log_.warn("cgi " + x.script + ": the script declared Content-Length " + std::to_string(res.script_declared) + " and sent " +
+                  std::to_string(res.script_sent) + " bytes; the answer was cut to " + std::to_string(res.script_declared));
     apply_upstream_result(s, res, res.streamed ? x.req->body_source(s.request.method == Method::head) : nullptr, "ok", *x.loc, &log_, &x.req->context());
     x.completed = true;
     x.done();

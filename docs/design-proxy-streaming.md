@@ -110,9 +110,17 @@ What the client sees:
   client, which got such a body delimited by the connection's close, gets a length and keeps its
   connection. Decided by the owner 2026-11-14 (8.2), after a first, stricter step that left such
   answers chunked.
-- **A script's answer whose `Content-Length` is not its body's**, and a HEAD's: these stay
-  streamed answers, so the client side holds them to the declared length as before (surplus cut,
-  a short body ending the connection).
+- **A HEAD's answer**, which declares the GET's length: it stays a streamed answer.
+- **A script's answer whose `Content-Length` is not its body's** (FastCGI, CGI;
+  `UpstreamRequest::hold_script_length`, 0.1.0-alpha.149): whole before its head goes on, it is held
+  to the length the script declared, the rule nginx has applied since 1.19.1 (its ticket 1695):
+  shorter is a 502 (`short_body`, the error log naming both lengths), longer is cut to it and goes
+  out whole with a warning. A buffering location applies the same rule, where it sent the length it
+  counted until then, so a script that died mid-download after setting its length reached the
+  client as a complete file (the alpha.148 report's F4). Streamed past its head, the client side
+  holds it as before: surplus cut, a short end cutting the body, now with the failure's line naming
+  both lengths. Before alpha.149 a whole answer here stayed a streamed one, the short end closing
+  the connection.
 - **An answer that breaks within the read that brought its head**: the head goes on first and the
   body is cut, as before.
 - **A head whose framing cannot be trusted** (an origin's `Content-Length` that is no number
@@ -123,7 +131,8 @@ What the client sees:
   where it was compressed as a stream.
 
 The integration suite pins the wrong-length and the chunked cases; a first version that took
-every whole answer the buffered way failed the first.
+every whole answer the buffered way failed the first (before alpha.149, when a whole answer of a
+wrong length still had to stay streamed).
 
 ### 4.2 A larger body is read into the buffer it is sent from
 

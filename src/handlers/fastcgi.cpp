@@ -178,6 +178,7 @@ std::shared_ptr<FcgiRequest> FcgiHandler::start(Stream& s, const SiteConfig& sit
         append_request_params(w.params_tail, *x->stream, *x->site, *x->loc, w, x->path_info, x->body.size,
                               length_known);
         x->req = std::make_shared<FcgiRequest>(*x->pool, x->loc->fastcgi.addresses, x->loc->fastcgi.options);
+        x->req->hold_script_length(x->stream->request.method == Method::head);
         x->req->start(x->loc->fastcgi.params_prefix, w.params_tail, std::move(x->body), x->loc->priority, retry_ok,
                       [this, x](FcgiResult& r) { finish(*x, r); });
     };
@@ -267,6 +268,10 @@ void FcgiHandler::log_failure(const Exchange& x, const FcgiResult& res) {
         case FcgiFailure::read_timeout:
             msg += ": no data for read_timeout; raise fastcgi.read_timeout or fix the slow script";
             break;
+        case FcgiFailure::short_body:
+            msg += ": the script declared Content-Length " + std::to_string(res.script_declared) + " and sent " +
+                   std::to_string(res.script_sent) + " bytes (it ended early, or the length it set is wrong); answered 502";
+            break;
         default:
             break;
     }
@@ -295,6 +300,10 @@ void FcgiHandler::finish(Exchange& x, FcgiResult& res) {
         return;
     }
     if (res.failure == FcgiFailure::primary_script_unknown) log_failure(x, res);
+    if (res.script_sent > res.script_declared)  // a longer body, cut to its declared length (hold_script_length)
+        log_.warn("fastcgi " + loc.fastcgi.address.key + " for " + x.script + ": the script declared Content-Length " +
+                  std::to_string(res.script_declared) + " and sent " + std::to_string(res.script_sent) + " bytes; the answer was cut to " +
+                  std::to_string(res.script_declared));
     apply_upstream_result(s, res, res.streamed ? x.req->body_source(s.request.method == Method::head) : nullptr,
                           to_string(res.failure), loc, &log_, &x.req->context());  // "ok" or "primary_script_unknown"
     x.completed = true;

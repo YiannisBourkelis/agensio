@@ -837,7 +837,17 @@ check "php: a HEAD carries no Content-Length the script did not send, over h1 an
 check "php: streaming location sends chunked" "yes" "$(curl -sSi http://127.0.0.1:8080/phpstream/stream.php | tr -d '\r' | grep -q '^Transfer-Encoding: chunked' && echo yes)"
 check "php: streaming body intact" "chunk0 chunk1 chunk2 chunk3 chunk4" "$(curl -sS http://127.0.0.1:8080/phpstream/stream.php | tr '\n' ' ' | sed 's/ $//')"
 check "php: streamed Content-Length enforced: surplus cut, connection reusable" "xxxxxHTTP/1.1 200 OK" "$(printf 'GET /phpstream/wronglen.php?m=long HTTP/1.1\r\nHost: l\r\n\r\nGET / HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | tr -d '\r' | grep -o 'x\+HTTP/1.1 200 OK')"
-check "php: streamed Content-Length enforced: short body closes the connection" "18" "$(curl -s -o /dev/null --max-time 5 http://127.0.0.1:8080/phpstream/wronglen.php?m=short; echo $?)"
+# A script's own Content-Length holds its answer, buffered or streamed (0.1.0-alpha.149, nginx's rule
+# since 1.19.1; the alpha.148 report's F4: a buffering location sent the length it counted, so a script
+# that died mid-download reached the client as a complete file). Whole and shorter: a 502 with both
+# lengths in the error log; longer: cut to it, with a warning; streamed past its head and short: the
+# body cut (the connection closed) and the failure's line naming both lengths. A HEAD keeps the length.
+check "php: a buffered script's Content-Length holds: shorter is a 502, longer is cut to it; a HEAD keeps it; the error log names both lengths" "502 200 5 xxxxx 200 100 yes yes" \
+  "$(code http://127.0.0.1:8080/php/wronglen.php?m=short) $(curl -sS -o /dev/null -w '%{http_code} %{size_download}' 'http://127.0.0.1:8080/php/wronglen.php?m=long') $(curl -sS 'http://127.0.0.1:8080/php/wronglen.php?m=long') $(curl -sSI -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/php/wronglen.php?m=short) $(curl -sSI http://127.0.0.1:8080/php/wronglen.php?m=short | cl) $(grep -q 'short_body for .*wronglen.php: the script declared Content-Length 100 and sent 5 bytes' bench/tmp/error.log && echo yes) $(grep -q 'wronglen.php: the script declared Content-Length 5 and sent 100 bytes; the answer was cut to 5' bench/tmp/error.log && echo yes)"
+check "php: the same past the temp-file spill (3 MB declared, 2.5 MB sent: 502; the reverse: 2.5 MB)" "502 200 2500000" \
+  "$(code 'http://127.0.0.1:8080/php/wronglen.php?d=3000000&n=2500000') $(curl -sS -o /dev/null -w '%{http_code} %{size_download}' 'http://127.0.0.1:8080/php/wronglen.php?d=2500000&n=3000000')"
+check "php: streaming, a whole answer short of its length is a 502 as a buffered one is; one whose head went first is cut (curl 18), the error log naming both lengths" "502 18 yes" \
+  "$(code http://127.0.0.1:8080/phpstream/wronglen.php?m=short) $(curl -s -o /dev/null --max-time 5 'http://127.0.0.1:8080/phpstream/wronglen.php?d=400000&n=300000&flush=1'; echo $?) $(sleep 0.3; grep -q 'cut mid-stream: fastcgi .* short_body after 300000 bytes of the answer: the script declared Content-Length 400000 and sent 300000 bytes' bench/tmp/error.log && echo yes)"
 check "php: temp-file cap switches to streaming, body intact" "$BIGMD5 chunked" "$(curl -sS http://127.0.0.1:8080/phpcap/big.php -o bench/tmp/cap.out -D bench/tmp/cap.hdr; md5sum < bench/tmp/cap.out | cut -d' ' -f1) $(grep -qi '^Transfer-Encoding: chunked' bench/tmp/cap.hdr && echo chunked)"
 check "php: Proxy header never forwarded (httpoxy)" "yes" "$(curl -sS -H 'Proxy: http://evil.example/' http://127.0.0.1:8080/php/params.php | grep -qv 'HTTP_PROXY' && echo yes)"
 check "php: repeated header joined" "yes" "$(curl -sS -H 'X-Dup: a' -H 'X-Dup: b' http://127.0.0.1:8080/php/params.php | grep -q '"HTTP_X_DUP":"a, b"' && echo yes)"
@@ -3926,6 +3936,8 @@ except OSError:
   check "cgi: POST body on stdin, echoed" "same" "$(curl -sS --data-binary @bench/tmp/proxy-blob $P/cgi-bin/echo.cgi | cmp -s - bench/tmp/proxy-blob && echo same)"
   check "cgi: 3 MB output spilled and intact" "3000000" "$(curl -sS $P/cgi-bin/big.cgi | wc -c | tr -d ' ')"
   check "cgi: Status from the script" "404" "$(code $P/cgi-bin/status.cgi)"
+  check "cgi: the script's own Content-Length holds: shorter is a 502, longer is cut to it (0.1.0-alpha.149)" "502 xxxxx yes" \
+    "$(code $P/cgi-bin/wronglen.cgi) $(curl -sS "$P/cgi-bin/wronglen.cgi?long") $(grep -q 'cgi .*wronglen.cgi short_body: the script declared Content-Length 100 and sent 5 bytes' bench/tmp/error.log && echo yes)"
   check "cgi: Location alone is a 302" "302 /moved" "$(curl -sSi $P/cgi-bin/redirect.cgi | tr -d '\r' | awk '/^HTTP/{c=$2} /^Location:/{l=$2} END{print c, l}')"
   check "cgi: stderr logged, output still served" "ok despite stderr yes" "$(curl -sS $P/cgi-bin/stderr.cgi | tr -d '\n') $(for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q 'stderr.cgi stderr: something went sideways' bench/tmp/error.log && break; sleep 0.2; done; grep -q 'stderr.cgi stderr: something went sideways' bench/tmp/error.log && echo yes)"
   check "cgi: exit without a header block is a 502" "502" "$(code $P/cgi-bin/crash.cgi)"

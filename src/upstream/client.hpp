@@ -235,6 +235,10 @@ struct UpstreamResult {
     bool streamed = false;    // the body comes through body_source() (buffering off, or the spill cap was hit)
     bool upgraded = false;    // HTTP 101: no body, the connection is now a tunnel (take_connection())
     std::string stderr_text;  // FastCGI: FCGI_STDERR output (capped), for the error log
+    // A script's Content-Length its body did not have (UpstreamRequest::hold_script_length): what it
+    // declared and what it sent, both 0 when they agreed. Shorter is the failure short_body; longer,
+    // the answer was cut to the declared length and these say so for the handler's warning.
+    std::uint64_t script_declared = 0, script_sent = 0;
 };
 
 class UpstreamRequest : public std::enable_shared_from_this<UpstreamRequest> {
@@ -283,6 +287,19 @@ public:
     // Streaming mode: the response body as a pull source (valid after `done` ran). `head`: the
     // request was a HEAD, so the answer has no body to read (nor has a 204 or 304).
     std::unique_ptr<StreamBody> body_source(bool head);
+
+    // A script's answer (FastCGI, CGI; called before start): the Content-Length a script writes is a
+    // field of its own, not the framing, and the answer is held to it as nginx holds it (since 1.19.1,
+    // its ticket 1695). Whole before its head goes on (buffered, or streamed within the read that
+    // brought the head), one short of it is a 502 (short_body) and one longer is cut to it; streamed,
+    // the writer holds it, and one that ends short fails its pull with short_body, the cut body's
+    // error-log line naming both lengths. Until 0.1.0-alpha.149 a buffered answer went out with the
+    // length counted, a download that died mid-way as a complete file (the alpha.148 report, F4).
+    // `head`: a HEAD's answer declares the GET's length and has no body.
+    void hold_script_length(bool head) noexcept {
+        script_length_ = true;
+        head_request_ = head;
+    }
     // What ended a streamed answer early, for the error log of the connection that was sending it:
     // "proxy 127.0.0.1:3000 read_timeout after 2008 bytes of the answer (Connection timed out): no
     // bytes for 8 s (proxy.read_timeout)". Empty unless the exchange failed.
@@ -384,6 +401,7 @@ private:
     void body_sent();
     void read_more();
     bool whole_as_declared() const noexcept;  // the collected body is what the head's Content-Length says (4.1)
+    bool held_to_script_length();  // finish(), a script's whole answer: false when it failed short_body
     void read_direct(std::size_t left);       // into the waiting pull's buffer (4.2)
     void read_into_place();                   // into result_.body (4.3)
     void on_data(std::size_t n);
@@ -422,6 +440,8 @@ private:
     Phase phase_ = Phase::queued;
     bool head_done_ = false;
     bool head_refused_ = false;  // refuse_head(): no head goes on, streamed or not
+    bool script_length_ = false;  // hold_script_length()
+    bool head_request_ = false;   // hold_script_length(head)
     bool head_delivered_ = false;
     std::string head_buf_;  // response bytes until the head is complete (grows up to head_max)
     // Streaming mode (from the start, or after the temp-file cap switched to it).

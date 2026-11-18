@@ -160,6 +160,7 @@ enum class UpstreamFailure : std::uint8_t {
     protocol_error,
     spill_error,             // temp file for a body could not be written
     tls_error,               // handshake or certificate verification with an https:// origin failed
+    short_body,              // a script's body shorter than the Content-Length it declared (hold_script_length)
 };
 
 const char* to_string(UpstreamFailure f) noexcept;
