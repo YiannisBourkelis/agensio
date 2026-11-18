@@ -17606,6 +17606,24 @@ static void test_spare_buffers() {
     CHECK(&record_spares() == &record_spares() && static_cast<const void*>(&record_spares()) != static_cast<const void*>(&piece_spares()));
 }
 
+// grow_for_overwrite (core/strings.hpp, a buffered body read into its place): the bytes there stay, the
+// size is the one asked, never less. The member it uses is asked of the library at compile time, so any
+// library builds (alpha.147's packages job, GCC 12, did not: a version was assumed); a GCC 14 build is
+// held to its no-fill path, the one the release's Debian 13 and Arch packages take.
+static void test_grow_for_overwrite() {
+    std::string s = "abc";
+    grow_for_overwrite(s, 100);
+    CHECK(s.size() == 100 && s.compare(0, 3, "abc") == 0);
+    s[99] = 'z';
+    grow_for_overwrite(s, 10);
+    CHECK(s.size() == 100 && s[99] == 'z');
+    grow_for_overwrite(s, 70000);
+    CHECK(s.size() == 70000 && s.compare(0, 3, "abc") == 0 && s[99] == 'z');
+#if defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 14
+    static_assert(grows_without_fill(), "libstdc++ 14 has __resize_and_overwrite: the no-fill path must be found");
+#endif
+}
+
 static void test_upstream_answer_paths() {
     UpstreamOptions streaming;
     streaming.buffering = false;
@@ -17962,6 +17980,7 @@ int main() {
     test_tls_stream_shed();
     test_upstream_answer_paths();
     test_spare_buffers();
+    test_grow_for_overwrite();
     test_acme();
 #endif
     if (failures) {

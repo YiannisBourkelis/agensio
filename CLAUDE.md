@@ -19,7 +19,11 @@ builds without OpenSSL and without libxcrypt (link and unit tests; see "Build an
 Arch build (`scripts/arch-check.sh`: the release job's makepkg on the working tree in a container
 of the day's Arch, the package installed, a request over each protocol, the unit tests; about
 three minutes, nothing on GitHub; Arch is where a new OpenSSL or GCC is met first, and the tag of
-alpha.144 met OpenSSL 4.1 in the release job), and `bench/ab.sh` against the previous tag.
+alpha.144 met OpenSSL 4.1 in the release job), the build and unit tests with GCC 12 on Ubuntu 22.04
+(the release's packages job, which builds the Debian 12 / Ubuntu 22.04 `.deb` and the `.rpm`: the
+oldest compiler and OpenSSL a release meets, where Arch is the newest; alpha.147's did not build, a
+library member assumed from GCC 12 that only GCC 14 has, and its APT repository was not updated), and
+`bench/ab.sh` against the previous tag.
 
 ## Hard constraints
 

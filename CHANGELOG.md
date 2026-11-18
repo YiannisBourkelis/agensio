@@ -2,6 +2,15 @@
 
 ## 0.1.0-alpha.148 (unreleased)
 
+- **The packages for Debian 12, Ubuntu 22.04 and Fedora build again.** 0.1.0-alpha.147's release
+  stopped while compiling them: a helper of that release used a member of the C++ standard library
+  that GCC 12 and 13 do not have (GCC 14 does), and the `.deb` for Debian 12 and Ubuntu 22.04 and the
+  `.rpm` are built with GCC 12 on Ubuntu 22.04. So alpha.147 was published only as the Debian 13
+  `.deb` and the Arch package on its GitHub release, and the APT repository, which waits for both
+  `.deb` builds, still offers alpha.146 in both suites. The helper now asks the library at compile
+  time what it has, and falls back to a plain resize where it has neither member. The build and the
+  unit tests pass with GCC 12, 13 and 14, and the helper takes its intended path under LLVM's libc++.
+
 - **Small HTTPS answers cost less CPU again.** The release check of 0.1.0-alpha.147 found a 1 KB
   answer over HTTPS and HTTP/1.1 running 330 to 460 more instructions than in alpha.146, about 1.5 %
   of the server's own work for it, in two changes of that release: the certificate check every such

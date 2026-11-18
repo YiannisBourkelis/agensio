@@ -19,18 +19,37 @@ constexpr std::string_view slice(std::string_view s, std::size_t pos,
 
 // Grows `s` to `n` bytes without filling the new ones (what was there stays): for a buffer about
 // to be read into. C++23's resize_and_overwrite where the library has it under this standard, the
-// library's own spelling of it otherwise, and a plain resize (a fill) as the last resort.
+// library's own spelling of it otherwise, and a plain resize (a fill) as the last resort. Each is
+// asked of the library as it is compiled against, never assumed from a version: until
+// 0.1.0-alpha.148 libstdc++'s __resize_and_overwrite was taken from GCC 12 on, which neither 12 nor
+// 13 has (14 does), and alpha.147's packages job (Ubuntu 22.04, GCC 12) did not build.
+namespace detail {
+inline constexpr auto keep_bytes = [](char*, std::size_t m) noexcept { return m; };
+
+template <class S>
+constexpr int grow_kind() {
+    if constexpr (requires(S& s) { s.resize_and_overwrite(std::size_t{}, keep_bytes); }) return 1;
+    else if constexpr (requires(S& s) { s.__resize_and_overwrite(std::size_t{}, keep_bytes); }) return 2;
+    else if constexpr (requires(S& s) { s.__resize_default_init(std::size_t{}); }) return 3;
+    else return 0;
+}
+
+template <class S>
+void grow_for_overwrite(S& s, std::size_t n) {
+    if constexpr (grow_kind<S>() == 1) s.resize_and_overwrite(n, keep_bytes);
+    else if constexpr (grow_kind<S>() == 2) s.__resize_and_overwrite(n, keep_bytes);  // libstdc++ 14 on
+    else if constexpr (grow_kind<S>() == 3) s.__resize_default_init(n);               // libc++
+    else s.resize(n);                                                                 // filled
+}
+}  // namespace detail
+
+// Whether grow_for_overwrite leaves the new bytes unfilled with this library (the unit test holds a
+// GCC 14 build to it, so the fast path is never lost without a failing test).
+constexpr bool grows_without_fill() { return detail::grow_kind<std::string>() != 0; }
+
 inline void grow_for_overwrite(std::string& s, std::size_t n) {
     if (n <= s.size()) return;
-#if defined(__cpp_lib_string_resize_and_overwrite)
-    s.resize_and_overwrite(n, [](char*, std::size_t m) noexcept { return m; });
-#elif defined(__GLIBCXX__) && defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 12
-    s.__resize_and_overwrite(n, [](char*, std::size_t m) noexcept { return m; });
-#elif defined(_LIBCPP_VERSION)
-    s.__resize_default_init(n);
-#else
-    s.resize(n);
-#endif
+    detail::grow_for_overwrite(s, n);
 }
 
 // The length of the well-formed UTF-8 sequence that starts at s[i] (1 for ASCII), or 0 when
