@@ -27,6 +27,15 @@
   length of twenty digits no longer wraps either: it leaves the answer without a length, as `-1`
   always did.
 
+- **A setting's value that is too large to hold is refused, where it could stop the server.**
+  `site_update` and `site_create` with a setting given as a string of twenty digits
+  (`"proxy_read_timeout": "99999999999999999999"`) threw an exception in the control plane, and an
+  exception on a worker ends agensio; a number above 2^63 was converted with undefined behaviour.
+  Both are now "above the maximum", naming the value as given. A negative value is "below the
+  minimum" where it was "not a whole number" (the same report's note on `proxy_tunnel_timeout=-1`).
+  A size past 2^64 bytes is refused as a size, in a setting and in the configuration file
+  (`17179869185G` read as 1 GB).
+
 ## 0.1.0-alpha.148 (2026-11-18)
 
 - **The packages for Debian 12, Ubuntu 22.04 and Fedora build again.** 0.1.0-alpha.147's release

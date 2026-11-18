@@ -97,6 +97,8 @@ std::size_t parse_size(std::string_view text) {
     else if (unit == "m" || unit == "mb" || unit == "mib") mult = 1024ull * 1024;
     else if (unit == "g" || unit == "gb" || unit == "gib") mult = 1024ull * 1024 * 1024;
     else throw std::invalid_argument("unknown size unit '" + unit + "' in '" + std::string(text) + "'");
+    // Past 2^64 bytes the product wrapped: 2^34 + 1 GB read as 1 GB (until 0.1.0-alpha.149).
+    if (value > UINT64_MAX / mult) throw std::invalid_argument("size too large: '" + std::string(text) + "'");
     return static_cast<std::size_t>(value * mult);
 }
 

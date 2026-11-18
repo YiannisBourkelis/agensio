@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
+#include <cmath>
+#include <cstdio>
 #include <stdexcept>
 
 namespace agensio::control {
@@ -60,30 +63,49 @@ Bounds bounds_of(const SettingDef& d, const Config& cfg) {
     return {};
 }
 
-bool parse_number(const json::Value& v, std::size_t& out) {
+// How a setting's value reads as a whole number of its unit (seconds, connections, bytes): one in
+// `out`, a negative one, one past what the server holds (above any maximum), or none. Never throws:
+// until 0.1.0-alpha.149 a string of twenty digits threw out of std::stoull, and an exception on the
+// worker that runs the control plane ends the server; a number past 2^63 was converted with undefined
+// behaviour, and -1 was "not a whole number" (the alpha.148 report's note).
+enum class Whole { ok, negative, too_large, no };
+
+Whole whole_number(const json::Value& v, std::size_t& out) {
     if (v.type() == json::Value::Type::number) {
-        if (v.num() < 0 || v.num() != static_cast<double>(static_cast<long long>(v.num()))) return false;
-        out = static_cast<std::size_t>(v.num());
-        return true;
+        const double d = v.num();
+        if (!std::isfinite(d) || d != std::floor(d)) return Whole::no;
+        if (d < 0) return Whole::negative;
+        if (d >= 18446744073709551616.0) return Whole::too_large;  // 2^64
+        out = static_cast<std::size_t>(d);
+        return Whole::ok;
     }
-    if (v.is_string()) {
-        const std::string& s = v.str();
-        if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos) return false;
-        out = static_cast<std::size_t>(std::stoull(s));
-        return true;
-    }
-    return false;
+    if (!v.is_string()) return Whole::no;
+    std::string_view s = v.str();
+    const bool minus = !s.empty() && s.front() == '-';
+    if (minus) s.remove_prefix(1);
+    if (s.empty() || s.find_first_not_of("0123456789") != std::string_view::npos) return Whole::no;
+    if (minus && s.find_first_not_of('0') != std::string_view::npos) return Whole::negative;
+    const auto r = std::from_chars(s.data(), s.data() + s.size(), out);
+    return r.ec == std::errc() ? Whole::ok : Whole::too_large;
 }
 
-bool parse_size_value(const json::Value& v, std::size_t& out) {
-    if (v.type() == json::Value::Type::number) return parse_number(v, out);
-    if (!v.is_string()) return false;
+Whole size_value(const json::Value& v, std::size_t& out) {
+    if (v.type() == json::Value::Type::number) return whole_number(v, out);
+    if (!v.is_string()) return Whole::no;
     try {
         out = parse_size(v.str());
-        return true;
+        return Whole::ok;
     } catch (const std::exception&) {
-        return false;
+        return Whole::no;
     }
+}
+
+// The value as it was given, for a refusal of one the server does not hold as a number.
+std::string given_text(const json::Value& v) {
+    if (v.is_string()) return v.str();
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.15g", v.num());
+    return buf;
 }
 
 std::string value_text(const SettingDef& d, std::size_t n) {
@@ -116,11 +138,13 @@ std::string apply_settings(const json::Value& given, const Config& cfg, bool has
         }
         const Bounds b = bounds_of(*def, cfg);
         std::size_t n = 0;
-        const bool ok = std::string_view(def->type) == "size" ? parse_size_value(m.second, n) : parse_number(m.second, n);
-        if (!ok) return "settings." + m.first + ": not a " + (std::string_view(def->type) == "size" ? "size (e.g. \"200MB\", \"512M\")" : "whole number");
-        if (n < b.min) return "settings." + m.first + ": " + value_text(*def, n) + " is below the minimum " + value_text(*def, b.min);
-        if (n > b.max && b.fixed) return "settings." + m.first + ": " + value_text(*def, n) + " is above the maximum " + value_text(*def, b.max);
-        if (n > b.max) return "settings." + m.first + ": " + value_text(*def, n) + " is above the ceiling " + value_text(*def, b.max) + " set by [control] site_limits (root raises it in the configuration file)";
+        const Whole w = std::string_view(def->type) == "size" ? size_value(m.second, n) : whole_number(m.second, n);
+        if (w == Whole::no) return "settings." + m.first + ": not a " + (std::string_view(def->type) == "size" ? "size (e.g. \"200MB\", \"512M\")" : "whole number");
+        if (w == Whole::too_large) n = SIZE_MAX;
+        const std::string shown = w == Whole::ok ? value_text(*def, n) : given_text(m.second);
+        if (w == Whole::negative || n < b.min) return "settings." + m.first + ": " + shown + " is below the minimum " + value_text(*def, b.min);
+        if (n > b.max && b.fixed) return "settings." + m.first + ": " + shown + " is above the maximum " + value_text(*def, b.max);
+        if (n > b.max) return "settings." + m.first + ": " + shown + " is above the ceiling " + value_text(*def, b.max) + " set by [control] site_limits (root raises it in the configuration file)";
         if (std::string_view(def->type) == "size") out.set(m.first, size_text(n));
         else out.set(m.first, static_cast<double>(n));
     }

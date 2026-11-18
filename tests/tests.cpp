@@ -350,6 +350,17 @@ static void test_size() {
         parse_size("abc");
     } catch (const std::exception&) { threw = true; }
     CHECK(threw);
+    // A size past 2^64 bytes is refused, never wrapped (until 0.1.0-alpha.149 2^34 + 1 GB read as
+    // 1 GB); the largest that fits still reads.
+    CHECK_EQ(parse_size("17179869183G"), 17179869183ull * 1024 * 1024 * 1024);
+    for (const char* big : {"17179869184G", "17179869185g", "17592186044416M", "18446744073709551616"}) {
+        bool refused = false;
+        try {
+            (void)parse_size(big);
+        } catch (const std::exception&) { refused = true; }
+        if (!refused) std::printf("parse_size(%s) was not refused\n", big);
+        CHECK(refused);
+    }
 }
 
 // The response encoder's dynamic table (design 6.2.1) against our own decoder: every block
@@ -7492,6 +7503,25 @@ static void test_control_sites() {
                 CHECK(refused(R"({"proxy_read_timeout":0})", false, "below the minimum 1") && refused(R"({"proxy_read_timeout":3601})", false, "above the maximum 3600"));
                 CHECK(refused(R"({"proxy_tunnel_timeout":86401})", false, "above the maximum 86400") && refused(R"({"proxy_max_connections":0})", false, "below the minimum 1") &&
                       refused(R"({"proxy_max_connections":5000})", false, "above the maximum 4096") && refused(R"({"proxy_read_timeout":"long"})", false, "whole number"));
+                // A value past what the server holds is above the maximum, never an exception (until
+                // 0.1.0-alpha.149 twenty digits threw out of std::stoull, and an exception on the worker
+                // that runs the control plane ends the server; a number past 2^63 was converted with
+                // undefined behaviour); a negative one is below the minimum, named as given (the
+                // alpha.148 report's note: -1 was "not a whole number").
+                auto refused_safely = [&](const char* text, const char* fragment, bool user = false) {
+                    try {
+                        return refused(text, user, fragment);
+                    } catch (const std::exception& ex) {
+                        std::printf("settings: %s threw: %s\n", text, ex.what());
+                        return false;
+                    }
+                };
+                CHECK(refused_safely(R"({"proxy_read_timeout":"99999999999999999999"})", "proxy_read_timeout: 99999999999999999999 is above the maximum 3600"));
+                CHECK(refused_safely(R"({"proxy_read_timeout":1e30})", "proxy_read_timeout: 1e+30 is above the maximum 3600"));
+                CHECK(refused_safely(R"({"proxy_tunnel_timeout":-1})", "proxy_tunnel_timeout: -1 is below the minimum 0"));
+                CHECK(refused_safely(R"({"proxy_tunnel_timeout":"-1"})", "proxy_tunnel_timeout: -1 is below the minimum 0"));
+                CHECK(refused_safely(R"({"proxy_read_timeout":2.5})", "whole number") && refused_safely(R"({"proxy_read_timeout":"-"})", "whole number"));
+                CHECK(refused_safely(R"({"max_body_size":"17179869185G"})", "not a size", true));  // 2^34 + 1 GB: wrapped to 1 GB before
                 int listed = 0;
                 const json::Value catalog = settings_catalog(loaded, nullptr);
                 for (const auto& d : catalog["settings"].items()) {
