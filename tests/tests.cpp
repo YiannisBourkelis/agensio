@@ -312,6 +312,42 @@ static void test_security_parser() {
         many += "\r\n";
         CHECK(st(many) == ParseStatus::too_many_headers);
     }
+    // The absolute-form (RFC 9112 3.2.2, 0.1.0-alpha.149; the alpha.148 report, F5): accepted, the
+    // target's host in Request::host and in the Host field's place (what HTTP_HOST and a proxied Host
+    // read), the target its origin-form; the Host the client sent is ignored.
+    {
+        CHECK(st("GET http://b.test/x/y.php?q=1 HTTP/1.1\r\nHost: a.test\r\nX-A: 1\r\n\r\n") == ParseStatus::complete);
+        CHECK_EQ(r.target, "/x/y.php?q=1");
+        CHECK_EQ(r.host, "b.test");
+        CHECK_EQ(r.headers.get("host"), "b.test");
+        CHECK(r.headers.size() == 2 && r.headers.get("x-a") == "1");
+        CHECK(st("GET HTTPS://B.Test:8443 HTTP/1.1\r\nHost: a.test\r\n\r\n") == ParseStatus::complete);
+        CHECK_EQ(r.target, "/");
+        CHECK_EQ(r.host, "B.Test:8443");
+        CHECK(st("OPTIONS http://b.test/ HTTP/1.1\r\nHost: b.test\r\n\r\n") == ParseStatus::complete);
+        CHECK(r.method == Method::options && r.target == "/" && r.host == "b.test");
+        // HTTP/1.0 may omit Host: the field is added, so handlers see the shape HTTP/1.1 has.
+        CHECK(st("GET http://b.test/p HTTP/1.0\r\n\r\n") == ParseStatus::complete);
+        CHECK(r.target == "/p" && r.host == "b.test" && r.headers.get("host") == "b.test");
+        CHECK(st("GET http://[::1]:8080/p HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::complete);
+        CHECK(r.target == "/p" && r.host == "[::1]:8080");
+        // HTTP/1.1 still needs its Host field (RFC 9112 3.2), whatever the target says.
+        CHECK(st("GET http://b.test/ HTTP/1.1\r\n\r\n") == ParseStatus::bad_request);
+        // Userinfo (RFC 9110 4.2.4), an empty host, a byte Host refuses, an empty path before a query.
+        CHECK(st("GET http://user@b.test/ HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::bad_request);
+        CHECK(st("GET http:///x HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::bad_request);
+        CHECK(st("GET http://b\\c/ HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::bad_request);
+        CHECK(st("GET http://b<c/ HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::bad_request);
+        CHECK(st("GET http://b.test?q=1 HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::bad_request);
+        CHECK(st("GET http://b.test#f HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::bad_request);
+        // Any other scheme or form is left as it came (the router answers 400; CONNECT 405).
+        CHECK(st("GET ftp://b.test/ HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::complete);
+        CHECK(r.target == "ftp://b.test/" && r.host == "a");
+        CHECK(st("CONNECT b.test:443 HTTP/1.1\r\nHost: b.test:443\r\n\r\n") == ParseStatus::complete);
+        CHECK(r.target == "b.test:443" && r.host == "b.test:443");
+        CHECK(st("GET http:// HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::complete);  // nothing after the scheme: not one
+        CHECK(r.target == "http://");
+    }
 }
 
 static void test_date() {

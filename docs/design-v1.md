@@ -81,7 +81,7 @@ order (what a client can reach from outside first). "Seen" and "audit" are expla
 | # | What | State | Rec. |
 |---|---|---|---|
 | C1 | `If-Match` and `If-Unmodified-Since` evaluated, 412 (RFC 9110 13.1.1, 13.1.4): a resumed download guarded by either gets a 206 of a changed file today | seen | 1.0 |
-| C2 | The absolute-form request target accepted, the host taken from it (RFC 9112 3.2.2) | seen | 1.0 |
+| C2 | The absolute-form request target accepted, the host taken from it (RFC 9112 3.2.2) | built 0.1.0-alpha.149 (HTTP/1; userinfo and an empty path before a query stay 400) | 1.0 |
 | C3 | An origin's interim 1xx on a streamed proxy location is delivered as the final answer; the decoded path goes to an origin whose upstream has a URI part. Both read, not run: the test first | audit (medium), the lines seen | 1.0 |
 | C4 | A gateway forwards 1xx (RFC 9110 15.2): 103 Early Hints relayed from an origin, over all three protocols (ROADMAP E8) | not built | 1.0 |
 | C5 | Gateway duties in one change: `Host` on a forwarded HTTP/1.0 request, `Upgrade` ignored on HTTP/1.0, fields named by an origin's `Connection` and `Proxy-Connection`, `Trailer`, a non-101 `Upgrade` removed from responses, differing `Content-Length` lines from an origin refused, and a written decision on `Via` and `Max-Forwards` | audit | 1.0 |

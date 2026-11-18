@@ -62,6 +62,43 @@ inline bool is_tchar(unsigned char c) noexcept {
     }
 }
 
+// A Host value's bytes (RFC 9110 7.2: uri-host [ ":" port ]): nothing a path, a quote or markup would
+// take, no whitespace or control character. The same rule for the authority of an absolute-form target.
+inline bool host_bytes_ok(std::string_view v) noexcept {
+    for (unsigned char c : v)
+        if (c <= 0x20 || c == 0x7f || c == '/' || c == '\\' || c == '"' || c == '<' || c == '>') return false;
+    return true;
+}
+
+enum class Absolute { other, done, bad, full };
+
+// The absolute-form of a request-target (RFC 9112 3.2.2), "http://b.test/x?y": a server MUST accept it,
+// and an origin server MUST ignore the Host field and use the target's host instead. The authority takes
+// Host's place wherever a reader looks (Request::host, and the Host field the handlers pass on as
+// HTTP_HOST or to an origin), so the site chosen and the host the application is told never differ, and
+// the target becomes its origin-form, the one routing, the logs, the fail2ban filters and an origin read.
+// Only http and https (RFC 9110 4.2); any other target is left as it came (CONNECT's authority-form,
+// or what the router refuses). 400: userinfo (RFC 9110 4.2.4), an empty host, a byte Host refuses, and
+// an empty path before a query or fragment, the one form whose origin-form ("/?q") is not in the buffer
+// (RFC 9110 4.2.3: clients send the normal form, "/"). Until 0.1.0-alpha.149 every absolute-form
+// target was 400 (the alpha.148 report, F5).
+Absolute absolute_form(Request& out, std::size_t host_index) noexcept {
+    std::string_view t = out.target;
+    if (t.size() > 7 && iequals(slice(t, 0, 7), "http://")) t.remove_prefix(7);
+    else if (t.size() > 8 && iequals(slice(t, 0, 8), "https://")) t.remove_prefix(8);
+    else return Absolute::other;
+    const std::size_t end = t.find_first_of("/?#");
+    const std::string_view authority = slice(t, 0, end == std::string_view::npos ? t.size() : end);
+    if (authority.empty() || authority.find('@') != std::string_view::npos || !host_bytes_ok(authority)) return Absolute::bad;
+    std::string_view path = end == std::string_view::npos ? std::string_view("/") : slice(t, end);
+    if (path[0] != '/') return Absolute::bad;
+    out.target = path;
+    out.host = authority;
+    if (host_index != Headers::kCapacity) out.headers.set_value(host_index, authority);
+    else if (!out.headers.add("host", authority)) return Absolute::full;  // HTTP/1.0 without one: handlers see HTTP/1.1's shape
+    return Absolute::done;
+}
+
 }  // namespace
 
 bool iequals(std::string_view a, std::string_view b) noexcept {
@@ -119,6 +156,7 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
     pos = next;
     std::size_t header_count = 0;
     bool seen_host = false, seen_content_length = false, seen_transfer_encoding = false;
+    std::size_t host_index = Headers::kCapacity;  // the Host field's place, for an absolute-form target
     std::string_view content_length;
     for (;;) {
         if (!next_line(buf, pos, line, next)) return ParseStatus::incomplete;
@@ -148,9 +186,8 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
                 if (iequals(name, "host")) {
                     if (seen_host) return ParseStatus::bad_request;  // RFC 9112 3.2: exactly one Host
                     seen_host = true;
-                    for (unsigned char c : value)
-                        if (c <= 0x20 || c == '/' || c == '\\' || c == '"' || c == '<' || c == '>')
-                            return ParseStatus::bad_request;
+                    if (!host_bytes_ok(value)) return ParseStatus::bad_request;
+                    host_index = out.headers.size() - 1;
                     out.host = value;
                 }
                 break;
@@ -207,6 +244,17 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
     }
     // Both framing headers present is the request-smuggling signature (RFC 9112 6.1).
     if (seen_content_length && seen_transfer_encoding) return ParseStatus::bad_request;
+    if (out.target[0] != '/') {  // the absolute-form (one test on the hot path: origin-form starts with '/')
+        switch (absolute_form(out, host_index)) {
+            case Absolute::other: break;
+            case Absolute::done:
+                // Still an HTTP/1.1 request without a Host field (RFC 9112 3.2: 400, whatever the target).
+                if (out.version_minor == 1 && !seen_host) return ParseStatus::bad_request;
+                break;
+            case Absolute::bad: return ParseStatus::bad_request;
+            case Absolute::full: return ParseStatus::too_many_headers;
+        }
+    }
 
     if (out.version_minor == 1) out.keep_alive = !has_token(out.connection, "close");
     else out.keep_alive = has_token(out.connection, "keep-alive");

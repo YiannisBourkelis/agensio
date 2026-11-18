@@ -640,6 +640,18 @@ check "strict: HTTP/1.0 without Host on a listener without catch-all is 421, kee
 check "strict: HTTP/1.1 without Host stays 400" "400" "$(printf 'GET / HTTP/1.1\r\n\r\n' | ncq 127.0.0.1 8099 | head -1 | awk '{print $2}')"
 check "strict: a listener with a catch-all serves unknown Hosts as before" "200" "$(code -H 'Host: evil.example.com' http://127.0.0.1:8080/)"
 check "strict: OPTIONS * with an unknown Host is 421" "421" "$(printf 'OPTIONS * HTTP/1.1\r\nHost: nobody.invalid\r\n\r\n' | ncq 127.0.0.1 8099 | head -1 | awk '{print $2}')"
+# The absolute-form of a request-target (RFC 9112 3.2.2; 0.1.0-alpha.149, the alpha.148 report's F5:
+# every one was 400): the target's host chooses the site over the Host field, whichever way round, and
+# is what PHP is told (HTTP_HOST); the access log has the origin-form path under it. Userinfo is 400,
+# and HTTP/1.1 still needs a Host field.
+absf() { printf "$1" | ncq 127.0.0.1 "$2" | head -1 | awk '{print $2}'; }
+check "absolute-form: the target's host chooses the site over Host, either way round; an upper-case scheme and a port; HTTP/1.0 without Host; userinfo and HTTP/1.1 without Host are 400" "200 421 200 200 400 400" \
+  "$(absf 'GET http://strict.test/ HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n' 8099) $(absf 'GET http://evil.example.com/ HTTP/1.1\r\nHost: strict.test\r\nConnection: close\r\n\r\n' 8099) $(absf 'GET HTTP://STRICT.TEST:8099/ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' 8099) $(absf 'GET http://strict.test/ HTTP/1.0\r\n\r\n' 8099) $(absf 'GET http://u@strict.test/ HTTP/1.1\r\nHost: strict.test\r\nConnection: close\r\n\r\n' 8099) $(absf 'GET http://strict.test/ HTTP/1.1\r\nConnection: close\r\n\r\n' 8099)"
+ABSP=$(printf 'GET http://abs.example/php/params.php?abs=1 HTTP/1.1\r\nHost: wrong.example\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080)
+absf 'GET http://strict.test/abs-form-probe HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n' 8099 > /dev/null
+sleep 1.3
+check "absolute-form: PHP is told the target's host and path (HTTP_HOST, REQUEST_URI), and the access log has the origin-form request line under the target's host" "yes yes 1" \
+  "$(echo "$ABSP" | grep -q '"HTTP_HOST":"abs.example"' && echo yes) $(echo "$ABSP" | grep -q '"REQUEST_URI":"/php/params.php?abs=1"' && echo yes) $(grep -c '^strict.test:8099 127.0.0.1 - - .*"GET /abs-form-probe HTTP/1.1" 404 ' bench/tmp/access.log)"
 # A request no site took (no catch-all on the listener) is written to [log] access, so a scanner
 # probing by address is in the log the jails read (before alpha.70 it was in no log at all).
 curl -s -o /dev/null -H 'Host: four21.invalid' $S/four21-probe-h1
@@ -666,6 +678,9 @@ check "authority: SNI a, Host b: a's SAN certificate covers both, so served (the
 check "authority: a wildcard certificate covers the sibling site" "200 200" "$(hostcode x.wild.test y.wild.test 8449) $(hostcode y.wild.test x.wild.test 8449)"
 check "authority: the bare domain is not covered by the wildcard (no site either)" "421" "$(hostcode x.wild.test wild.test 8449)"
 check "authority: a Host no site lists over a valid TLS connection is still 421" "421" "$(hostcode b.test c.test 8446)"
+abstls() { printf "GET $3 HTTP/1.1\r\nHost: $2\r\nConnection: close\r\n\r\n" | openssl s_client -quiet -connect 127.0.0.1:8446 -servername "$1" 2>/dev/null | head -1 | awk '{print $2}'; }
+check "authority: an absolute-form target's host is the one the certificate must cover (SNI b, Host b, target a.test: 421; SNI a, whose SAN covers b: 200)" "421 200" \
+  "$(abstls b.test b.test https://a.test/) $(abstls a.test a.test https://b.test/)"
 check "authority: case, a trailing dot and a port in Host match as before" "200 200 200" "$(hostcode b.test B.TEST 8446) $(hostcode b.test b.test. 8446) $(hostcode b.test b.test:8446 8446)"
 # One reader for a certificate's names (the alpha.145 report's O3): the CN counts only when the
 # subjectAltName holds no DNS name, as a client's check has it (b.test's certificate above has no

@@ -1,0 +1,4 @@
+GET HTTPS://user@B.Test:8443 HTTP/1.0
+
+GET http://[::1]:80 HTTP/1.0
+

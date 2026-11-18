@@ -1,0 +1,4 @@
+GET http://b.test/x/y.php?q=1 HTTP/1.1
+Host: a.test
+X-A: 1
+

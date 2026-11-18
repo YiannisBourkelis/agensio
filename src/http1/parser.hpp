@@ -30,6 +30,8 @@ inline constexpr std::size_t kMaxContentLengthDigits = 19;  // fits in 64 bits
 // or conflicting Content-Length, Content-Length together with Transfer-Encoding,
 // Transfer-Encoding on HTTP/1.0, duplicate Host, and Host with forbidden characters.
 // Fills content_length, chunked and expect_continue for the connection's body reader.
+// An absolute-form target ("http://b.test/x", RFC 9112 3.2.2) leaves as its origin-form
+// ("/x"), its authority in Request::host and in the Host field's place.
 ParseStatus parse_request(std::string_view buf, Request& out) noexcept;
 
 // Case-insensitive ASCII compare.

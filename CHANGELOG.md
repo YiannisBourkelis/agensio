@@ -59,6 +59,18 @@
   is no number is not one, and the body's own is sent, as before. Apache httpd drops a script's
   length and sends what it wrote; RFC 3875 leaves the framing to the server.
 
+- **A request whose target is an absolute URI is served** (`GET http://example.com/page
+  HTTP/1.1`). RFC 9112 3.2.2 has a server accept this form and use its host in place of the Host
+  field; agensio answered 400 (the same report, F5). The target's host now chooses the site,
+  decides the certificate's 421, begins the access-log line and is the Host the application is
+  told (`HTTP_HOST`) and an origin receives, so the site chosen and the host the application sees
+  never differ; the target becomes its path (`/page`) wherever it is read, so the logs and the
+  fail2ban filters see the usual request line. `http` and `https` only, any other scheme as
+  before; userinfo (`http://user@host/`), an empty host, and an empty path before a query
+  (`http://host?q`, which clients send as `http://host/?q`) are 400, and HTTP/1.1 still needs a
+  Host field. nginx and Apache httpd accept it the same way. HTTP/1 only: HTTP/2 and HTTP/3 carry
+  the host in `:authority`.
+
 ## 0.1.0-alpha.148 (2026-11-18)
 
 - **The packages for Debian 12, Ubuntu 22.04 and Fedora build again.** 0.1.0-alpha.147's release
