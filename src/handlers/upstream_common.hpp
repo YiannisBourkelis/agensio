@@ -40,6 +40,10 @@ void collect_request_body(Stream& s, UpstreamBodyInput& body, std::size_t memory
 void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<StreamBody> source, const char* log_name,
                            const LocationConfig& loc, ErrorLog* log, asio::io_context* ctx = nullptr);
 
+// The error-log line for a script that sent more than its Content-Length, its answer cut to it
+// (FastCGI and CGI, whole or streamed): `what` names the exchange ("cgi /path/x.cgi").
+std::string surplus_line(std::string_view what, std::uint64_t declared, std::uint64_t sent);
+
 // docs/redirects.md 2.5: an application's own http:// Location naming one of the site's names (with
 // no port, port 80 or the site's TLS port, as the Host it was given) appended to `out` as https://
 // on the TLS port, nginx's proxy_redirect http:// https://; false, nothing appended, for any other.

@@ -1156,6 +1156,19 @@ bool UpstreamRequest::store_body(std::string_view bytes) {
     }
     if (!options_.buffering) {
         if (phase_ == Phase::cancelled) return false;
+        // Bytes no reader takes: a script's past the length it declared (every writer holds a sized
+        // body to its length) and all of an answer without a body (a HEAD's, a 204, a 304). Dropped as
+        // they come, counted, so the exchange reads on to the script's end and gives its slot back.
+        // Until 0.1.0-alpha.150 they filled the read-ahead (kHighWater), the exchange stopped reading,
+        // its reader took nothing more, and it was freed with its slot still taken: after
+        // max_connections such answers the location was a 503 (reader_gone's case of alpha.140, left
+        // open where the reader had taken the whole declared body).
+        if (bodiless_) return true;
+        if (sized_) {
+            const std::uint64_t before = result_.body_size - bytes.size();
+            if (before >= declared_) return true;
+            if (bytes.size() > declared_ - before) bytes = bytes.substr(0, static_cast<std::size_t>(declared_ - before));
+        }
         pending_.append(bytes);
         satisfy_waiter();
         // The pull answered inline may have ended the exchange (its reader closed: reader_gone), and
@@ -1205,6 +1218,11 @@ void UpstreamRequest::finish() {
     on_end(true);
     release_connection(true);
     if (!options_.buffering && head_delivered_) {
+        if (surplus_fn_ && sized_ && !bodiless_ && result_.body_size > declared_) {
+            const SurplusFn fn = std::move(surplus_fn_);
+            surplus_fn_ = nullptr;
+            fn(declared_, result_.body_size);  // the script's surplus was dropped (store_body): logged
+        }
         satisfy_waiter();  // a waiting pull gets the end of body
         return;
     }

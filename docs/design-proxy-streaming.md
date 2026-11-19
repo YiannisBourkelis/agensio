@@ -120,7 +120,11 @@ What the client sees:
   client as a complete file (the alpha.148 report's F4). Streamed past its head, the client side
   holds it as before: surplus cut, a short end cutting the body, now with the failure's line naming
   both lengths. Before alpha.149 a whole answer here stayed a streamed one, the short end closing
-  the connection.
+  the connection. The surplus of a streamed one is dropped as it arrives (`store_body`, as are the
+  bytes of an answer without a body) and logged at the script's end (`on_surplus`): until
+  0.1.0-alpha.150 it filled the read-ahead, the exchange stopped reading once its reader had the
+  declared body, and it was freed with its pool slot taken. A CGI script's end is the close of its
+  output, a read of its own, so a streamed CGI answer is never whole in this sense.
 - **An answer that breaks within the read that brought its head**: the head goes on first and the
   body is cut, as before.
 - **A head whose framing cannot be trusted** (an origin's `Content-Length` that is no number

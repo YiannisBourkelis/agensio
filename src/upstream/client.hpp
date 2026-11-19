@@ -278,8 +278,9 @@ public:
     // The reader of the streamed body is gone before its end (its client left, its stream was
     // reset, its connection closed): cancelled, unless the exchange has ended, or the answer has no
     // body (HEAD, 204, 304) or the reader took the whole body the origin declared: the end of such
-    // an exchange is on its way (a FastCGI END_REQUEST, a CGI child's exit), and it finishes on
-    // its own, keeping its connection and letting the script run to its end. Before
+    // an exchange is on its way (a FastCGI END_REQUEST, a CGI child's exit; what a script sends past
+    // its length is dropped as it comes, store_body), and it finishes on its own, keeping its
+    // connection and letting the script run to its end. Before
     // 0.1.0-alpha.140 nothing ended such an exchange: it read on to its read-ahead, stopped, and
     // was freed without giving its slot back to the pool (fuzz_h2_bodies, 2026-11-07).
     void reader_gone() noexcept;
@@ -300,6 +301,11 @@ public:
         script_length_ = true;
         head_request_ = head;
     }
+    // A streamed script answer: called once the script has ended, when it sent more than it declared
+    // (the surplus was dropped, never sent), so the error log says so as it does for a whole answer.
+    // Until 0.1.0-alpha.150 only a whole one was told (the alpha.149 report's note).
+    using SurplusFn = std::function<void(std::uint64_t declared, std::uint64_t sent)>;
+    void on_surplus(SurplusFn fn) { surplus_fn_ = std::move(fn); }
     // What ended a streamed answer early, for the error log of the connection that was sending it:
     // "proxy 127.0.0.1:3000 read_timeout after 2008 bytes of the answer (Connection timed out): no
     // bytes for 8 s (proxy.read_timeout)". Empty unless the exchange failed.
@@ -445,6 +451,7 @@ private:
     bool head_done_ = false;
     bool head_refused_ = false;  // refuse_head(): no head goes on, streamed or not
     bool script_length_ = false;  // hold_script_length()
+    SurplusFn surplus_fn_;        // on_surplus()
     bool head_request_ = false;   // hold_script_length(head)
     bool head_delivered_ = false;
     std::string head_buf_;  // response bytes until the head is complete (grows up to head_max)

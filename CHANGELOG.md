@@ -17,6 +17,21 @@
   the error log (found while checking the same report's F1). The client now gets the body whole,
   chunked or with the length counted, as from a buffering location.
 
+- **A streamed PHP or CGI answer longer than its `Content-Length` gives its connection back.** On
+  a streaming location a script that sends more than the length it set has its answer cut to that
+  length, as before. What it sent beyond was kept for a reader that never came: past 256 KB the
+  exchange stopped reading, waited for the client's connection to go, and was freed without giving
+  back its slot in the location's pool, so after `max_connections` such answers on a worker the
+  location answered 503 there, and the script was stopped mid-output. A HEAD's
+  answer did the same with the body a CGI script wrote for it. Those bytes are now read and dropped
+  as they arrive, the script runs to its end, its slot comes back, and the error log says the answer
+  was cut, as it already did for a whole answer (the same report's note: a streamed CGI script's
+  surplus left no line). A streamed CGI answer shorter than its length stays a cut body, never a
+  502: a CGI script's end is the close of its output, which comes in a read of its own, after the
+  head has gone (the same report's F2; `docs/configuration.md` 7 now says so). Corrected in
+  alpha.149's entry: a 204 and a 304 from a script carry no `Content-Length` (RFC 9110 8.6); only a
+  HEAD's answer keeps the length declared.
+
 ## 0.1.0-alpha.149 (2026-11-18)
 
 - **A streamed answer of known length ends over HTTP/2 without TLS (h2c).** Since 0.1.0-alpha.147,
@@ -72,8 +87,9 @@
   502, the error log naming the script and both lengths (`short_body`); a longer one is cut to the
   length declared, with a warning. A streamed answer that ends short after its head went out is cut
   as before, its error-log line now naming both lengths; a whole one there closed the connection
-  where it is now a 502. A HEAD, a 204 and a 304 keep the length the script declares; a length that
-  is no number is not one, and the body's own is sent, as before. Apache httpd drops a script's
+  where it is now a 502. A HEAD's answer keeps the length the script declares (a 204 and a 304
+  carry none, RFC 9110 8.6); a length that is no number is not one, and the body's own is sent, as
+  before. Apache httpd drops a script's
   length and sends what it wrote; RFC 3875 leaves the framing to the server.
 
 - **A request whose target is an absolute URI is served** (`GET http://example.com/page

@@ -1415,9 +1415,13 @@ A script that sets its own `Content-Length` (a download script) is held to it, b
 streamed, as nginx holds it (0.1.0-alpha.149): an answer shorter than the length it declares is
 a 502 logged as `short_body` with both lengths when it is whole before anything went to the
 client, and a cut body (the connection closed, an HTTP/2 or HTTP/3 stream reset) when part of it
-already had; a longer one is cut to the length declared, with a warning. A script that died
-mid-download is never sent as a complete file. A HEAD's answer keeps the length declared. CGI
-scripts (section 13) the same.
+already had; a longer one is cut to the length declared, with a warning, and what it sends past
+that length is read and dropped until it ends. A script that died mid-download is never sent as a
+complete file. A HEAD's answer keeps the length declared; a 204 and a 304 carry none. CGI scripts
+(section 13) the same. On a streaming location (`buffering = false`) an answer counts as whole
+when its end came in the same read as its head: php-fpm's end of request usually does for a script
+that writes everything at once; a CGI script's end is the close of its output, which comes in a
+read of its own, so a streamed CGI script's short answer is a cut body, never a 502.
 
 ## 7b. PHP versions
 

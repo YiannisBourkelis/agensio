@@ -300,10 +300,14 @@ void FcgiHandler::finish(Exchange& x, FcgiResult& res) {
         return;
     }
     if (res.failure == FcgiFailure::primary_script_unknown) log_failure(x, res);
-    if (res.script_sent > res.script_declared)  // a longer body, cut to its declared length (hold_script_length)
-        log_.warn("fastcgi " + loc.fastcgi.address.key + " for " + x.script + ": the script declared Content-Length " +
-                  std::to_string(res.script_declared) + " and sent " + std::to_string(res.script_sent) + " bytes; the answer was cut to " +
-                  std::to_string(res.script_declared));
+    // A longer body, cut to its declared length (hold_script_length): said now for a whole answer, when
+    // the script has ended for a streamed one.
+    if (res.script_sent > res.script_declared)
+        log_.warn(surplus_line("fastcgi " + loc.fastcgi.address.key + " for " + x.script, res.script_declared, res.script_sent));
+    else if (res.streamed)
+        x.req->on_surplus([log = &log_, what = "fastcgi " + loc.fastcgi.address.key + " for " + x.script](std::uint64_t declared, std::uint64_t sent) {
+            log->warn(surplus_line(what, declared, sent));
+        });
     apply_upstream_result(s, res, res.streamed ? x.req->body_source(s.request.method == Method::head) : nullptr,
                           to_string(res.failure), loc, &log_, &x.req->context());  // "ok" or "primary_script_unknown"
     x.completed = true;

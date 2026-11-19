@@ -17,6 +17,11 @@
 
 namespace agensio {
 
+std::string surplus_line(std::string_view what, std::uint64_t declared, std::uint64_t sent) {
+    return std::string(what) + ": the script declared Content-Length " + std::to_string(declared) + " and sent " +
+           std::to_string(sent) + " bytes; the answer was cut to " + std::to_string(declared);
+}
+
 void upstream_error(Stream& s, int status, std::string_view retry_after) {
     Response& r = s.response;
     r.reset();

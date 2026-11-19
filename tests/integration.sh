@@ -427,6 +427,11 @@ path = "/cgi-queue/"
 alias = "{root}/tests/cgi"
 cgi = {{ max_connections = 1, queue_depth = 1, queue_wait = 1, head_max = "1KB" }}
 
+[[site.location]]                       # streamed, one process and no queue: a slot not given back is the next request's 503
+path = "/cgi-stream/"
+alias = "{root}/tests/cgi"
+cgi = {{ buffering = false, max_connections = 1, queue_depth = 0 }}
+
 [[site.location]]                       # E9: one slot, no queue (its own origin: pool limits are per upstream)
 path = "/abort/"
 upstream = "http://127.0.0.1:9109/"
@@ -851,6 +856,8 @@ check "php: a HEAD carries no Content-Length the script did not send, over h1 an
   "$(curl -sSI http://127.0.0.1:8080/php/big.php | cl) $(curl -sSk --http2 -I https://127.0.0.1:8443/php/big.php | cl) $(curl -sSI -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/php/length.php) $(curl -sSI http://127.0.0.1:8080/php/length.php | cl) $(curl -sSI -o /dev/null -w '%{size_download}' http://127.0.0.1:8080/php/length.php)"
 check "php: streaming location sends chunked" "yes" "$(curl -sSi http://127.0.0.1:8080/phpstream/stream.php | tr -d '\r' | grep -q '^Transfer-Encoding: chunked' && echo yes)"
 check "php: streaming body intact" "chunk0 chunk1 chunk2 chunk3 chunk4" "$(curl -sS http://127.0.0.1:8080/phpstream/stream.php | tr '\n' ' ' | sed 's/ $//')"
+check "php: streamed, a script's surplus past its Content-Length is dropped, and logged as for a whole answer" "xxxxx yes" \
+  "$(curl -sS --max-time 5 'http://127.0.0.1:8080/phpstream/wronglen.php?d=5&n=600000&flush=1') $(sleep 0.8; grep -q 'wronglen.php: the script declared Content-Length 5 and sent 600000 bytes; the answer was cut to 5' bench/tmp/error.log && echo yes)"
 check "php: streamed Content-Length enforced: surplus cut, connection reusable" "xxxxxHTTP/1.1 200 OK" "$(printf 'GET /phpstream/wronglen.php?m=long HTTP/1.1\r\nHost: l\r\n\r\nGET / HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | tr -d '\r' | grep -o 'x\+HTTP/1.1 200 OK')"
 # A script's own Content-Length holds its answer, buffered or streamed (0.1.0-alpha.149, nginx's rule
 # since 1.19.1; the alpha.148 report's F4: a buffering location sent the length it counted, so a script
@@ -3959,6 +3966,13 @@ except OSError:
   check "cgi: Status from the script" "404" "$(code $P/cgi-bin/status.cgi)"
   check "cgi: the script's own Content-Length holds: shorter is a 502, longer is cut to it (0.1.0-alpha.149)" "502 xxxxx yes" \
     "$(code $P/cgi-bin/wronglen.cgi) $(curl -sS "$P/cgi-bin/wronglen.cgi?long") $(grep -q 'cgi .*wronglen.cgi short_body: the script declared Content-Length 100 and sent 5 bytes' bench/tmp/error.log && echo yes)"
+  # Streamed, a script that sends more than it declared: the client gets what was declared, the error log
+  # says so as it does for a whole answer, and the surplus is read and dropped to the script's end, so the
+  # slot comes back; a HEAD's answer the same with all of its body. Until 0.1.0-alpha.150 the surplus filled
+  # the read-ahead, the exchange stopped reading and was freed with its slot still taken: the next request
+  # was a 503 (found with the alpha.149 report's note on the missing warning).
+  check "cgi: streamed, a script's surplus past its Content-Length is dropped and logged, and its slot comes back (GET and HEAD)" "xxxxx 200 200 xxxxx yes" \
+    "$(curl -sS "$P/cgi-stream/wronglen.cgi?huge") $(sleep 0.5; curl -sS -I -o /dev/null -w '%{http_code}' "$P/cgi-stream/wronglen.cgi?huge") $(sleep 0.5; code "$P/cgi-stream/wronglen.cgi?long") $(sleep 0.5; curl -sS "$P/cgi-stream/wronglen.cgi?long") $(sleep 0.3; grep -q 'cgi .*wronglen.cgi: the script declared Content-Length 5 and sent 600000 bytes; the answer was cut to 5' bench/tmp/error.log && echo yes)"
   check "cgi: Location alone is a 302" "302 /moved" "$(curl -sSi $P/cgi-bin/redirect.cgi | tr -d '\r' | awk '/^HTTP/{c=$2} /^Location:/{l=$2} END{print c, l}')"
   check "cgi: stderr logged, output still served" "ok despite stderr yes" "$(curl -sS $P/cgi-bin/stderr.cgi | tr -d '\n') $(for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q 'stderr.cgi stderr: something went sideways' bench/tmp/error.log && break; sleep 0.2; done; grep -q 'stderr.cgi stderr: something went sideways' bench/tmp/error.log && echo yes)"
   check "cgi: exit without a header block is a 502" "502" "$(code $P/cgi-bin/crash.cgi)"
