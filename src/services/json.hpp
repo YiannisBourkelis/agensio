@@ -113,9 +113,14 @@ private:
                     out += "null";
                     break;
                 }
+                // Past that range a whole number below 1e21 is still written in digits ("%.0f" prints the
+                // double's exact value): 1e20 went out as 1e+20 until 0.1.0-alpha.150, and the MCP bridge
+                // relays a setting's value through this writer (the alpha.149 report's note).
                 char buf[32];
                 if (number_ >= -9.2e18 && number_ <= 9.2e18 && std::trunc(number_) == number_)
                     std::snprintf(buf, sizeof buf, "%lld", static_cast<long long>(number_));
+                else if (std::fabs(number_) < 1e21 && std::trunc(number_) == number_)
+                    std::snprintf(buf, sizeof buf, "%.0f", number_);
                 else
                     std::snprintf(buf, sizeof buf, "%.17g", number_);
                 out += buf;

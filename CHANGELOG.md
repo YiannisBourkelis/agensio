@@ -38,6 +38,13 @@
   without a Host field is now the 400 an origin-form one gets, without the warning that its request
   line "did not parse" (the same report's note). `docs/configuration.md` 1b describes the form.
 
+- **A setting's value too large to hold is named as given.** A JSON number came back in a float's
+  form (`1e+20 is above the maximum 3600`): a whole number below 10^21 is now written in digits, in
+  the refusal and wherever agensio writes JSON, the MCP bridge relaying an agent's value included.
+  A size past 2^64 bytes (`"17179869185G"`) was "not a size" where the configuration file said
+  "size too large"; it is now above the maximum or the ceiling, named as given (the same report's
+  notes).
+
 ## 0.1.0-alpha.149 (2026-11-18)
 
 - **A streamed answer of known length ends over HTTP/2 without TLS (h2c).** Since 0.1.0-alpha.147,

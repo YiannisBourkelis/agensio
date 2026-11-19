@@ -397,11 +397,12 @@ static void test_size() {
     // A size past 2^64 bytes is refused, never wrapped (until 0.1.0-alpha.149 2^34 + 1 GB read as
     // 1 GB); the largest that fits still reads.
     CHECK_EQ(parse_size("17179869183G"), 17179869183ull * 1024 * 1024 * 1024);
-    for (const char* big : {"17179869184G", "17179869185g", "17592186044416M", "18446744073709551616"}) {
+    // Refused as out of range, not as malformed: a setting names it too large (the alpha.149 report's note).
+    for (const char* big : {"17179869184G", "17179869185g", "17592186044416M", "18446744073709551616", "99999999999999999999999"}) {
         bool refused = false;
         try {
             (void)parse_size(big);
-        } catch (const std::exception&) { refused = true; }
+        } catch (const std::out_of_range&) { refused = true; } catch (const std::exception&) {}
         if (!refused) std::printf("parse_size(%s) was not refused\n", big);
         CHECK(refused);
     }
@@ -5960,6 +5961,13 @@ static void test_json() {
         CHECK(json::parse(text, back, berr) && back.num() == 4.44454e19);
         CHECK(json::Value(1e300).dump() == "1.0000000000000001e+300");
         CHECK(json::Value(9007199254740992.0).dump() == "9007199254740992");
+        // A whole number past long long's range is still written in digits (exact for a double's
+        // value), up to 1e21: until 0.1.0-alpha.150 1e20 went out as 1e+20 and 2^64 as
+        // 1.8446744073709552e+19, and the bridge relays a setting's value through this writer.
+        CHECK(json::Value(1e20).dump() == "100000000000000000000");
+        CHECK(json::Value(18446744073709551616.0).dump() == "18446744073709551616");
+        CHECK(json::Value(-1e20).dump() == "-100000000000000000000");
+        CHECK(json::Value(1e21).dump() == "1e+21");
         CHECK(json::Value(std::numeric_limits<double>::infinity()).dump() == "null");
         CHECK(json::Value(std::numeric_limits<double>::quiet_NaN()).dump() == "null");
     }
@@ -7562,10 +7570,19 @@ static void test_control_sites() {
                 };
                 CHECK(refused_safely(R"({"proxy_read_timeout":"99999999999999999999"})", "proxy_read_timeout: 99999999999999999999 is above the maximum 3600"));
                 CHECK(refused_safely(R"({"proxy_read_timeout":1e30})", "proxy_read_timeout: 1e+30 is above the maximum 3600"));
+                // A whole JSON number past 2^63 is named in digits, not in a float's form (the alpha.149
+                // report's note: 1e+20, 1.84467440737096e+19).
+                CHECK(refused_safely(R"({"proxy_read_timeout":99999999999999999999})", "proxy_read_timeout: 100000000000000000000 is above the maximum 3600"));
+                CHECK(refused_safely(R"({"proxy_max_connections":18446744073709551616})", "proxy_max_connections: 18446744073709551616 is above the maximum 4096"));
                 CHECK(refused_safely(R"({"proxy_tunnel_timeout":-1})", "proxy_tunnel_timeout: -1 is below the minimum 0"));
                 CHECK(refused_safely(R"({"proxy_tunnel_timeout":"-1"})", "proxy_tunnel_timeout: -1 is below the minimum 0"));
                 CHECK(refused_safely(R"({"proxy_read_timeout":2.5})", "whole number") && refused_safely(R"({"proxy_read_timeout":"-"})", "whole number"));
-                CHECK(refused_safely(R"({"max_body_size":"17179869185G"})", "not a size", true));  // 2^34 + 1 GB: wrapped to 1 GB before
+                // A size past 2^64 bytes is a size too large, named as given, not "not a size" (the alpha.149
+                // report's note); 2^34 + 1 GB wrapped to 1 GB before 0.1.0-alpha.149.
+                CHECK(refused_safely(R"({"max_body_size":"17179869185G"})", "max_body_size: 17179869185G is above the", true));
+                CHECK(refused_safely(R"({"max_body_size":"17179869184G"})", "max_body_size: 17179869184G is above the", true));
+                CHECK(refused_safely(R"({"max_body_size":"99999999999999999999999"})", "max_body_size: 99999999999999999999999 is above the", true));
+                CHECK(refused_safely(R"({"max_body_size":"12 parsecs"})", "not a size", true));
                 int listed = 0;
                 const json::Value catalog = settings_catalog(loaded, nullptr);
                 for (const auto& d : catalog["settings"].items()) {

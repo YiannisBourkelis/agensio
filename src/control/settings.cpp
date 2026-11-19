@@ -95,16 +95,22 @@ Whole size_value(const json::Value& v, std::size_t& out) {
     try {
         out = parse_size(v.str());
         return Whole::ok;
+    } catch (const std::out_of_range&) {
+        return Whole::too_large;  // a size past 2^64 bytes: "not a size" until 0.1.0-alpha.150
     } catch (const std::exception&) {
         return Whole::no;
     }
 }
 
-// The value as it was given, for a refusal of one the server does not hold as a number.
+// The value as it was given, for a refusal of one the server does not hold as a number. A whole JSON
+// number is written in digits below 1e21 (it reached here as a double, so 99999999999999999999 reads
+// 100000000000000000000): "1e+20" until 0.1.0-alpha.150 (the alpha.149 report's note).
 std::string given_text(const json::Value& v) {
     if (v.is_string()) return v.str();
     char buf[32];
-    std::snprintf(buf, sizeof buf, "%.15g", v.num());
+    const double d = v.num();
+    if (std::fabs(d) < 1e21 && d == std::floor(d)) std::snprintf(buf, sizeof buf, "%.0f", d);
+    else std::snprintf(buf, sizeof buf, "%.15g", d);
     return buf;
 }
 

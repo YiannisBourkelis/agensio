@@ -84,6 +84,9 @@ std::size_t parse_size(std::string_view text) {
     if (start == i) throw std::invalid_argument("size must start with a number: '" + std::string(text) + "'");
     std::uint64_t value = 0;
     auto [ptr, ec] = std::from_chars(text.data() + start, text.data() + i, value);
+    // Too large is std::out_of_range, any other refusal std::invalid_argument: a setting names the one
+    // too large as such (control/settings.cpp; "not a size" until 0.1.0-alpha.150).
+    if (ec == std::errc::result_out_of_range) throw std::out_of_range("size too large: '" + std::string(text) + "'");
     if (ec != std::errc()) throw std::invalid_argument("bad size: '" + std::string(text) + "'");
     std::string unit;
     for (; i < text.size(); ++i) {
@@ -98,7 +101,7 @@ std::size_t parse_size(std::string_view text) {
     else if (unit == "g" || unit == "gb" || unit == "gib") mult = 1024ull * 1024 * 1024;
     else throw std::invalid_argument("unknown size unit '" + unit + "' in '" + std::string(text) + "'");
     // Past 2^64 bytes the product wrapped: 2^34 + 1 GB read as 1 GB (until 0.1.0-alpha.149).
-    if (value > UINT64_MAX / mult) throw std::invalid_argument("size too large: '" + std::string(text) + "'");
+    if (value > UINT64_MAX / mult) throw std::out_of_range("size too large: '" + std::string(text) + "'");
     return static_cast<std::size_t>(value * mult);
 }
 
