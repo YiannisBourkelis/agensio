@@ -1,0 +1,21 @@
+Acquire-By-Hash: yes
+Architectures: amd64
+Codename: stable
+Components: main
+Date: Thu, 19 Nov 2026 03:42:16 +0000
+Description: agensio web server (stable)
+Label: agensio
+Origin: agensio
+Suite: stable
+MD5Sum:
+ fd3ecf4aebe3258d554be75bad447957             1814 main/binary-amd64/Packages
+ a380f5c39506d145816689253ac7ebcb              817 main/binary-amd64/Packages.gz
+SHA1:
+ 71840af7c9dfa27f3e47a16c5ae4b88acd64f795             1814 main/binary-amd64/Packages
+ a70d015ee410310bbe28cbbcd7869781c9271660              817 main/binary-amd64/Packages.gz
+SHA256:
+ 451db5996243246567b7e74fa61bf3052727fa1afdab6b3bed4911abe704ae85             1814 main/binary-amd64/Packages
+ a0c8a983a083e1b81f5e10aa36448654a6a3b970bb5c8227261d911cf439a75c              817 main/binary-amd64/Packages.gz
+SHA512:
+ 29657f35d107e38929d316603f95dbebfd90dd1d53ad08e0044680ab8d32bda015aef8c49ef0eef01af9fb7fc0feb505181d82d187cd9a3cccfaae3085818e9e             1814 main/binary-amd64/Packages
+ 46e7ae8f0f3a2a57d00f82aa3c76128441f72a681df106d5103c7e0fe4b5933d884376a81f5342cb8bb1b8507264dd772a4560c8f1f235f1fb65bac0e16dee9f              817 main/binary-amd64/Packages.gz
