@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.150 (unreleased)
+## 0.1.0-alpha.150 (2026-11-19)
 
 - **An origin's empty `Content-Length` is a 502.** A `Content-Length` field with no value was taken
   as no length: the body ran to the connection's close and reached the client as a `200`, chunked
