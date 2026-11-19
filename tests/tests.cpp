@@ -331,8 +331,16 @@ static void test_security_parser() {
         CHECK(r.target == "/p" && r.host == "b.test" && r.headers.get("host") == "b.test");
         CHECK(st("GET http://[::1]:8080/p HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::complete);
         CHECK(r.target == "/p" && r.host == "[::1]:8080");
-        // HTTP/1.1 still needs its Host field (RFC 9112 3.2), whatever the target says.
-        CHECK(st("GET http://b.test/ HTTP/1.1\r\n\r\n") == ParseStatus::bad_request);
+        // HTTP/1.1 still needs its Host field (RFC 9112 3.2), whatever the target says: the request is left
+        // without one, so the dispatcher answers the 400 an origin-form request without one gets (until
+        // 0.1.0-alpha.150 the parser refused it and the connection logged a line that "did not parse").
+        CHECK(st("GET http://b.test/x HTTP/1.1\r\n\r\n") == ParseStatus::complete);
+        CHECK(r.target == "/x" && r.host.empty() && !r.headers.contains("host"));
+        // An empty host, with a port or without, is no host (RFC 9110 4.2.1: a recipient MUST reject such
+        // a URI; the alpha.149 report's F3: http://:PORT/ chose no site and was a 421).
+        CHECK(st("GET http://:8080/ HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::bad_request);
+        CHECK(st("GET https://:/x HTTP/1.0\r\n\r\n") == ParseStatus::bad_request);
+        CHECK(st("GET http://: HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::bad_request);
         // Userinfo (RFC 9110 4.2.4), an empty host, a byte Host refuses, an empty path before a query.
         CHECK(st("GET http://user@b.test/ HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::bad_request);
         CHECK(st("GET http:///x HTTP/1.1\r\nHost: a\r\n\r\n") == ParseStatus::bad_request);

@@ -652,6 +652,11 @@ check "strict: OPTIONS * with an unknown Host is 421" "421" "$(printf 'OPTIONS *
 absf() { printf "$1" | ncq 127.0.0.1 "$2" | head -1 | awk '{print $2}'; }
 check "absolute-form: the target's host chooses the site over Host, either way round; an upper-case scheme and a port; HTTP/1.0 without Host; userinfo and HTTP/1.1 without Host are 400" "200 421 200 200 400 400" \
   "$(absf 'GET http://strict.test/ HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n' 8099) $(absf 'GET http://evil.example.com/ HTTP/1.1\r\nHost: strict.test\r\nConnection: close\r\n\r\n' 8099) $(absf 'GET HTTP://STRICT.TEST:8099/ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' 8099) $(absf 'GET http://strict.test/ HTTP/1.0\r\n\r\n' 8099) $(absf 'GET http://u@strict.test/ HTTP/1.1\r\nHost: strict.test\r\nConnection: close\r\n\r\n' 8099) $(absf 'GET http://strict.test/ HTTP/1.1\r\nConnection: close\r\n\r\n' 8099)"
+# An empty host is no host, with a port or without (RFC 9110 4.2.1: a recipient MUST reject such a URI;
+# the alpha.149 report's F3: http://:PORT/ was a 421). An HTTP/1.1 request in the absolute-form without a
+# Host field is the dispatcher's 400, as an origin-form one is, never a "did not parse" warning (its note).
+check "absolute-form: an empty host is 400, with a port too; HTTP/1.1 without Host is the 400 an origin-form request gets, with no warning" "400 400 400 400 0" \
+  "$(absf 'GET http://:8099/ HTTP/1.1\r\nHost: strict.test\r\nConnection: close\r\n\r\n' 8099) $(absf 'GET http://:8099/ HTTP/1.0\r\n\r\n' 8099) $(absf 'GET http://:/x HTTP/1.1\r\nHost: strict.test\r\nConnection: close\r\n\r\n' 8099) $(absf 'GET http://strict.test/no-host-probe HTTP/1.1\r\nConnection: close\r\n\r\n' 8099) $(sleep 0.3; grep -c 'did not parse.*no-host-probe' bench/tmp/error.log)"
 ABSP=$(printf 'GET http://abs.example/php/params.php?abs=1 HTTP/1.1\r\nHost: wrong.example\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080)
 absf 'GET http://strict.test/abs-form-probe HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n' 8099 > /dev/null
 sleep 1.3

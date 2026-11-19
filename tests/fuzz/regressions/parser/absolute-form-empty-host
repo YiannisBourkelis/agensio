@@ -1,0 +1,5 @@
+GET http://:8080/x HTTP/1.1
+Host: a
+
+GET https://:/ HTTP/1.0
+

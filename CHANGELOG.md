@@ -32,6 +32,12 @@
   alpha.149's entry: a 204 and a 304 from a script carry no `Content-Length` (RFC 9110 8.6); only a
   HEAD's answer keeps the length declared.
 
+- **An absolute-form target with an empty host is a 400.** `GET http://:8080/ HTTP/1.1` chose no
+  site and answered `421`, where RFC 9110 4.2.1 has a recipient reject an `http` URI with an empty
+  host, as `http:///` already was (the same report, F3). An HTTP/1.1 request in the absolute-form
+  without a Host field is now the 400 an origin-form one gets, without the warning that its request
+  line "did not parse" (the same report's note). `docs/configuration.md` 1b describes the form.
+
 ## 0.1.0-alpha.149 (2026-11-18)
 
 - **A streamed answer of known length ends over HTTP/2 without TLS (h2c).** Since 0.1.0-alpha.147,

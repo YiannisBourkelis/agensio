@@ -183,6 +183,15 @@ the port. On each listen address exactly one site may be the **catch-all**: the 
 `server_name = ["*"]`, or with `default = true`. It answers every other Host, requests
 by IP address, and HTTP/1.0 requests without a Host header.
 
+A request whose target is an absolute URI (`GET http://example.com/page HTTP/1.1`, the form a
+proxy is sent and RFC 9112 3.2.2 has every server accept) is read as if its host were the Host
+field and its path the target: the target's host chooses the site, is what the certificate must
+cover (the 421 below), is the Host the application is told (`HTTP_HOST`) and an origin receives,
+and begins the access-log line, whose request line is `GET /page HTTP/1.1`. Only `http` and
+`https`; an empty host (`http://:8080/`), userinfo (`http://user@host/`) or an empty path before a
+query (`http://host?q`) is a 400, and HTTP/1.1 still needs a Host field, as in the origin-form
+(0.1.0-alpha.149; an empty host before a port was a 421 until 0.1.0-alpha.150).
+
 A listener **without** a catch-all is strict: a request whose Host no site on it lists
 answers `421 Misdirected Request` with `Cache-Control: no-store` and a constant body.
 Nothing reaches an application for a name it did not claim, so forged Host headers

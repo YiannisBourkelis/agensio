@@ -78,10 +78,14 @@ enum class Absolute { other, done, bad, full };
 // HTTP_HOST or to an origin), so the site chosen and the host the application is told never differ, and
 // the target becomes its origin-form, the one routing, the logs, the fail2ban filters and an origin read.
 // Only http and https (RFC 9110 4.2); any other target is left as it came (CONNECT's authority-form,
-// or what the router refuses). 400: userinfo (RFC 9110 4.2.4), an empty host, a byte Host refuses, and
-// an empty path before a query or fragment, the one form whose origin-form ("/?q") is not in the buffer
-// (RFC 9110 4.2.3: clients send the normal form, "/"). Until 0.1.0-alpha.149 every absolute-form
-// target was 400 (the alpha.148 report, F5).
+// or what the router refuses). 400: userinfo (RFC 9110 4.2.4), an empty host with a port or without
+// (RFC 9110 4.2.1: a recipient MUST reject it; "http://:8080/" chose no site and was a 421 until
+// 0.1.0-alpha.150, the alpha.149 report's F3), a byte Host refuses, and an empty path before a query or
+// fragment, the one form whose origin-form ("/?q") is not in the buffer (RFC 9110 4.2.3: clients send
+// the normal form, "/"). Until 0.1.0-alpha.149 every absolute-form target was 400 (the alpha.148
+// report, F5). An HTTP/1.1 request without a Host field gets none here, so the dispatcher answers it
+// the 400 an origin-form one gets (RFC 9112 3.2); until 0.1.0-alpha.150 the parser refused it, and the
+// connection logged a request line that "did not parse" (the alpha.149 report's note).
 Absolute absolute_form(Request& out, std::size_t host_index) noexcept {
     std::string_view t = out.target;
     if (t.size() > 7 && iequals(slice(t, 0, 7), "http://")) t.remove_prefix(7);
@@ -89,13 +93,21 @@ Absolute absolute_form(Request& out, std::size_t host_index) noexcept {
     else return Absolute::other;
     const std::size_t end = t.find_first_of("/?#");
     const std::string_view authority = slice(t, 0, end == std::string_view::npos ? t.size() : end);
-    if (authority.empty() || authority.find('@') != std::string_view::npos || !host_bytes_ok(authority)) return Absolute::bad;
-    std::string_view path = end == std::string_view::npos ? std::string_view("/") : slice(t, end);
+    if (authority.empty() || authority.front() == ':' || authority.find('@') != std::string_view::npos || !host_bytes_ok(authority))
+        return Absolute::bad;
+    // No path: the normal form "/" (RFC 9110 4.2.3), the second slash of "//" before the authority, so the
+    // target is a view of the request's bytes as every view the parser returns is (fuzz_parser's rule;
+    // until 0.1.0-alpha.150 it was a string literal, harmless, and the fuzzer's assertion stopped on it).
+    std::string_view path = end == std::string_view::npos ? std::string_view(t.data() - 1, 1) : slice(t, end);
     if (path[0] != '/') return Absolute::bad;
     out.target = path;
-    out.host = authority;
-    if (host_index != Headers::kCapacity) out.headers.set_value(host_index, authority);
-    else if (!out.headers.add("host", authority)) return Absolute::full;  // HTTP/1.0 without one: handlers see HTTP/1.1's shape
+    if (host_index != Headers::kCapacity) {
+        out.host = authority;
+        out.headers.set_value(host_index, authority);
+    } else if (out.version_minor == 0) {  // HTTP/1.0 may omit Host: the field is added, handlers see HTTP/1.1's shape
+        out.host = authority;
+        if (!out.headers.add("host", authority)) return Absolute::full;
+    }
     return Absolute::done;
 }
 
@@ -247,10 +259,7 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
     if (out.target[0] != '/') {  // the absolute-form (one test on the hot path: origin-form starts with '/')
         switch (absolute_form(out, host_index)) {
             case Absolute::other: break;
-            case Absolute::done:
-                // Still an HTTP/1.1 request without a Host field (RFC 9112 3.2: 400, whatever the target).
-                if (out.version_minor == 1 && !seen_host) return ParseStatus::bad_request;
-                break;
+            case Absolute::done: break;
             case Absolute::bad: return ParseStatus::bad_request;
             case Absolute::full: return ParseStatus::too_many_headers;
         }
