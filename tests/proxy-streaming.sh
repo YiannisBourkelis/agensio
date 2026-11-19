@@ -105,6 +105,13 @@ check "an origin's invalid framing is a 502 on a streaming site as on a buffered
   "$(for u in badlen/99999999999999999999 badlen/-1 badlen/1e9 badlen/+10 emptylen twolen upgrade; do for p in 18481 18483; do
        curl -s -o /dev/null --max-time 10 -w '%{http_code} ' "http://127.0.0.1:$p/$u"; done; done | sed 's/ $//')"
 
+# An answer framed by Transfer-Encoding with a Content-Length beside it: the transfer coding frames it and
+# the length is dropped (RFC 9112 6.3), streamed as buffered. Until 0.1.0-alpha.150 a streaming site
+# declared the origin's length to the client and cut the body to it (5 bytes of 100,000).
+check "an origin's chunked answer with a Content-Length beside it arrives whole, streamed and buffered, small and large" \
+  "${SHA[700]} ${SHA[100000]} ${SHA[700]} ${SHA[100000]} ${SHA[100000]}" \
+  "$(got "http://127.0.0.1:18481/tecl/700") $(got "http://127.0.0.1:18481/tecl/100000") $(got "http://127.0.0.1:18483/tecl/700") $(got "http://127.0.0.1:18483/tecl/100000") $(got --http2 "https://127.0.0.1:18482/tecl/100000")"
+
 # Clients that leave mid-body, more of them than the location has connections: every slot comes
 # back (a read in flight into a gone client's buffer is cancelled, the exchange ended), the server
 # stands, and the next answer is whole.

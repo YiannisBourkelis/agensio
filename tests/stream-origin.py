@@ -13,6 +13,7 @@ head, read into the writer's buffer, decoded, read ahead) each meet bodies aroun
   /badlen/V     Content-Length V as written (not a number agensio can hold), 10 bytes, closes
   /twolen       two Content-Length fields that disagree (10 and 5), 10 bytes
   /emptylen     a Content-Length field with no value, 10 bytes, closes
+  /tecl/N       chunked, with a Content-Length of 5 beside it, N bytes
   /upgrade      a 101 the request did not ask for
   /sha/N        the sha256 of the N-byte body, as text
   /stats        connections accepted so far, as text
@@ -90,6 +91,12 @@ def serve(conn):
             elif kind == "emptylen":
                 conn.sendall(ok + b"Content-Length: \r\n\r\n0123456789")
                 return
+            elif kind == "tecl":
+                wire = ok + b"Transfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n"
+                for at in range(0, len(data), 7000):
+                    piece = data[at:at + 7000]
+                    wire += b"%x\r\n" % len(piece) + piece + b"\r\n"
+                conn.sendall(wire + b"0\r\n\r\n")
             elif kind == "twolen":
                 conn.sendall(ok + b"Content-Length: 10\r\nContent-Length: 5\r\n\r\n0123456789")
             elif kind == "upgrade":

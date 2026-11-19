@@ -56,6 +56,13 @@ private:
         return remaining_ == 0;
     }
     bool keep_alive_ok() const noexcept override { return keep_alive_; }
+    // An answer a transfer coding frames declares no length, whatever Content-Length says beside it
+    // (RFC 9112 6.3: the coding overrides it, and an intermediary removes it before forwarding).
+    // Until 0.1.0-alpha.150 a streaming location took that length: the client was told 5 bytes and
+    // given the first 5 of a chunked body of 100,000, where a buffering one sent it whole.
+    bool declared_length(std::uint64_t& out) const noexcept override {
+        return !transfer_coded_ && UpstreamRequest::declared_length(out);
+    }
     const char* kind() const noexcept override { return "proxy"; }
     bool on_head_complete();  // decides the framing from the parsed head
 
@@ -64,6 +71,7 @@ private:
     bool upgrade_ = false;  // an Upgrade request: "Connection: Upgrade" goes out, a 101 becomes a tunnel
     bool chunked_out_ = false;  // the request body goes out chunked (size unknown)
     Framing framing_ = Framing::none;
+    bool transfer_coded_ = false;  // the answer's head has a Transfer-Encoding field
     std::uint64_t remaining_ = 0;  // Framing::length: body bytes still expected
     ChunkedDecoder decoder_;
     std::string decoded_;          // one decode step's output

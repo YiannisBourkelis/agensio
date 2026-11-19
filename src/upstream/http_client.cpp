@@ -82,8 +82,10 @@ bool HttpRequest::on_head_complete() {
         return true;
     }
     const std::string_view te = result_.headers.get("transfer-encoding");
-    if (!te.empty()) {
+    transfer_coded_ = !te.empty();
+    if (transfer_coded_) {
         // Only "chunked" (as the last coding) is delimited; anything else ends with the connection.
+        // A Content-Length beside it frames nothing and is no length of the answer (declared_length).
         if (te.size() >= 7 && Headers::iequals(te.substr(te.size() - 7), "chunked")) {
             framing_ = Framing::chunked;
             decoder_.reset();

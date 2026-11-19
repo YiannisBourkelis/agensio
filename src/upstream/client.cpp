@@ -693,17 +693,21 @@ void UpstreamRequest::reader_gone() noexcept {
     cancel();
 }
 
+bool UpstreamRequest::declared_length(std::uint64_t& out) const noexcept {
+    // Digits only (from_chars takes no sign for an unsigned type) and within 64 bits: an origin's
+    // length was checked before this (refuse_head), a script's was not, and its 20-digit value
+    // wrapped here (until 0.1.0-alpha.149). One that does not parse, or is empty, declares nothing.
+    const std::string_view cl = result_.headers.get("content-length");
+    std::uint64_t n = 0;
+    const auto r = std::from_chars(cl.data(), cl.data() + cl.size(), n);
+    if (cl.empty() || r.ec != std::errc() || r.ptr != cl.data() + cl.size()) return false;
+    out = n;
+    return true;
+}
+
 std::unique_ptr<StreamBody> UpstreamRequest::body_source(bool head) {
     std::uint64_t length = 0;
-    bool sized = false;
-    if (const std::string_view cl = result_.headers.get("content-length"); !cl.empty()) {
-        // Digits only (from_chars takes no sign for an unsigned type) and within 64 bits: an origin's
-        // length was checked before this (refuse_head), a script's was not, and its 20-digit value
-        // wrapped here (until 0.1.0-alpha.149). One that does not parse leaves the body unsized.
-        const auto r = std::from_chars(cl.data(), cl.data() + cl.size(), length);
-        sized = r.ec == std::errc() && r.ptr == cl.data() + cl.size();
-        if (!sized) length = 0;
-    }
+    const bool sized = declared_length(length);
     sized_ = sized;
     declared_ = length;
     bodiless_ = head || result_.status == 204 || result_.status == 304;
@@ -1225,11 +1229,12 @@ void UpstreamRequest::finish() {
 // chunked answer, a script's output: the client gets it with the length agensio counted, as from a
 // buffering location, where it got it chunked until 0.1.0-alpha.147), or the one its body has.
 bool UpstreamRequest::whole_as_declared() const noexcept {
-    const std::string_view cl = result_.headers.get("content-length");
-    if (cl.empty()) return true;
+    if (!result_.headers.contains("content-length")) return true;
     std::uint64_t declared = 0;
-    const auto r = std::from_chars(cl.data(), cl.data() + cl.size(), declared);
-    return r.ec == std::errc() && r.ptr == cl.data() + cl.size() && declared == result_.body.size();
+    // A length that declares nothing (not a number from a script, beside a transfer coding from an
+    // origin) leaves the answer to the length counted, as a buffering location sends it.
+    if (!declared_length(declared)) return true;
+    return declared == result_.body.size();
 }
 
 // A script's whole answer (hold_script_length), its head not gone yet: the Content-Length it wrote
@@ -1237,11 +1242,8 @@ bool UpstreamRequest::whole_as_declared() const noexcept {
 // as before; a HEAD, a 1xx, 204 or 304 has no body to hold.
 bool UpstreamRequest::held_to_script_length() {
     if (head_request_ || result_.status < 200 || result_.status == 204 || result_.status == 304) return true;
-    const std::string_view cl = result_.headers.get("content-length");
-    if (cl.empty()) return true;
     std::uint64_t declared = 0;
-    const auto r = std::from_chars(cl.data(), cl.data() + cl.size(), declared);
-    if (r.ec != std::errc() || r.ptr != cl.data() + cl.size() || declared == result_.body_size) return true;
+    if (!declared_length(declared) || declared == result_.body_size) return true;
     result_.script_declared = declared;
     result_.script_sent = result_.body_size;
     if (result_.body_size < declared) {

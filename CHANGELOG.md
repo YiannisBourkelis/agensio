@@ -10,6 +10,13 @@
   other such value. It is a 502 now, with `bad_response_head` in the error log, as they are. A PHP
   or CGI script's empty length still declares nothing, as one that is not a number does.
 
+- **An origin's chunked answer with a `Content-Length` beside it arrives whole on a streaming
+  location.** RFC 9112 6.3 has the transfer coding frame such an answer and a proxy remove the
+  length before forwarding it. A buffering location did; a streaming one told the client the
+  origin's length and cut the body to it, 5 bytes of a 100,000-byte chunked answer, with nothing in
+  the error log (found while checking the same report's F1). The client now gets the body whole,
+  chunked or with the length counted, as from a buffering location.
+
 ## 0.1.0-alpha.149 (2026-11-18)
 
 - **A streamed answer of known length ends over HTTP/2 without TLS (h2c).** Since 0.1.0-alpha.147,

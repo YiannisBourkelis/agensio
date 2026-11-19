@@ -340,6 +340,10 @@ protected:
     virtual bool on_eof() { return false; }
     // Whether the connection may serve another exchange after this one.
     virtual bool keep_alive_ok() const noexcept { return true; }
+    // The answer's body length as its head declares it: its Content-Length, when that is a number
+    // (a script's field is not checked before, so one that is not a number declares nothing). The
+    // HTTP client declares none for an answer a transfer coding frames.
+    virtual bool declared_length(std::uint64_t& out) const noexcept;
     // Opens the connection for a fresh slot: connects the socket (default) or, for CGI,
     // spawns the process; ends with connected() or fail().
     virtual void connect();
