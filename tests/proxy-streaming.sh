@@ -98,9 +98,11 @@ check "an origin that closes halfway: streamed, the client sees a short body; bu
 # An origin's head whose framing cannot be trusted is discarded and answered 502, streamed or buffered
 # (RFC 9112 6.3): a Content-Length that is no number agensio can hold, two that disagree, a 101 nobody
 # asked for. Until 0.1.0-alpha.149 a streaming site sent the first three on as a 200 (a 20-digit
-# length wrapped past 2^64, the others chunked and cut), the alpha.148 report's F2.
-check "an origin's invalid framing is a 502 on a streaming site as on a buffered one" "502 502 502 502 502 502 502 502 502 502 502 502" \
-  "$(for u in badlen/99999999999999999999 badlen/-1 badlen/1e9 badlen/+10 twolen upgrade; do for p in 18481 18483; do
+# length wrapped past 2^64, the others chunked and cut), the alpha.148 report's F2. An empty
+# Content-Length is no number either (RFC 9110 8.6: 1*DIGIT): until 0.1.0-alpha.150 both kinds of
+# site sent it on as a 200 (the alpha.149 report's F1).
+check "an origin's invalid framing is a 502 on a streaming site as on a buffered one" "502 502 502 502 502 502 502 502 502 502 502 502 502 502" \
+  "$(for u in badlen/99999999999999999999 badlen/-1 badlen/1e9 badlen/+10 emptylen twolen upgrade; do for p in 18481 18483; do
        curl -s -o /dev/null --max-time 10 -w '%{http_code} ' "http://127.0.0.1:$p/$u"; done; done | sed 's/ $//')"
 
 # Clients that leave mid-body, more of them than the location has connections: every slot comes

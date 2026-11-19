@@ -12,6 +12,7 @@ head, read into the writer's buffer, decoded, read ahead) each meet bodies aroun
   /cut/N        declares N, sends half and closes
   /badlen/V     Content-Length V as written (not a number agensio can hold), 10 bytes, closes
   /twolen       two Content-Length fields that disagree (10 and 5), 10 bytes
+  /emptylen     a Content-Length field with no value, 10 bytes, closes
   /upgrade      a 101 the request did not ask for
   /sha/N        the sha256 of the N-byte body, as text
   /stats        connections accepted so far, as text
@@ -85,6 +86,9 @@ def serve(conn):
                 return
             elif kind == "badlen":
                 conn.sendall(ok + b"Content-Length: " + parts[1].encode() + b"\r\n\r\n0123456789")
+                return
+            elif kind == "emptylen":
+                conn.sendall(ok + b"Content-Length: \r\n\r\n0123456789")
                 return
             elif kind == "twolen":
                 conn.sendall(ok + b"Content-Length: 10\r\nContent-Length: 5\r\n\r\n0123456789")

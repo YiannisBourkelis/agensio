@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0-alpha.150 (unreleased)
+
+- **An origin's empty `Content-Length` is a 502.** A `Content-Length` field with no value was taken
+  as no length: the body ran to the connection's close and reached the client as a `200`, chunked
+  from a streaming location and with the length counted from a buffering one, over every protocol
+  (the test VPS's report on alpha.149, F1). RFC 9110 8.6 makes the value one or more digits, and
+  RFC 9112 6.3 has a proxy discard a response whose length is invalid, which alpha.149 did for every
+  other such value. It is a 502 now, with `bad_response_head` in the error log, as they are. A PHP
+  or CGI script's empty length still declares nothing, as one that is not a number does.
+
 ## 0.1.0-alpha.149 (2026-11-18)
 
 - **A streamed answer of known length ends over HTTP/2 without TLS (h2c).** Since 0.1.0-alpha.147,

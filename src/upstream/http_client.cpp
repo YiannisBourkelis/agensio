@@ -93,21 +93,28 @@ bool HttpRequest::on_head_complete() {
         }
         return true;
     }
-    if (const std::string_view cl = result_.headers.get("content-length"); !cl.empty()) {
-        std::uint64_t n = 0;
-        const auto r = std::from_chars(cl.data(), cl.data() + cl.size(), n);
-        if (r.ec != std::errc() || r.ptr != cl.data() + cl.size()) {
-            refuse_head(UpstreamFailure::bad_response_head);
-            return true;
-        }
-        // Two fields that disagree are as invalid as one that does not parse (RFC 9112 6.3: the
-        // response is discarded, 502); repeats of one value may stand for it (RFC 9110 8.6). Until
-        // 0.1.0-alpha.149 the first one framed the body, whatever the others said.
-        for (const HeaderField& h : result_.headers)
-            if (Headers::iequals(h.name, "content-length") && h.value != cl) {
+    // Content-Length = 1*DIGIT (RFC 9110 8.6): a field present with no number, an empty value
+    // included, and two fields that disagree make the framing invalid (RFC 9112 6.3: the response is
+    // discarded, 502); repeats of one value may stand for it. Until 0.1.0-alpha.149 the first field
+    // framed the body whatever the others said, and until 0.1.0-alpha.150 an empty one was no field
+    // (the body read to the connection's close; the alpha.149 report's F1).
+    const HeaderField* cl = nullptr;
+    for (const HeaderField& h : result_.headers)
+        if (Headers::iequals(h.name, "content-length")) {
+            if (!cl) cl = &h;
+            else if (h.value != cl->value) {
                 refuse_head(UpstreamFailure::bad_response_head);
                 return true;
             }
+        }
+    if (cl) {
+        std::uint64_t n = 0;
+        const std::string_view v = cl->value;
+        const auto r = std::from_chars(v.data(), v.data() + v.size(), n);  // an empty value: invalid_argument
+        if (r.ec != std::errc() || r.ptr != v.data() + v.size()) {
+            refuse_head(UpstreamFailure::bad_response_head);
+            return true;
+        }
         framing_ = Framing::length;
         remaining_ = n;
         return true;
